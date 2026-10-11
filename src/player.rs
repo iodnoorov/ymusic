@@ -42,6 +42,11 @@ impl Player {
                 "--cache=yes",
                 "--force-window=no",
                 "--keep-open=no",
+                // Preload: the next playlist entry starts downloading once the current one is fully read.
+                "--prefetch-playlist=yes",
+                // A whole track fits; the default (150 MiB) is far more than music needs.
+                "--demuxer-max-bytes=24MiB",
+                "--demuxer-max-back-bytes=8MiB",
             ])
             .arg(format!("--volume={volume}"))
             .arg(format!("--input-ipc-server={}", sock.display()))
@@ -62,12 +67,21 @@ impl Player {
 
         let reader = stream.try_clone()?;
         std::thread::spawn(move || {
+            // time-pos changes many times per second; forward at most ~4 updates/s.
+            let mut last_pos = f64::NEG_INFINITY;
             for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
                 let ev = match v["event"].as_str() {
                     Some("property-change") => match (v["name"].as_str(), &v["data"]) {
-                        (Some("time-pos"), Value::Number(n)) => PlayerEvent::TimePos(n.as_f64().unwrap_or(0.0)),
+                        (Some("time-pos"), Value::Number(n)) => {
+                            let t = n.as_f64().unwrap_or(0.0);
+                            if (t - last_pos).abs() < 0.25 {
+                                continue;
+                            }
+                            last_pos = t;
+                            PlayerEvent::TimePos(t)
+                        }
                         (Some("duration"), Value::Number(n)) => PlayerEvent::Duration(n.as_f64().unwrap_or(0.0)),
                         (Some("pause"), Value::Bool(b)) => PlayerEvent::Pause(*b),
                         (Some("volume"), Value::Number(n)) => PlayerEvent::Volume(n.as_f64().unwrap_or(0.0)),
@@ -103,6 +117,16 @@ impl Player {
 
     pub fn load(&mut self, url: &str) {
         self.cmd(json!(["loadfile", url, "replace"]));
+        self.cmd(json!(["set_property", "pause", false]));
+    }
+
+    /// Appends a URL to mpv's playlist (it is prefetched and played after the current one).
+    pub fn append(&mut self, url: &str) {
+        self.cmd(json!(["loadfile", url, "append"]));
+    }
+
+    pub fn playlist_next(&mut self) {
+        self.cmd(json!(["playlist-next", "force"]));
         self.cmd(json!(["set_property", "pause", false]));
     }
 

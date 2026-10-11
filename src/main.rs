@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use config::Config;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(name = "yamusic", version, about = "Яндекс Музыка в терминале: Моя волна, лайки, станции")]
@@ -87,16 +87,28 @@ fn main() -> Result<()> {
             .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16))),
     );
     let res = (|| -> Result<()> {
+        // Redraw only when something changed: immediately on input/messages,
+        // otherwise at 5 fps while something animates and 1 fps when idle.
+        let mut dirty = true;
+        let mut last_draw = Instant::now();
         while !app.quit {
-            terminal.draw(|f| ui::draw(f, &mut app))?;
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(k) = event::read()? {
-                    if k.kind == KeyEventKind::Press {
-                        app.on_key(k);
-                    }
+            let frame = Duration::from_millis(if app.is_animating() { 200 } else { 1000 });
+            if dirty || last_draw.elapsed() >= frame {
+                terminal.draw(|f| ui::draw(f, &mut app))?;
+                last_draw = Instant::now();
+                dirty = false;
+            }
+            if event::poll(Duration::from_millis(50))? {
+                match event::read()? {
+                    Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
+                    Event::Resize(..) => {}
+                    _ => continue,
                 }
+                dirty = true;
             }
             while let Ok(m) = rx.try_recv() {
+                // Playback position is shown by the regular animation frames.
+                dirty |= !matches!(m, app::Msg::Player(player::PlayerEvent::TimePos(_)));
                 app.on_msg(m);
             }
         }

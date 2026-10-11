@@ -7,7 +7,8 @@ use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Row, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Row, Table, TableState,
+    Wrap,
 };
 use ratatui::Frame;
 use ratatui_image::{FilterType, Resize, StatefulImage};
@@ -140,7 +141,7 @@ fn fmt_time(secs: f64) -> String {
 
 fn equalizer(tick: u64) -> &'static str {
     const FRAMES: [&str; 6] = ["▁▃▅", "▂▅▃", "▃▂▆", "▅▁▄", "▆▃▂", "▄▆▁"];
-    FRAMES[(tick / 2) as usize % FRAMES.len()]
+    FRAMES[tick as usize % FRAMES.len()]
 }
 
 fn spinner(tick: u64) -> &'static str {
@@ -347,12 +348,44 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
 
 // ---------------------------------------------------------------- track tables
 
-fn track_table<'a>(app: &App, tracks: &'a [Track], playing: Option<usize>, history: bool) -> Table<'a> {
+/// Renders a track table building only the visible rows (lists can hold thousands of tracks).
+#[allow(clippy::too_many_arguments)]
+fn render_tracks(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    tracks: &[Track],
+    state: &mut TableState,
+    playing: Option<usize>,
+    history: bool,
+    block: Block,
+) {
+    // Inner height minus header and its margin.
+    let visible = (block.inner(area).height.saturating_sub(2) as usize).max(1);
+    let sel = state.selected().filter(|&s| s < tracks.len());
+    let mut off = state.offset();
+    if let Some(s) = sel {
+        if s < off {
+            off = s;
+        } else if s >= off + visible {
+            off = s + 1 - visible;
+        }
+    }
+    off = off.min(tracks.len().saturating_sub(visible));
+    *state.offset_mut() = off;
+    let end = (off + visible).min(tracks.len());
+    let table = track_table(app, &tracks[off..end], off, playing, history).block(block);
+    let mut window = TableState::default().with_selected(sel.map(|s| s - off));
+    f.render_stateful_widget(table, area, &mut window);
+}
+
+fn track_table<'a>(app: &App, tracks: &'a [Track], base: usize, playing: Option<usize>, history: bool) -> Table<'a> {
     let i = ic();
     let rows: Vec<Row> = tracks
         .iter()
         .enumerate()
         .map(|(n, t)| {
+            let n = n + base;
             let is_playing = playing == Some(n);
             let num = if is_playing {
                 let s = if app.loading_track {
@@ -446,8 +479,9 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
     let icon = if app.source == Source::Wave { i.wave } else { i.queue };
     let fetching = app.wave.as_ref().is_some_and(|w| w.fetching);
     let title = if fetching { format!("{title} · {}", spinner(app.tick)) } else { title };
-    let table = track_table(app, &app.queue, app.pos, true).block(panel(icon, title));
-    f.render_stateful_widget(table, area, &mut app.queue_state);
+    let mut st = std::mem::take(&mut app.queue_state);
+    render_tracks(f, area, app, &app.queue, &mut st, app.pos, true, panel(icon, title));
+    app.queue_state = st;
 }
 
 fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
@@ -460,8 +494,9 @@ fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
         .then(|| app.current().map(|c| c.id.clone()))
         .flatten()
         .and_then(|id| app.liked.iter().position(|t| t.id == id));
-    let table = track_table(app, &app.liked, playing, false).block(panel(ic().liked, title));
-    f.render_stateful_widget(table, area, &mut app.liked_state);
+    let mut st = std::mem::take(&mut app.liked_state);
+    render_tracks(f, area, app, &app.liked, &mut st, playing, false, panel(ic().liked, title));
+    app.liked_state = st;
 }
 
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
@@ -473,7 +508,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         spans.push(Span::styled(app.search_input.clone(), Style::new().fg(Color::Reset).bold()));
     }
-    if app.search_editing && (app.tick / 5).is_multiple_of(2) {
+    if app.search_editing && (app.tick / 2).is_multiple_of(2) {
         spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
     }
     f.render_widget(
@@ -492,8 +527,9 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let current = app.current().map(|c| c.id.clone());
     let playing = current.and_then(|id| app.search_results.iter().position(|t| t.id == id));
-    let table = track_table(app, &app.search_results, playing, false).block(panel(i.search, title));
-    f.render_stateful_widget(table, results, &mut app.search_state);
+    let mut st = std::mem::take(&mut app.search_state);
+    render_tracks(f, results, app, &app.search_results, &mut st, playing, false, panel(i.search, title));
+    app.search_state = st;
 }
 
 fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
@@ -798,7 +834,7 @@ mod tests {
         for proto in [ProtocolType::Sixel, ProtocolType::Halfblocks, ProtocolType::Kitty] {
             let mut picker = Picker::from_fontsize((10, 20));
             picker.set_protocol_type(proto);
-            app.cover = Some((url.clone(), picker.new_resize_protocol(img.clone())));
+            app.covers = vec![(url.clone(), picker.new_resize_protocol(img.clone()))];
             app.picker = Some(picker);
             app.queue = vec![Track {
                 id: "1".into(),

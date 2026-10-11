@@ -21,6 +21,7 @@ pub enum Msg {
     WaveMore(Result<WaveBatch, String>),
     LikeFailed { track: Track, like: bool, err: String },
     Cover { url: String, result: Result<image::DynamicImage, String> },
+    Preload { gen: u64, idx: usize, id: String, result: Result<String, String> },
     Status(String),
 }
 
@@ -118,9 +119,15 @@ pub struct App {
 
     /// Terminal graphics (sixel / kitty / iTerm2 / half blocks); `None` in tests.
     pub picker: Option<Picker>,
-    /// Current cover: (url, encoded image).
-    pub cover: Option<(String, StatefulProtocol)>,
-    cover_loading: Option<String>,
+    /// Recently used covers: (url, encoded image), newest last.
+    pub covers: Vec<(String, StatefulProtocol)>,
+    covers_loading: HashSet<String>,
+
+    /// Next track already resolved and appended to mpv's playlist: (queue index, track id).
+    preload: Option<(usize, String)>,
+    preload_pending: bool,
+    /// Current track was started from the preloaded entry (its URL may have expired on error).
+    from_preload: bool,
 }
 
 impl App {
@@ -161,8 +168,11 @@ impl App {
             status_at: Instant::now(),
             tick: 0,
             picker: None,
-            cover: None,
-            cover_loading: None,
+            covers: Vec::new(),
+            covers_loading: HashSet::new(),
+            preload: None,
+            preload_pending: false,
+            from_preload: false,
         };
         app.set_stations(default_stations());
         app.load_liked();
@@ -178,6 +188,16 @@ impl App {
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.status = s.into();
         self.status_at = Instant::now();
+    }
+
+    /// Whether the UI has something moving (progress, equalizer, spinners, cursor).
+    pub fn is_animating(&self) -> bool {
+        (self.pos.is_some() && !self.paused)
+            || self.loading_track
+            || self.search_editing
+            || self.search_loading
+            || self.liked_loading
+            || self.wave.as_ref().is_some_and(|w| w.fetching)
     }
 
     pub fn visible_status(&self) -> Option<&str> {
@@ -291,18 +311,29 @@ impl App {
         });
     }
 
+    /// Starts track `idx`: resolves its URL and replaces mpv's playlist.
     fn play_index(&mut self, idx: usize) {
-        let Some(track) = self.queue.get(idx).cloned() else { return };
+        if !self.begin_track(idx, false) {
+            return;
+        }
+        let gen = self.gen;
+        let id = self.queue[idx].full_id();
+        self.spawn(move |api| Some(Msg::Url { gen, result: api.track_url(&id).map_err(|e| format!("{e:#}")) }));
+    }
+
+    /// Updates state for a new current track. `preloaded`: mpv already switched to it.
+    fn begin_track(&mut self, idx: usize, preloaded: bool) -> bool {
+        let Some(track) = self.queue.get(idx).cloned() else { return false };
         self.pos = Some(idx);
         self.queue_state.select(Some(idx));
         self.gen += 1;
         self.time_pos = 0.0;
         self.duration = track.duration_ms as f64 / 1000.0;
         self.loading_track = true;
+        self.preload = None;
+        self.preload_pending = false;
+        self.from_preload = preloaded;
         self.load_cover(track.cover.clone());
-        let gen = self.gen;
-        let id = track.full_id();
-        self.spawn(move |api| Some(Msg::Url { gen, result: api.track_url(&id).map_err(|e| format!("{e:#}")) }));
         if self.source == Source::Wave {
             self.wave_feedback(
                 json!({"type": "trackStarted", "timestamp": iso_now(), "trackId": track.full_id()}),
@@ -312,9 +343,51 @@ impl App {
                 self.fetch_more_wave();
             }
         }
+        true
+    }
+
+    fn next_playable(&self) -> Option<usize> {
+        let from = self.pos.map_or(0, |p| p + 1);
+        (from..self.queue.len()).find(|&i| self.queue[i].available)
+    }
+
+    /// Resolves the next track's URL in advance and appends it to mpv's playlist.
+    fn schedule_preload(&mut self) {
+        if self.preload.is_some() || self.preload_pending || self.loading_track || self.pos.is_none() {
+            return;
+        }
+        let Some(idx) = self.next_playable() else { return };
+        let track = self.queue[idx].clone();
+        self.preload_pending = true;
+        self.load_cover(track.cover.clone());
+        let gen = self.gen;
+        self.spawn(move |api| {
+            let result = api.track_url(&track.full_id()).map_err(|e| format!("{e:#}"));
+            Some(Msg::Preload { gen, idx, id: track.id, result })
+        });
+    }
+
+    /// Switches to the preloaded track if it is the next one. Returns false if there is none.
+    fn advance_preloaded(&mut self, end: End, mpv_advanced: bool) -> bool {
+        let next = self.next_playable();
+        match &self.preload {
+            Some((idx, id)) if Some(*idx) == next && self.queue[*idx].id == *id => {
+                let idx = *idx;
+                self.report_end(end);
+                if !mpv_advanced {
+                    self.player.playlist_next();
+                }
+                self.begin_track(idx, true);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn next(&mut self, end: End) {
+        if self.advance_preloaded(end, false) {
+            return;
+        }
         self.report_end(end);
         let from = self.pos.map_or(0, |p| p + 1);
         if let Some(i) = (from..self.queue.len()).find(|&i| self.queue[i].available) {
@@ -352,6 +425,7 @@ impl App {
         }
         self.report_end(End::Skip);
         self.queue = tracks;
+        self.preload = None;
         self.source = Source::List(name.to_string());
         self.wave = None;
         self.pos = None;
@@ -378,13 +452,10 @@ impl App {
 
     fn load_cover(&mut self, url: Option<String>) {
         let Some(url) = url else { return };
-        if self.picker.is_none()
-            || self.cover.as_ref().is_some_and(|(u, _)| *u == url)
-            || self.cover_loading.as_deref() == Some(url.as_str())
+        if self.picker.is_none() || self.covers.iter().any(|(u, _)| *u == url) || !self.covers_loading.insert(url.clone())
         {
             return;
         }
-        self.cover_loading = Some(url.clone());
         self.spawn(move |api| {
             let result = api.fetch_image(&url).map_err(|e| format!("{e:#}"));
             Some(Msg::Cover { url, result })
@@ -394,10 +465,7 @@ impl App {
     /// Cover of the current track, if it is loaded.
     pub fn current_cover(&mut self) -> Option<&mut StatefulProtocol> {
         let want = self.current()?.cover.clone()?;
-        match &mut self.cover {
-            Some((u, p)) if *u == want => Some(p),
-            _ => None,
-        }
+        self.covers.iter_mut().find(|(u, _)| *u == want).map(|(_, p)| p)
     }
 
     pub fn start_station_id(&mut self, id: &str) {
@@ -481,13 +549,19 @@ impl App {
                     if self.loading_track && t > 0.0 {
                         self.loading_track = false;
                         self.errors_in_row = 0;
+                        self.schedule_preload();
                     }
                 }
                 PlayerEvent::Duration(d) => self.duration = d,
                 PlayerEvent::Pause(p) => self.paused = p,
                 PlayerEvent::Volume(v) => self.volume = v,
                 PlayerEvent::Mute(m) => self.muted = m,
-                PlayerEvent::Eof => self.next(End::Eof),
+                PlayerEvent::Eof => {
+                    // mpv moves to the appended (preloaded) entry on its own.
+                    if !self.advance_preloaded(End::Eof, true) {
+                        self.next(End::Eof);
+                    }
+                }
                 PlayerEvent::Error(e) => {
                     self.set_status(format!("Ошибка воспроизведения: {e}"));
                     self.on_track_error();
@@ -560,6 +634,7 @@ impl App {
                     });
                     self.source = Source::Wave;
                     self.queue = b.tracks;
+                    self.preload = None;
                     self.pos = None;
                     self.wave_feedback(json!({"type": "radioStarted", "timestamp": iso_now(), "from": from}), None);
                     self.tab = Tab::Wave;
@@ -582,6 +657,8 @@ impl App {
                         self.queue.extend(b.tracks.into_iter().filter(|t| !known.contains(&t.id)));
                         if pending {
                             self.next(End::Silent);
+                        } else {
+                            self.schedule_preload();
                         }
                     }
                     Err(e) => self.set_status(format!("Волна: {e}")),
@@ -593,17 +670,38 @@ impl App {
             }
             Msg::Status(s) => self.set_status(s),
             Msg::Cover { url, result } => {
-                if self.cover_loading.as_deref() == Some(url.as_str()) {
-                    self.cover_loading = None;
-                }
+                self.covers_loading.remove(&url);
                 if let (Ok(img), Some(picker)) = (result, &self.picker) {
-                    self.cover = Some((url, picker.new_resize_protocol(img)));
+                    // Keep the current, the next and one previous cover.
+                    if self.covers.len() >= 3 {
+                        self.covers.remove(0);
+                    }
+                    self.covers.push((url, picker.new_resize_protocol(img)));
+                }
+            }
+            Msg::Preload { gen, idx, id, result } => {
+                if gen != self.gen {
+                    return;
+                }
+                self.preload_pending = false;
+                if let Ok(url) = result {
+                    if self.next_playable() == Some(idx) && self.queue[idx].id == id {
+                        self.player.append(&url);
+                        self.preload = Some((idx, id));
+                    }
                 }
             }
         }
     }
 
     fn on_track_error(&mut self) {
+        // A preloaded link could have expired (e.g. after a long pause): retry with a fresh one.
+        if std::mem::take(&mut self.from_preload) {
+            if let Some(p) = self.pos {
+                self.play_index(p);
+                return;
+            }
+        }
         self.loading_track = false;
         self.errors_in_row += 1;
         if self.errors_in_row <= 5 {
@@ -804,5 +902,55 @@ mod tests {
         assert_eq!(super::ru_to_en('Д'), 'L');
         assert_eq!(super::ru_to_en('.'), '/');
         assert_eq!(super::ru_to_en('x'), 'x');
+    }
+
+    /// Preload state machine (uses a real mpv). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn preload_flow() {
+        use super::*;
+        use crate::api::Account;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let player = Player::spawn(tx.clone(), 0).expect("mpv");
+        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
+        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue = vec![t("a"), t("b"), t("c")];
+        app.source = Source::List("test".into());
+        app.begin_track(0, false);
+        app.loading_track = false;
+
+        // Stale response (older generation) is ignored.
+        app.on_msg(Msg::Preload { gen: app.gen - 1, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        assert!(app.preload.is_none());
+        // Fresh response is appended.
+        app.on_msg(Msg::Preload { gen: app.gen, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        assert_eq!(app.preload, Some((1, "b".to_string())));
+
+        // End of track: mpv moves on by itself, state follows without a new URL request.
+        app.on_msg(Msg::Player(PlayerEvent::Eof));
+        assert_eq!(app.pos, Some(1));
+        assert!(app.from_preload && app.preload.is_none());
+
+        // Manual skip uses the preloaded entry too.
+        app.loading_track = false;
+        app.on_msg(Msg::Preload { gen: app.gen, idx: 2, id: "c".into(), result: Ok("http://x/c".into()) });
+        app.next(End::Skip);
+        assert_eq!(app.pos, Some(2));
+
+        // Error on a preloaded track retries the same track with a fresh URL.
+        app.on_track_error();
+        assert_eq!(app.pos, Some(2));
+        assert!(!app.from_preload);
     }
 }
