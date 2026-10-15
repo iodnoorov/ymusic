@@ -758,6 +758,7 @@ impl App {
                     });
                 }
             }
+            KeyCode::Char('y') => self.copy_link(),
             KeyCode::Char('s') => self.shuffle_play(),
             KeyCode::Char('R') => {
                 self.load_liked();
@@ -864,6 +865,17 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Copies the link to the selected (or current) track to the clipboard.
+    fn copy_link(&mut self) {
+        let Some(t) = self.selected_track().or(self.current()).cloned() else {
+            self.set_status("Нет выбранного трека");
+            return;
+        };
+        let url = t.web_url();
+        crate::clipboard::copy(&url);
+        self.set_status(format!("Ссылка скопирована: {url}"));
     }
 
     fn shuffle_play(&mut self) {

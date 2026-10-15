@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod auth;
+mod clipboard;
 mod config;
 mod player;
 mod ui;

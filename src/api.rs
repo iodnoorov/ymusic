@@ -39,6 +39,14 @@ impl Track {
         }
     }
 
+    /// Link to the track on the Yandex Music website.
+    pub fn web_url(&self) -> String {
+        match &self.album_id {
+            Some(a) => format!("https://music.yandex.ru/album/{a}/track/{}", self.id),
+            None => format!("https://music.yandex.ru/track/{}", self.id),
+        }
+    }
+
     pub fn from_json(v: &Value) -> Option<Track> {
         let id = id_str(v.get("id")?)?;
         let mut title = v["title"].as_str().unwrap_or("?").to_string();
@@ -529,6 +537,7 @@ mod tests {
             "artists": [{"name": "A"}, {"name": "B"}], "albums": [{"id": 9, "title": "Alb"}], "durationMs": 1000});
         let t = Track::from_json(&v).unwrap();
         assert_eq!(t.full_id(), "123:9");
+        assert_eq!(t.web_url(), "https://music.yandex.ru/album/9/track/123");
         assert_eq!(t.title, "Song (Remix)");
         assert_eq!(t.artists, "A, B");
         assert_eq!(t.cover, None);
