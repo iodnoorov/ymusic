@@ -18,6 +18,9 @@ pub enum Msg {
     Stations(Vec<Station>),
     Search(Result<Vec<Track>, String>),
     Playlists(Result<Vec<Playlist>, String>),
+    PlaylistOpened { key: String, result: Result<Vec<Track>, String> },
+    /// Result of renaming a playlist or changing its tracks: status text on success.
+    PlaylistEdited { key: String, result: Result<String, String> },
     /// Tracks loaded in the background to be played as a list named `name`.
     ListLoaded { name: String, shuffle: bool, playlist: Option<String>, result: Result<Vec<Track>, String> },
     WaveStarted { station: String, name: String, result: Result<WaveBatch, String> },
@@ -73,6 +76,22 @@ enum End {
     Silent,
 }
 
+/// Playlist opened in the «Плейлисты» tab.
+pub struct OpenPlaylist {
+    pub pl: Playlist,
+    pub tracks: Vec<Track>,
+    pub loading: bool,
+}
+
+/// Pop-up dialogs; while one is shown it receives all keys.
+pub enum Modal {
+    /// Choose a playlist to add `track` to.
+    AddTo { track: Track, choices: Vec<Playlist>, sel: usize },
+    ConfirmRemove { pl: Playlist, index: usize, track: Track },
+    ConfirmDelete { pl: Playlist },
+    Rename { pl: Playlist, input: String },
+}
+
 pub enum StationRow {
     Header(String),
     Station(Station),
@@ -86,6 +105,7 @@ pub struct App {
     pub tab: Tab,
     pub quit: bool,
     pub show_help: bool,
+    pub show_about: bool,
 
     pub queue: Vec<Track>,
     pub pos: Option<usize>,
@@ -115,6 +135,9 @@ pub struct App {
     pub playlists_state: TableState,
     /// Key of the playlist the queue was started from.
     pub playing_playlist: Option<String>,
+    pub open_playlist: Option<OpenPlaylist>,
+    pub open_state: TableState,
+    pub modal: Option<Modal>,
 
     pub time_pos: f64,
     pub duration: f64,
@@ -150,6 +173,7 @@ impl App {
             tab: Tab::Wave,
             quit: false,
             show_help: false,
+            show_about: false,
             queue: Vec::new(),
             pos: None,
             source: Source::None,
@@ -173,6 +197,9 @@ impl App {
             playlists_loading: true,
             playlists_state: TableState::default(),
             playing_playlist: None,
+            open_playlist: None,
+            open_state: TableState::default(),
+            modal: None,
             time_pos: 0.0,
             duration: 0.0,
             paused: false,
@@ -210,6 +237,7 @@ impl App {
         (self.pos.is_some() && !self.paused)
             || self.loading_track
             || self.search_editing
+            || matches!(self.modal, Some(Modal::Rename { .. }))
             || self.search_loading
             || self.liked_loading
             || self.wave.as_ref().is_some_and(|w| w.fetching)
@@ -646,6 +674,13 @@ impl App {
                 match r {
                     Ok(list) => {
                         self.playlists = list;
+                        if let Some(open) = &mut self.open_playlist {
+                            match self.playlists.iter().find(|p| p.key() == open.pl.key()) {
+                                Some(p) => open.pl = p.clone(),
+                                // Deleted (here or elsewhere): back to the list.
+                                None => self.open_playlist = None,
+                            }
+                        }
                         let n = self.playlists.len();
                         let sel = self.playlists_state.selected().unwrap_or(0);
                         self.playlists_state.select((n > 0).then(|| sel.min(n - 1)));
@@ -653,6 +688,29 @@ impl App {
                     Err(e) => self.set_status(format!("Не удалось загрузить плейлисты: {e}")),
                 }
             }
+            Msg::PlaylistOpened { key, result } => {
+                let Some(open) = self.open_playlist.as_mut().filter(|o| o.pl.key() == key) else { return };
+                open.loading = false;
+                match result {
+                    Ok(tracks) => {
+                        open.tracks = tracks;
+                        let n = open.tracks.len();
+                        let sel = self.open_state.selected().unwrap_or(0);
+                        self.open_state.select((n > 0).then(|| sel.min(n - 1)));
+                    }
+                    Err(e) => self.set_status(format!("Не удалось открыть плейлист: {e}")),
+                }
+            }
+            Msg::PlaylistEdited { key, result } => match result {
+                Ok(status) => {
+                    self.set_status(status);
+                    self.load_playlists();
+                    if self.open_playlist.as_ref().is_some_and(|o| o.pl.key() == key) {
+                        self.reload_open_playlist();
+                    }
+                }
+                Err(e) => self.set_status(format!("Ошибка: {e}")),
+            },
             Msg::ListLoaded { name, shuffle, playlist, result } => match result {
                 Ok(list) if list.is_empty() => self.set_status(format!("{name}: нет треков")),
                 Ok(mut list) => {
@@ -770,8 +828,13 @@ impl App {
             self.on_search_key(key);
             return;
         }
-        if self.show_help {
+        if self.modal.is_some() {
+            self.on_modal_key(key);
+            return;
+        }
+        if self.show_help || self.show_about {
             self.show_help = false;
+            self.show_about = false;
             return;
         }
         let code = match key.code {
@@ -781,6 +844,7 @@ impl App {
         match code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
+            KeyCode::Char('!') => self.show_about = true,
             KeyCode::Char(' ') | KeyCode::Char('p') => self.player.toggle_pause(),
             KeyCode::Char('n') => self.next(End::Skip),
             KeyCode::Char('b') => self.prev(),
@@ -808,12 +872,21 @@ impl App {
             }
             KeyCode::Char('y') => self.copy_link(),
             KeyCode::Char('A') => self.play_artist(),
+            KeyCode::Char('s') if self.tab == Tab::Playlists && self.open_playlist.is_some() => self.play_open(true),
             KeyCode::Char('s') if self.tab == Tab::Playlists => self.play_playlist(true),
+            KeyCode::Char('a') => self.ask_add_to_playlist(),
+            KeyCode::Char('x') if self.tab == Tab::Playlists && self.open_playlist.is_some() => {
+                self.ask_remove_from_playlist()
+            }
+            KeyCode::Char('x') if self.tab == Tab::Playlists => self.ask_delete_playlist(),
+            KeyCode::Char('e') if self.tab == Tab::Playlists => self.ask_rename_playlist(),
+            KeyCode::Esc | KeyCode::Backspace if self.tab == Tab::Playlists => self.open_playlist = None,
             KeyCode::Char('s') => self.shuffle_play(),
             KeyCode::Char('R') => {
                 self.load_liked();
                 self.load_stations();
                 self.load_playlists();
+                self.reload_open_playlist();
                 self.set_status("Обновление…");
             }
             KeyCode::Left => self.player.seek(-10.0),
@@ -874,7 +947,11 @@ impl App {
             Tab::Liked => self.liked_state.selected().and_then(|i| self.liked.get(i)),
             Tab::Search => self.search_state.selected().and_then(|i| self.search_results.get(i)),
             Tab::Wave => self.queue_state.selected().and_then(|i| self.queue.get(i)),
-            Tab::Stations | Tab::Playlists => None,
+            Tab::Playlists => {
+                let open = self.open_playlist.as_ref()?;
+                self.open_state.selected().and_then(|i| open.tracks.get(i))
+            }
+            Tab::Stations => None,
         }
     }
 
@@ -886,7 +963,10 @@ impl App {
             Tab::Wave => self.queue_state.select(step(self.queue_state.selected(), self.queue.len())),
             Tab::Liked => self.liked_state.select(step(self.liked_state.selected(), self.liked.len())),
             Tab::Search => self.search_state.select(step(self.search_state.selected(), self.search_results.len())),
-            Tab::Playlists => self.playlists_state.select(step(self.playlists_state.selected(), self.playlists.len())),
+            Tab::Playlists => match &self.open_playlist {
+                Some(open) => self.open_state.select(step(self.open_state.selected(), open.tracks.len())),
+                None => self.playlists_state.select(step(self.playlists_state.selected(), self.playlists.len())),
+            },
             Tab::Stations => {
                 self.stations_state.select(step(self.stations_state.selected(), self.stations.len()));
                 self.fix_station_selection(if d >= 0 { 1 } else { -1 });
@@ -917,7 +997,190 @@ impl App {
                     self.play_list("Поиск", self.search_results.clone(), i);
                 }
             }
-            Tab::Playlists => self.play_playlist(false),
+            Tab::Playlists if self.open_playlist.is_some() => self.play_open(false),
+            Tab::Playlists => self.open_selected_playlist(),
+        }
+    }
+
+    // ------------------------------------------------------------ playlists
+
+    fn selected_playlist(&self) -> Option<&Playlist> {
+        self.playlists_state.selected().and_then(|i| self.playlists.get(i))
+    }
+
+    fn open_selected_playlist(&mut self) {
+        let Some(pl) = self.selected_playlist().cloned() else { return };
+        self.open_playlist = Some(OpenPlaylist { pl, tracks: Vec::new(), loading: true });
+        self.open_state = TableState::default();
+        self.reload_open_playlist();
+    }
+
+    fn reload_open_playlist(&mut self) {
+        let Some(open) = &mut self.open_playlist else { return };
+        open.loading = true;
+        let pl = open.pl.clone();
+        self.spawn(move |api| {
+            let result = api.playlist_tracks(&pl).map_err(|e| format!("{e:#}"));
+            Some(Msg::PlaylistOpened { key: pl.key(), result })
+        });
+    }
+
+    /// Plays the opened playlist from the selected track (or all of it shuffled).
+    fn play_open(&mut self, shuffle: bool) {
+        let Some(open) = &self.open_playlist else { return };
+        let (key, name, mut tracks) = (open.pl.key(), format!("Плейлист: {}", open.pl.title), open.tracks.clone());
+        if tracks.is_empty() {
+            return;
+        }
+        if shuffle {
+            shuffle_tracks(&mut tracks);
+            self.play_list(&format!("{name} (перемешано)"), tracks, 0);
+        } else {
+            let start = self.open_state.selected().unwrap_or(0);
+            self.play_list(&name, tracks, start);
+        }
+        self.playing_playlist = Some(key);
+    }
+
+    /// Own playlists (only they can be edited).
+    fn own_playlists(&self) -> Vec<Playlist> {
+        self.playlists.iter().filter(|p| p.owner == self.api.uid).cloned().collect()
+    }
+
+    /// Playlist targeted by rename: the opened one or the one selected in the list.
+    fn target_playlist(&self) -> Option<Playlist> {
+        match &self.open_playlist {
+            Some(open) => Some(open.pl.clone()),
+            None => self.selected_playlist().cloned(),
+        }
+    }
+
+    fn ask_add_to_playlist(&mut self) {
+        let Some(track) = self.selected_track().or(self.current()).cloned() else {
+            self.set_status("Нет выбранного трека");
+            return;
+        };
+        let choices = self.own_playlists();
+        if choices.is_empty() {
+            self.set_status(if self.playlists_loading { "Плейлисты ещё загружаются…" } else { "Нет своих плейлистов" });
+            return;
+        }
+        self.modal = Some(Modal::AddTo { track, choices, sel: 0 });
+    }
+
+    fn ask_remove_from_playlist(&mut self) {
+        let Some(open) = &self.open_playlist else { return };
+        let Some(index) = self.open_state.selected().filter(|&i| i < open.tracks.len()) else { return };
+        if open.pl.owner != self.api.uid {
+            self.set_status("Можно менять только свои плейлисты");
+            return;
+        }
+        self.modal = Some(Modal::ConfirmRemove { pl: open.pl.clone(), index, track: open.tracks[index].clone() });
+    }
+
+    fn ask_delete_playlist(&mut self) {
+        let Some(pl) = self.selected_playlist().cloned() else { return };
+        if pl.owner != self.api.uid {
+            self.set_status("Можно менять только свои плейлисты");
+            return;
+        }
+        self.modal = Some(Modal::ConfirmDelete { pl });
+    }
+
+    fn ask_rename_playlist(&mut self) {
+        let Some(pl) = self.target_playlist() else { return };
+        if pl.owner != self.api.uid {
+            self.set_status("Можно менять только свои плейлисты");
+            return;
+        }
+        let input = pl.title.clone();
+        self.modal = Some(Modal::Rename { pl, input });
+    }
+
+    fn on_modal_key(&mut self, key: KeyEvent) {
+        let Some(modal) = self.modal.take() else { return };
+        let code = match (&modal, key.code) {
+            // Text input gets characters as typed; elsewhere map the Russian layout.
+            (Modal::Rename { .. }, c) => c,
+            (_, KeyCode::Char(c)) => KeyCode::Char(ru_to_en(c)),
+            (_, c) => c,
+        };
+        match modal {
+            Modal::AddTo { track, choices, mut sel } => match code {
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                KeyCode::Down | KeyCode::Char('j') => {
+                    sel = (sel + 1).min(choices.len() - 1);
+                    self.modal = Some(Modal::AddTo { track, choices, sel });
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    sel = sel.saturating_sub(1);
+                    self.modal = Some(Modal::AddTo { track, choices, sel });
+                }
+                KeyCode::Enter => {
+                    let pl = choices[sel].clone();
+                    self.set_status(format!("Добавление в «{}»…", pl.title));
+                    self.spawn(move |api| {
+                        let result = api
+                            .add_to_playlist(&pl, &track)
+                            .map(|()| format!("Добавлено в «{}»: {}", pl.title, track.title))
+                            .map_err(|e| format!("{e:#}"));
+                        Some(Msg::PlaylistEdited { key: pl.key(), result })
+                    });
+                }
+                _ => self.modal = Some(Modal::AddTo { track, choices, sel }),
+            },
+            Modal::ConfirmRemove { pl, index, track } => {
+                if code == KeyCode::Enter {
+                    self.set_status(format!("Удаление из «{}»…", pl.title));
+                    self.spawn(move |api| {
+                        let result = api
+                            .remove_from_playlist(&pl, index, &track.id)
+                            .map(|()| format!("Удалено из «{}»: {}", pl.title, track.title))
+                            .map_err(|e| format!("{e:#}"));
+                        Some(Msg::PlaylistEdited { key: pl.key(), result })
+                    });
+                }
+            }
+            Modal::ConfirmDelete { pl } => {
+                if code == KeyCode::Enter {
+                    self.set_status(format!("Удаление плейлиста «{}»…", pl.title));
+                    self.spawn(move |api| {
+                        let result = api
+                            .delete_playlist(&pl)
+                            .map(|()| format!("Плейлист удалён: «{}»", pl.title))
+                            .map_err(|e| format!("{e:#}"));
+                        Some(Msg::PlaylistEdited { key: pl.key(), result })
+                    });
+                }
+            }
+            Modal::Rename { pl, mut input } => match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    let title = input.trim().to_string();
+                    if title.is_empty() || title == pl.title {
+                        return;
+                    }
+                    self.spawn(move |api| {
+                        let result = api
+                            .rename_playlist(&pl, &title)
+                            .map(|()| format!("Плейлист переименован: «{title}»"))
+                            .map_err(|e| format!("{e:#}"));
+                        Some(Msg::PlaylistEdited { key: pl.key(), result })
+                    });
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    self.modal = Some(Modal::Rename { pl, input });
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.modal = Some(Modal::Rename { pl, input: String::new() });
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    self.modal = Some(Modal::Rename { pl, input });
+                }
+                _ => self.modal = Some(Modal::Rename { pl, input }),
+            },
         }
     }
 
@@ -1002,6 +1265,91 @@ mod tests {
         assert_eq!(super::ru_to_en('.'), '/');
         assert_eq!(super::ru_to_en('Ф'), 'A');
         assert_eq!(super::ru_to_en('x'), 'x');
+    }
+
+    /// Keys inside pop-up dialogs (uses a real mpv). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn modal_keys() {
+        use super::*;
+        use crate::api::Account;
+        use ratatui::crossterm::event::KeyEvent;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let player = Player::spawn(tx.clone(), 0).expect("mpv");
+        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
+        let mut api = Api::new("x");
+        api.uid = "1".into();
+        let mut app = App::new(api, acc, tx, player, 0);
+        let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let pl = |k: &str, owner: &str| Playlist { owner: owner.into(), kind: k.into(), title: format!("P{k}"), track_count: 0 };
+        app.playlists = vec![pl("1", "1"), pl("2", "999"), pl("3", "1")];
+        app.playlists_loading = false;
+        let t = Track {
+            id: "7".into(),
+            album_id: Some("8".into()),
+            title: "T".into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue = vec![t.clone()];
+        app.queue_state.select(Some(0));
+
+        // `a` (and `ф`) offers only own playlists; selection stays in bounds; Esc closes.
+        app.on_key(key(KeyCode::Char('ф')));
+        let Some(Modal::AddTo { choices, .. }) = &app.modal else { panic!("no picker") };
+        assert_eq!(choices.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(), ["1", "3"]);
+        for _ in 0..5 {
+            app.on_key(key(KeyCode::Char('j')));
+        }
+        assert!(matches!(app.modal, Some(Modal::AddTo { sel: 1, .. })));
+        app.on_key(key(KeyCode::Char('k')));
+        app.on_key(key(KeyCode::Char('k')));
+        assert!(matches!(app.modal, Some(Modal::AddTo { sel: 0, .. })));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+
+        // Rename: Russian letters are typed as is (no layout mapping), Esc cancels.
+        app.tab = Tab::Playlists;
+        app.playlists_state.select(Some(0));
+        app.on_key(key(KeyCode::Char('e')));
+        for c in ['д', 'а'] {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        let Some(Modal::Rename { input, .. }) = &app.modal else { panic!("no rename") };
+        assert_eq!(input, "P1да");
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+
+        // Someone else's playlist cannot be renamed.
+        app.playlists_state.select(Some(1));
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(app.modal.is_none());
+
+        // `x` asks for confirmation; any key other than Enter cancels.
+        app.open_playlist = Some(OpenPlaylist { pl: app.playlists[0].clone(), tracks: vec![t], loading: false });
+        app.open_state.select(Some(0));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(matches!(app.modal, Some(Modal::ConfirmRemove { index: 0, .. })));
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(app.modal.is_none());
+        // Esc leaves the opened playlist.
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.open_playlist.is_none());
+
+        // In the list `x` deletes the whole playlist (own only), after confirmation.
+        app.playlists_state.select(Some(2));
+        app.on_key(key(KeyCode::Char('ч')));
+        assert!(matches!(&app.modal, Some(Modal::ConfirmDelete { pl }) if pl.kind == "3"));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        app.playlists_state.select(Some(1));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.modal.is_none());
     }
 
     /// Preload state machine (uses a real mpv). Run with `cargo test -- --ignored`.

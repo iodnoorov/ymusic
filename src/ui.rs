@@ -1,7 +1,7 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Source, StationRow, Tab};
+use crate::app::{App, Modal, Source, StationRow, Tab};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -202,6 +202,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_help {
         draw_help(f);
     }
+    if app.show_about {
+        draw_about(f);
+    }
+    draw_modal(f, app);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -504,6 +508,21 @@ fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
     let i = ic();
+    if let Some(open) = &app.open_playlist {
+        let title = if open.loading && open.tracks.is_empty() {
+            format!("{} · {}", open.pl.title, spinner(app.tick))
+        } else {
+            format!("{} · {}   Esc — к списку", open.pl.title, open.tracks.len())
+        };
+        let playing = (matches!(app.source, Source::List(_)) && app.playing_playlist == Some(open.pl.key()))
+            .then(|| app.current().map(|c| c.id.clone()))
+            .flatten()
+            .and_then(|id| open.tracks.iter().position(|t| t.id == id));
+        let mut st = std::mem::take(&mut app.open_state);
+        render_tracks(f, area, app, &open.tracks, &mut st, playing, false, panel(i.queue, title));
+        app.open_state = st;
+        return;
+    }
     let title = if app.playlists_loading && app.playlists.is_empty() {
         format!("Плейлисты · {}", spinner(app.tick))
     } else {
@@ -719,6 +738,21 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
     }
     let keys: &[(&str, &str)] = if app.search_editing {
         &[("Enter", "искать"), ("Esc", "отмена"), ("Ctrl+U", "очистить")]
+    } else if let Some(modal) = &app.modal {
+        match modal {
+            Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
+            Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => &[("Enter", "удалить"), ("Esc", "отмена")],
+            Modal::Rename { .. } => &[("Enter", "сохранить"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
+        }
+    } else if app.tab == Tab::Playlists && app.open_playlist.is_some() {
+        &[
+            ("Enter", "играть"),
+            ("s", "перемешать"),
+            ("x", "удалить"),
+            ("a", "в плейлист"),
+            ("e", "переименовать"),
+            ("Esc", "назад"),
+        ]
     } else {
         match app.tab {
             Tab::Stations => &[
@@ -731,11 +765,11 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
                 ("q", "выход"),
             ],
             Tab::Playlists => &[
-                ("Enter", "играть"),
+                ("Enter", "открыть"),
                 ("s", "перемешать"),
+                ("e", "переименовать"),
+                ("x", "удалить"),
                 ("R", "обновить"),
-                ("␣", "пауза"),
-                ("n", "далее"),
                 ("?", "помощь"),
             ],
             Tab::Liked | Tab::Search => &[
@@ -771,7 +805,7 @@ type HelpSection = (&'static str, &'static str, &'static [(&'static str, &'stati
 
 fn draw_help(f: &mut Frame) {
     let i = ic();
-    let sections: [HelpSection; 4] = [
+    let sections: [HelpSection; 5] = [
         (
             i.play,
             "Воспроизведение",
@@ -806,35 +840,208 @@ fn draw_help(f: &mut Frame) {
                 ("y", "копировать ссылку на трек"),
                 ("/", "поиск"),
                 ("R", "обновить"),
+                ("!", "о программе"),
                 ("q", "выход"),
             ],
         ),
+        (
+            i.queue,
+            "Плейлисты",
+            &[
+                ("a", "добавить трек в плейлист"),
+                ("Enter  Esc", "открыть / закрыть плейлист"),
+                ("x", "удалить трек / плейлист"),
+                ("e", "переименовать плейлист"),
+            ],
+        ),
     ];
-    let mut lines = vec![];
-    for (icon, title, rows) in sections {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{icon}  "), Style::new().fg(ACCENT)),
-            Span::styled(title.to_uppercase(), Style::new().fg(SUB).bold()),
-        ]));
-        for (k, d) in rows {
+    let render = |sections: &[HelpSection]| {
+        let mut lines = vec![];
+        for (icon, title, rows) in sections {
             lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<12}"), Style::new().fg(ACCENT).bold()),
-                Span::styled(*d, Style::new().fg(Color::Reset)),
+                Span::styled(format!("{icon}  "), Style::new().fg(ACCENT)),
+                Span::styled(title.to_uppercase(), Style::new().fg(SUB).bold()),
             ]));
+            for (k, d) in *rows {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {k:<12}"), Style::new().fg(ACCENT).bold()),
+                    Span::styled(*d, Style::new().fg(Color::Reset)),
+                ]));
+            }
+            lines.push(Line::from(""));
         }
-        lines.push(Line::from(""));
-    }
-    lines.pop();
+        lines.pop();
+        lines
+    };
+    const COL: u16 = 46;
     let area = f.area();
-    let h = (lines.len() as u16 + 4).min(area.height);
-    let [v] = Layout::vertical([Constraint::Length(h)]).flex(Flex::Center).areas(area);
-    let [r] = Layout::horizontal([Constraint::Length(52.min(area.width))]).flex(Flex::Center).areas(v);
+    // Two columns when they fit, otherwise one (cut at the bottom on very small terminals).
+    let columns = if area.width >= 2 * COL + 6 {
+        vec![render(&sections[..3]), render(&sections[3..])]
+    } else {
+        vec![render(&sections)]
+    };
+    let rows = columns.iter().map(Vec::len).max().unwrap_or(0) as u16;
+    let width = (columns.len() as u16 * COL + 4).min(area.width);
+    let [v] = Layout::vertical([Constraint::Length((rows + 4).min(area.height))]).flex(Flex::Center).areas(area);
+    let [r] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Center).areas(v);
     f.render_widget(Clear, r);
     let block = panel(i.keys, "Горячие клавиши")
         .border_style(Style::new().fg(ACCENT))
         .title_bottom(Line::from(Span::styled(" любая клавиша — закрыть ", Style::new().fg(MUTED))).centered())
         .padding(Padding::uniform(1));
-    f.render_widget(Paragraph::new(lines).block(block), r);
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let cols = Layout::horizontal(vec![Constraint::Fill(1); columns.len()]).split(inner);
+    for (lines, col) in columns.into_iter().zip(cols.iter()) {
+        f.render_widget(Paragraph::new(lines), *col);
+    }
+}
+
+pub const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
+pub const UPSTREAM_URL: &str = "https://github.com/Rexilone/yamusic-cli";
+pub const AUR_URL: &str = "https://aur.archlinux.org/packages/ymusic-cli";
+
+/// Renders `text` as a clickable link (OSC 8) in one line starting at `x`, `y`.
+fn render_link(buf: &mut Buffer, x: u16, y: u16, text: &str, url: &str, style: Style) {
+    buf.set_string(x, y, text, style);
+    // The escape sequence is counted as two cells wide by ratatui, so the link is written in
+    // two-character chunks (the same workaround as in ratatui's hyperlink example).
+    let chars: Vec<char> = text.chars().collect();
+    for (n, pair) in chars.chunks(2).enumerate() {
+        let s: String = pair.iter().collect();
+        if let Some(cell) = buf.cell_mut((x + n as u16 * 2, y)) {
+            cell.set_symbol(&format!("\x1b]8;;{url}\x07{s}\x1b]8;;\x07"));
+        }
+    }
+}
+
+fn draw_about(f: &mut Frame) {
+    let i = ic();
+    let link = Style::new().fg(ACCENT).underlined();
+    // Terminals can't use a smaller font for one line, so the fork note is dimmed instead.
+    let faint = Style::new().fg(MUTED).italic();
+    // One entry per row: text segments (text, style, link target); an empty entry is a blank row.
+    let rows: Vec<Vec<(String, Style, Option<&str>)>> = vec![
+        vec![(format!("{}  ymusic", i.logo), Style::new().fg(ACCENT).bold(), None)],
+        vec![],
+        vec![(format!("Версия {}", env!("CARGO_PKG_VERSION")), Style::new().fg(SUB), None)],
+        vec![],
+        vec![],
+        vec![(REPO_URL.into(), link, Some(REPO_URL))],
+        vec![(AUR_URL.into(), link, Some(AUR_URL))],
+        vec![],
+        vec![],
+        vec![("Forked from: ".into(), faint, None), (UPSTREAM_URL.into(), faint.underlined(), Some(UPSTREAM_URL))],
+    ];
+    let row_width = |row: &[(String, Style, Option<&str>)]| row.iter().map(|(t, ..)| Span::raw(t.as_str()).width()).sum::<usize>();
+    let widest = rows.iter().map(|r| row_width(r)).max().unwrap_or(0) as u16;
+    let area = f.area();
+    let [v] = Layout::vertical([Constraint::Length((rows.len() as u16 + 4).min(area.height))]).flex(Flex::Center).areas(area);
+    let [r] = Layout::horizontal([Constraint::Length((widest + 10).min(area.width))]).flex(Flex::Center).areas(v);
+    f.render_widget(Clear, r);
+    let block = panel(i.info, "О программе")
+        .border_style(Style::new().fg(ACCENT))
+        .title_bottom(Line::from(Span::styled(" любая клавиша — закрыть ", Style::new().fg(MUTED))).centered())
+        .padding(Padding::uniform(1));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let buf = f.buffer_mut();
+    for (n, row) in rows.iter().enumerate().take(inner.height as usize) {
+        let y = inner.y + n as u16;
+        let w = row_width(row) as u16;
+        if w > inner.width {
+            // Too narrow for links: plain, truncated text.
+            let text: String = row.iter().map(|(t, ..)| t.as_str()).collect();
+            buf.set_stringn(inner.x, y, &text, inner.width as usize, Style::new().fg(SUB));
+            continue;
+        }
+        let mut x = inner.x + (inner.width - w) / 2;
+        for (text, style, url) in row {
+            match url {
+                Some(url) => render_link(buf, x, y, text, url, *style),
+                None => {
+                    buf.set_string(x, y, text, *style);
+                }
+            }
+            x += Span::raw(text.as_str()).width() as u16;
+        }
+    }
+}
+
+/// Centered pop-up box of the given inner size; returns the inner area.
+fn popup(f: &mut Frame, icon: &str, title: &str, w: u16, h: u16) -> Rect {
+    let area = f.area();
+    let [v] = Layout::vertical([Constraint::Length((h + 4).min(area.height))]).flex(Flex::Center).areas(area);
+    let [r] = Layout::horizontal([Constraint::Length((w + 4).min(area.width))]).flex(Flex::Center).areas(v);
+    f.render_widget(Clear, r);
+    let block = panel(icon, title.to_string()).border_style(Style::new().fg(ACCENT)).padding(Padding::uniform(1));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    inner
+}
+
+fn draw_modal(f: &mut Frame, app: &App) {
+    let i = ic();
+    let Some(modal) = &app.modal else { return };
+    match modal {
+        Modal::AddTo { track, choices, sel } => {
+            let visible = choices.len().min(12);
+            let inner = popup(f, i.queue, "Добавить в плейлист", 48, visible as u16 + 2);
+            let [head, _, list] =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+            f.render_widget(
+                Paragraph::new(Span::styled(format!("{} — {}", track.title, track.artists), Style::new().fg(SUB))),
+                head,
+            );
+            let items: Vec<ListItem> = choices
+                .iter()
+                .map(|p| {
+                    ListItem::new(Line::from(vec![
+                        Span::raw(p.title.clone()),
+                        Span::styled(format!("  {} {}", p.track_count, i.note), Style::new().fg(MUTED)),
+                    ]))
+                })
+                .collect();
+            let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
+            let widget = List::new(items)
+                .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+                .highlight_symbol("▌ ")
+                .highlight_spacing(HighlightSpacing::Always);
+            f.render_stateful_widget(widget, list, &mut st);
+        }
+        Modal::ConfirmRemove { pl, track, .. } => {
+            let inner = popup(f, i.error, "Удалить трек", 48, 4);
+            let lines = vec![
+                Line::from(Span::styled(track.title.clone(), Style::new().fg(Color::Reset).bold())),
+                Line::from(Span::styled(format!("из плейлиста «{}»?", pl.title), Style::new().fg(SUB))),
+                Line::from(""),
+                Line::from([key_hint("Enter", "удалить"), key_hint("Esc", "отмена")].concat()),
+            ];
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        }
+        Modal::ConfirmDelete { pl } => {
+            let inner = popup(f, i.error, "Удалить плейлист", 48, 4);
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("«{}» · {} {}", pl.title, pl.track_count, i.note),
+                    Style::new().fg(Color::Reset).bold(),
+                )),
+                Line::from(Span::styled("Плейлист будет удалён из аккаунта.", Style::new().fg(SUB))),
+                Line::from(""),
+                Line::from([key_hint("Enter", "удалить"), key_hint("Esc", "отмена")].concat()),
+            ];
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+        }
+        Modal::Rename { input, .. } => {
+            let inner = popup(f, i.queue, "Название плейлиста", 48, 1);
+            let mut spans = vec![Span::styled(input.clone(), Style::new().fg(Color::Reset).bold())];
+            if (app.tick / 2).is_multiple_of(2) {
+                spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), inner);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -895,6 +1102,75 @@ mod tests {
                 assert!(text.contains("Выхода нет"));
             }
         }
+        // Opened playlist and the pop-up dialogs.
+        use crate::app::{Modal, OpenPlaylist};
+        let pl = app.playlists[0].clone();
+        app.tab = Tab::Playlists;
+        app.open_playlist = Some(OpenPlaylist { pl: pl.clone(), tracks: app.queue.clone(), loading: false });
+        app.open_state.select(Some(2));
+        let modals = [
+            Some(Modal::ConfirmDelete { pl: pl.clone() }),
+            None,
+            Some(Modal::AddTo { track: t.clone(), choices: app.playlists.clone(), sel: 1 }),
+            Some(Modal::ConfirmRemove { pl: pl.clone(), index: 2, track: app.queue[2].clone() }),
+            Some(Modal::Rename { pl: pl.clone(), input: "Новое название".into() }),
+        ];
+        let expect = ["Плейлист будет удалён из аккаунта.", "Искала", "Добавить в плейлист", "из плейлиста «Bloodborne soundtracks»?", "Новое название"];
+        for (modal, want) in modals.into_iter().zip(expect) {
+            app.modal = modal;
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let text: String = (0..buf.area.height)
+                .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+                .collect();
+            println!("{text}");
+            assert!(text.contains(want), "{want}");
+        }
+        app.modal = None;
+        app.open_playlist = None;
+
+        app.show_about = true;
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        // What a terminal shows: replay the cells ratatui actually sends (diff against an empty
+        // screen), with OSC 8 sequences stripped.
+        let strip = |sym: &str| {
+            let mut out = String::new();
+            let mut rest = sym;
+            while let Some(i) = rest.find("\x1b]8;;") {
+                out.push_str(&rest[..i]);
+                rest = &rest[i..];
+                rest = rest.find('\x07').map_or("", |j| &rest[j + 1..]);
+            }
+            out + rest
+        };
+        let mut screen = vec![vec![' '; buf.area.width as usize]; buf.area.height as usize];
+        for (x, y, cell) in ratatui::buffer::Buffer::empty(buf.area).diff(&buf) {
+            for (k, ch) in strip(cell.symbol()).chars().enumerate() {
+                if let Some(c) = screen[y as usize].get_mut(x as usize + k) {
+                    *c = ch;
+                }
+            }
+        }
+        let plain: String = screen.iter().map(|l| l.iter().collect::<String>() + "\n").collect();
+        println!("{plain}");
+        for want in [
+            "О программе",
+            env!("CARGO_PKG_VERSION"),
+            "https://github.com/iodnoorov/ymusic",
+            "https://aur.archlinux.org/packages/ymusic-cli",
+            "Forked from: https://github.com/Rexilone/yamusic-cli",
+        ] {
+            assert!(plain.contains(want), "{want}");
+        }
+        assert!(text.contains(&format!("\x1b]8;;{}\x07", super::UPSTREAM_URL)));
+        app.show_about = false;
+
         app.show_help = true;
         let mut term = Terminal::new(TestBackend::new(100, 34)).unwrap();
         term.draw(|f| super::draw(f, &mut app)).unwrap();

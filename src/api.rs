@@ -280,9 +280,13 @@ impl Api {
             .collect())
     }
 
+    fn playlist_path(pl: &Playlist) -> String {
+        format!("/users/{}/playlists/{}", pl.owner, pl.kind)
+    }
+
     /// Tracks of a playlist, in playlist order.
     pub fn playlist_tracks(&self, pl: &Playlist) -> Result<Vec<Track>> {
-        let r = self.get(&format!("/users/{}/playlists/{}", pl.owner, pl.kind), &[])?;
+        let r = self.get(&Self::playlist_path(pl), &[])?;
         let items = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
         let full: Option<Vec<Track>> = items.iter().map(|t| Track::from_json(&t["track"])).collect();
         if let Some(tracks) = full {
@@ -300,6 +304,48 @@ impl Api {
             })
             .collect();
         self.tracks(&ids)
+    }
+
+    pub fn rename_playlist(&self, pl: &Playlist, title: &str) -> Result<()> {
+        self.post_form(&format!("{}/name", Self::playlist_path(pl)), &[("value", title)])?;
+        Ok(())
+    }
+
+    pub fn delete_playlist(&self, pl: &Playlist) -> Result<()> {
+        self.post_form(&format!("{}/delete", Self::playlist_path(pl)), &[])?;
+        Ok(())
+    }
+
+    /// Applies a track diff; `revision` must match the playlist's current one, otherwise the API refuses.
+    fn change_playlist(&self, pl: &Playlist, revision: u64, diff: Value) -> Result<()> {
+        let revision = revision.to_string();
+        let diff = diff.to_string();
+        self.post_form(&format!("{}/change-relative", Self::playlist_path(pl)), &[("revision", &revision), ("diff", &diff)])?;
+        Ok(())
+    }
+
+    /// Appends a track to the end of a playlist.
+    pub fn add_to_playlist(&self, pl: &Playlist, track: &Track) -> Result<()> {
+        let r = self.get(&Self::playlist_path(pl), &[])?;
+        let revision = r["revision"].as_u64().context("нет ревизии плейлиста")?;
+        let at = r["tracks"].as_array().map_or(0, Vec::len);
+        let mut t = json!({"id": track.id});
+        if let Some(a) = &track.album_id {
+            t["albumId"] = json!(a);
+        }
+        self.change_playlist(pl, revision, json!([{"op": "insert", "at": at, "tracks": [t]}]))
+    }
+
+    /// Removes the track at `index`, after checking it is still `track_id` (the playlist may have changed).
+    pub fn remove_from_playlist(&self, pl: &Playlist, index: usize, track_id: &str) -> Result<()> {
+        let r = self.get(&Self::playlist_path(pl), &[])?;
+        let revision = r["revision"].as_u64().context("нет ревизии плейлиста")?;
+        let item = &r["tracks"][index];
+        let found = id_str(&item["id"]).or_else(|| id_str(&item["track"]["id"]));
+        if found.as_deref() != Some(track_id) {
+            bail!("плейлист изменился, обновите его (R)");
+        }
+        self.change_playlist(pl, revision, json!([{"op": "delete", "from": index, "to": index + 1}]))
     }
 
     // ---------------------------------------------------------------- likes
@@ -653,6 +699,47 @@ mod tests {
         assert!(!lists.is_empty());
         let pl = lists.iter().find(|p| p.track_count > 0).expect("non-empty playlist");
         assert_eq!(api.playlist_tracks(pl).unwrap().len() as u64, pl.track_count);
+    }
+
+    /// Network test: WRITES to the account — creates a temporary private playlist, edits it and deletes it.
+    /// Run explicitly: `cargo test playlist_edit -- --ignored`.
+    #[test]
+    #[ignore]
+    fn playlist_edit() {
+        let mut api = Api::new(&test_token());
+        api.account_status().unwrap();
+        let r = api.post_form(&format!("/users/{}/playlists/create", api.uid), &[("title", "ymusic-test"), ("visibility", "private")]);
+        let kind = id_str(&r.unwrap()["kind"]).expect("kind");
+        let pl = Playlist { owner: api.uid.clone(), kind, title: "ymusic-test".into(), track_count: 0 };
+        // Delete the playlist whatever happens below.
+        struct Cleanup<'a>(&'a Api, Playlist);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                if self.0.playlists().is_ok_and(|l| l.iter().any(|p| p.key() == self.1.key())) {
+                    let _ = self.0.delete_playlist(&self.1);
+                }
+            }
+        }
+        let _cleanup = Cleanup(&api, pl.clone());
+
+        api.rename_playlist(&pl, "ymusic-test 2").unwrap();
+        assert!(api.playlists().unwrap().iter().any(|p| p.key() == pl.key() && p.title == "ymusic-test 2"));
+
+        let catalog = Track::from_json(&json!({"id": "39089632", "albums": [{"id": 60058}]})).unwrap();
+        let ugc = Track::from_json(&json!({"id": "bfc384d6-bd20-47e0-89d7-7a8657a2236a"})).unwrap();
+        api.add_to_playlist(&pl, &catalog).unwrap();
+        api.add_to_playlist(&pl, &ugc).unwrap();
+        let ids = |api: &Api| api.playlist_tracks(&pl).unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(ids(&api), ["39089632", "bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
+
+        // A stale view (wrong track at the position) is refused and nothing changes.
+        assert!(api.remove_from_playlist(&pl, 0, &ugc.id).is_err());
+        assert_eq!(ids(&api).len(), 2);
+        api.remove_from_playlist(&pl, 0, &catalog.id).unwrap();
+        assert_eq!(ids(&api), ["bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
+
+        api.delete_playlist(&pl).unwrap();
+        assert!(!api.playlists().unwrap().iter().any(|p| p.key() == pl.key()));
     }
 
     /// Network test: downloads and decodes a real image from Yandex CDN.
