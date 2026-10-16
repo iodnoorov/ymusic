@@ -42,7 +42,7 @@
 Вручную из склонированного репозитория (собирает текущие исходники):
 
 ```bash
-git clone https://github.com/rexilone/yamusic-cli
+git clone https://github.com/iodnoorov/yamusic-cli
 cd yamusic-cli/packaging/local
 makepkg -si
 ```
@@ -54,13 +54,13 @@ makepkg -si
 Запуск без установки:
 
 ```bash
-nix run github:rexilone/yamusic-cli
+nix run github:iodnoorov/yamusic-cli
 ```
 
 В профиль:
 
 ```bash
-nix profile install github:rexilone/yamusic-cli
+nix profile install github:iodnoorov/yamusic-cli
 ```
 
 В конфигурации NixOS через flake:
@@ -71,7 +71,7 @@ nix profile install github:rexilone/yamusic-cli
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     yamusic-cli = {
-      url = "github:rexilone/yamusic-cli";
+      url = "github:iodnoorov/yamusic-cli";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -93,7 +93,7 @@ nix profile install github:rexilone/yamusic-cli
 Или через overlay: `nixpkgs.overlays = [ yamusic-cli.overlays.default ];` и затем `pkgs.yamusic-cli`
 (подходит и для home-manager: `home.packages = [ pkgs.yamusic-cli ];`).
 
-Без flakes: `nix-build` в корне репозитория или `pkgs.callPackage (fetchTarball "https://github.com/rexilone/yamusic-cli/archive/main.tar.gz") { }`.
+Без flakes: `nix-build` в корне репозитория или `pkgs.callPackage (fetchTarball "https://github.com/iodnoorov/yamusic-cli/archive/main.tar.gz") { }`.
 
 mpv подтягивается автоматически.
 
@@ -102,9 +102,9 @@ mpv подтягивается автоматически.
 Нужны Rust ≥ 1.80 и `mpv` в `PATH`.
 
 ```bash
-cargo install --git https://github.com/rexilone/yamusic-cli
+cargo install --git https://github.com/iodnoorov/yamusic-cli
 # или
-git clone https://github.com/rexilone/yamusic-cli && cd yamusic-cli
+git clone https://github.com/iodnoorov/yamusic-cli && cd yamusic-cli
 cargo build --release && ./target/release/yamusic
 ```
 
