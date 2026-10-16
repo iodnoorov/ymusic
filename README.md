@@ -45,6 +45,20 @@
 yay -S ymusic-cli
 ```
 
+### Готовый бинарник
+
+Статически собранный `ymusic` для x86_64 Linux лежит в [релизах](https://github.com/iodnoorov/yamusic-cli/releases/latest) —
+работает на любом дистрибутиве, собирать из исходников не нужно. Для звука нужен установленный `mpv`.
+
+```bash
+V=0.5.0   # номер последнего релиза
+curl -LO https://github.com/iodnoorov/yamusic-cli/releases/download/v$V/ymusic-$V-x86_64-linux.tar.gz
+curl -LO https://github.com/iodnoorov/yamusic-cli/releases/download/v$V/ymusic-$V-x86_64-linux.tar.gz.sha256
+sha256sum -c ymusic-$V-x86_64-linux.tar.gz.sha256
+tar xzf ymusic-$V-x86_64-linux.tar.gz
+install -Dm755 ymusic-$V-x86_64-linux/ymusic ~/.local/bin/ymusic
+```
+
 ### Из исходников
 
 Вручную из склонированного репозитория (собирает текущие исходники):
@@ -207,6 +221,7 @@ ymusic --no-icons            # без иконок Nerd Font
 - `A` — плейлист из всех треков исполнителя выбранного (или текущего) трека.
 - Проект перенесён в репозиторий `iodnoorov/yamusic-cli`, ссылки и пакеты AUR указывают на него.
 - Программа переименована в `ymusic`, пакет — в `ymusic-cli`.
+- Пакет `ymusic-cli` в AUR и готовый статический бинарник в релизах GitHub.
 
 ## Дополнительная информация
 
