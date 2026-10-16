@@ -1,4 +1,4 @@
-# Maintainer: rexilone
+# Maintainer: Ivan Odnoorov <elcheshirecat at yandex dot ru>
 pkgname=yamusic-cli-git
 _pkgname=yamusic-cli
 pkgver=0.1.0.r0.g0000000

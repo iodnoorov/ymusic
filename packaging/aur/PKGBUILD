@@ -1,6 +1,6 @@
-# Maintainer: rexilone
+# Maintainer: Ivan Odnoorov <elcheshirecat at yandex dot ru>
 pkgname=yamusic-cli
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Terminal client for Yandex Music: My Wave, likes, stations (TUI)"
 arch=('x86_64' 'aarch64')
