@@ -47,15 +47,15 @@ yay -S ymusic-cli
 
 ### Готовый бинарник
 
-Статически собранный `ymusic` для Linux лежит в [релизах](https://github.com/iodnoorov/yamusic-cli/releases/latest) —
+Статически собранный `ymusic` для Linux лежит в [релизах](https://github.com/iodnoorov/ymusic/releases/latest) —
 работает на любом дистрибутиве, собирать из исходников не нужно. Для звука нужен установленный `mpv`.
 Есть сборки для x86_64 и aarch64 (ARM64); сборка для aarch64 не проверялась на реальном ARM-устройстве.
 
 ```bash
 V=0.5.0         # номер последнего релиза
 A=$(uname -m)   # x86_64 или aarch64
-curl -LO https://github.com/iodnoorov/yamusic-cli/releases/download/v$V/ymusic-$V-$A-linux.tar.gz
-curl -LO https://github.com/iodnoorov/yamusic-cli/releases/download/v$V/ymusic-$V-$A-linux.tar.gz.sha256
+curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz
+curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz.sha256
 sha256sum -c ymusic-$V-$A-linux.tar.gz.sha256
 tar xzf ymusic-$V-$A-linux.tar.gz
 install -Dm755 ymusic-$V-$A-linux/ymusic ~/.local/bin/ymusic
@@ -66,8 +66,8 @@ install -Dm755 ymusic-$V-$A-linux/ymusic ~/.local/bin/ymusic
 Вручную из склонированного репозитория (собирает текущие исходники):
 
 ```bash
-git clone https://github.com/iodnoorov/yamusic-cli
-cd yamusic-cli/packaging/local
+git clone https://github.com/iodnoorov/ymusic
+cd ymusic/packaging/local
 makepkg -si
 ```
 
@@ -78,13 +78,13 @@ makepkg -si
 Запуск без установки:
 
 ```bash
-nix run github:iodnoorov/yamusic-cli
+nix run github:iodnoorov/ymusic
 ```
 
 В профиль:
 
 ```bash
-nix profile install github:iodnoorov/yamusic-cli
+nix profile install github:iodnoorov/ymusic
 ```
 
 В конфигурации NixOS через flake:
@@ -95,7 +95,7 @@ nix profile install github:iodnoorov/yamusic-cli
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     ymusic-cli = {
-      url = "github:iodnoorov/yamusic-cli";
+      url = "github:iodnoorov/ymusic";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -117,7 +117,7 @@ nix profile install github:iodnoorov/yamusic-cli
 Или через overlay: `nixpkgs.overlays = [ ymusic-cli.overlays.default ];` и затем `pkgs.ymusic-cli`
 (подходит и для home-manager: `home.packages = [ pkgs.ymusic-cli ];`).
 
-Без flakes: `nix-build` в корне репозитория или `pkgs.callPackage (fetchTarball "https://github.com/iodnoorov/yamusic-cli/archive/main.tar.gz") { }`.
+Без flakes: `nix-build` в корне репозитория или `pkgs.callPackage (fetchTarball "https://github.com/iodnoorov/ymusic/archive/main.tar.gz") { }`.
 
 mpv подтягивается автоматически.
 
@@ -126,9 +126,9 @@ mpv подтягивается автоматически.
 Нужны Rust ≥ 1.80 и `mpv` в `PATH`.
 
 ```bash
-cargo install --git https://github.com/iodnoorov/yamusic-cli
+cargo install --git https://github.com/iodnoorov/ymusic
 # или
-git clone https://github.com/iodnoorov/yamusic-cli && cd yamusic-cli
+git clone https://github.com/iodnoorov/ymusic && cd ymusic
 cargo build --release && ./target/release/ymusic
 ```
 
@@ -221,7 +221,7 @@ ymusic --no-icons            # без иконок Nerd Font
 
 - `y` — копирование в буфер обмена ссылки на выбранный (или текущий) трек.
 - `A` — плейлист из всех треков исполнителя выбранного (или текущего) трека.
-- Проект перенесён в репозиторий `iodnoorov/yamusic-cli`, ссылки и пакеты AUR указывают на него.
+- Проект перенесён в репозиторий `iodnoorov/ymusic`, ссылки и пакеты AUR указывают на него.
 - Программа переименована в `ymusic`, пакет — в `ymusic-cli`.
 - Пакет `ymusic-cli` в AUR и готовые статические бинарники (x86_64, aarch64) в релизах GitHub.
 

@@ -29,7 +29,7 @@ rustPlatform.buildRustPackage {
 
   meta = {
     description = "Terminal client for Yandex Music: My Wave, likes, stations (TUI)";
-    homepage = "https://github.com/iodnoorov/yamusic-cli";
+    homepage = "https://github.com/iodnoorov/ymusic";
     license = lib.licenses.mit;
     mainProgram = "ymusic";
     platforms = lib.platforms.linux;
