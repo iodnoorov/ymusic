@@ -109,6 +109,22 @@ pub struct Station {
 }
 
 #[derive(Clone, Debug)]
+pub struct Playlist {
+    /// Owner uid and playlist kind identify a playlist.
+    pub owner: String,
+    pub kind: String,
+    pub title: String,
+    pub track_count: u64,
+}
+
+impl Playlist {
+    /// Unique key (titles may repeat).
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.owner, self.kind)
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct Account {
     pub uid: String,
     pub login: String,
@@ -243,6 +259,47 @@ impl Api {
             }
         }
         Ok(out)
+    }
+
+    // ---------------------------------------------------------------- playlists
+
+    /// Playlists of the current user.
+    pub fn playlists(&self) -> Result<Vec<Playlist>> {
+        let r = self.get(&format!("/users/{}/playlists/list", self.uid), &[])?;
+        Ok(r.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| {
+                Some(Playlist {
+                    owner: id_str(&p["owner"]["uid"]).or_else(|| id_str(&p["uid"])).unwrap_or_else(|| self.uid.clone()),
+                    kind: id_str(&p["kind"])?,
+                    title: p["title"].as_str().unwrap_or("Без названия").to_string(),
+                    track_count: p["trackCount"].as_u64().unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    /// Tracks of a playlist, in playlist order.
+    pub fn playlist_tracks(&self, pl: &Playlist) -> Result<Vec<Track>> {
+        let r = self.get(&format!("/users/{}/playlists/{}", pl.owner, pl.kind), &[])?;
+        let items = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let full: Option<Vec<Track>> = items.iter().map(|t| Track::from_json(&t["track"])).collect();
+        if let Some(tracks) = full {
+            return Ok(tracks);
+        }
+        // Large playlists may come without track objects: resolve them by id.
+        let ids: Vec<String> = items
+            .iter()
+            .filter_map(|t| {
+                let id = id_str(&t["id"])?;
+                Some(match id_str(&t["albumId"]) {
+                    Some(a) => format!("{id}:{a}"),
+                    None => id,
+                })
+            })
+            .collect();
+        self.tracks(&ids)
     }
 
     // ---------------------------------------------------------------- likes
@@ -570,14 +627,32 @@ mod tests {
         assert_eq!(cover_url("avatars.yandex.net/x/%%"), "https://avatars.yandex.net/x/400x400");
     }
 
-    /// Network test: needs a token in the config. Run with `cargo test -- --ignored`.
+    /// Token for network tests: `YMUSIC_TOKEN`, otherwise the one saved in the config.
+    fn test_token() -> String {
+        crate::config::env_str("TOKEN").or_else(|| crate::config::Config::load().token).expect("token")
+    }
+
+    /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn artist_tracks() {
-        let token = crate::config::Config::load().token.expect("token");
+        let token = test_token();
         let tracks = Api::new(&token).artist_tracks("161243").unwrap();
         assert!(tracks.len() > 100, "{}", tracks.len());
         assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+    }
+
+    /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn playlists() {
+        let token = test_token();
+        let mut api = Api::new(&token);
+        api.account_status().unwrap();
+        let lists = api.playlists().unwrap();
+        assert!(!lists.is_empty());
+        let pl = lists.iter().find(|p| p.track_count > 0).expect("non-empty playlist");
+        assert_eq!(api.playlist_tracks(pl).unwrap().len() as u64, pl.track_count);
     }
 
     /// Network test: downloads and decodes a real image from Yandex CDN.

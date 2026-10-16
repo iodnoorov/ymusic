@@ -195,6 +195,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Stations => draw_stations(f, app, content),
         Tab::Liked => draw_liked(f, app, content),
         Tab::Search => draw_search(f, app, content),
+        Tab::Playlists => draw_playlists(f, app, content),
     }
     draw_player(f, app, player);
     draw_hints(f, app, hints);
@@ -205,7 +206,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let i = ic();
-    let tabs = [(i.wave, "Волна"), (i.stations, "Станции"), (i.liked, "Мне нравится"), (i.search, "Поиск")];
+    let tabs =
+        [(i.wave, "Волна"), (i.stations, "Станции"), (i.liked, "Мне нравится"), (i.search, "Поиск"), (i.queue, "Плейлисты")];
     let mut spans = vec![
         Span::styled(format!(" {} ", i.logo), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()),
         Span::styled(" ymusic ", Style::new().fg(ACCENT).bold()),
@@ -447,10 +449,11 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
         let block = panel(i.wave, "Моя волна");
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let rows: [(&str, &str); 5] = [
+        let rows: [(&str, &str); 6] = [
             ("w", "запустить Мою волну"),
             ("2", "станции: жанры, настроения, занятия"),
             ("3", "мои лайки"),
+            ("5", "мои плейлисты"),
             ("/", "поиск"),
             ("?", "все горячие клавиши"),
         ];
@@ -497,6 +500,62 @@ fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
     let mut st = std::mem::take(&mut app.liked_state);
     render_tracks(f, area, app, &app.liked, &mut st, playing, false, panel(ic().liked, title));
     app.liked_state = st;
+}
+
+fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
+    let i = ic();
+    let title = if app.playlists_loading && app.playlists.is_empty() {
+        format!("Плейлисты · {}", spinner(app.tick))
+    } else {
+        format!("Плейлисты · {}", app.playlists.len())
+    };
+    let block = panel(i.queue, title);
+    if app.playlists.is_empty() && !app.playlists_loading {
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let [v] = Layout::vertical([Constraint::Length(1)]).flex(Flex::Center).areas(inner);
+        f.render_widget(Paragraph::new(Span::styled("Плейлистов нет", Style::new().fg(SUB))).alignment(Alignment::Center), v);
+        return;
+    }
+    let playing = matches!(app.source, Source::List(_)).then_some(app.playing_playlist.as_deref()).flatten();
+    let rows: Vec<Row> = app
+        .playlists
+        .iter()
+        .enumerate()
+        .map(|(n, p)| {
+            let on = playing == Some(p.key().as_str());
+            let num = if on {
+                let s = if app.paused { i.pause } else { equalizer(app.tick) };
+                Span::styled(s, Style::new().fg(ACCENT).bold())
+            } else {
+                Span::styled(format!("{}", n + 1), Style::new().fg(MUTED))
+            };
+            let title_style = if on { Style::new().fg(ACCENT).bold() } else { Style::new().fg(Color::Reset) };
+            Row::new(vec![
+                Cell::from(Line::from(num).alignment(Alignment::Right)),
+                Cell::from(Span::styled(p.title.clone(), title_style)),
+                Cell::from(
+                    Line::from(Span::styled(format!("{} {}", p.track_count, i.note), Style::new().fg(MUTED)))
+                        .alignment(Alignment::Right),
+                ),
+            ])
+        })
+        .collect();
+    let header = Row::new(vec![
+        Cell::from(Line::from("#").alignment(Alignment::Right)),
+        Cell::from("Название"),
+        Cell::from(Line::from("Треков").alignment(Alignment::Right)),
+    ])
+    .style(Style::new().fg(MUTED))
+    .bottom_margin(1);
+    let table = Table::new(rows, [Constraint::Length(4), Constraint::Fill(1), Constraint::Length(8)])
+        .header(header)
+        .column_spacing(2)
+        .block(block)
+        .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+        .highlight_spacing(HighlightSpacing::Always);
+    f.render_stateful_widget(table, area, &mut app.playlists_state);
 }
 
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
@@ -671,6 +730,14 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
                 ("?", "помощь"),
                 ("q", "выход"),
             ],
+            Tab::Playlists => &[
+                ("Enter", "играть"),
+                ("s", "перемешать"),
+                ("R", "обновить"),
+                ("␣", "пауза"),
+                ("n", "далее"),
+                ("?", "помощь"),
+            ],
             Tab::Liked | Tab::Search => &[
                 ("Enter", "играть"),
                 ("s", "перемешать"),
@@ -731,7 +798,7 @@ fn draw_help(f: &mut Frame) {
             i.keys,
             "Навигация",
             &[
-                ("1-4  Tab", "вкладки"),
+                ("1-5  Tab", "вкладки"),
                 ("j k  ↑ ↓", "перемещение"),
                 ("g  G", "в начало / в конец"),
                 ("Enter", "играть"),
@@ -805,6 +872,13 @@ mod tests {
         app.liked = vec![t.clone()];
         app.liked_ids.insert("1".into());
         app.liked_loading = false;
+        app.playlists = ["Bloodborne soundtracks", "В дорогу"]
+            .iter()
+            .enumerate()
+            .map(|(n, t)| crate::api::Playlist { owner: "1".into(), kind: n.to_string(), title: (*t).into(), track_count: 61 })
+            .collect();
+        app.playlists_loading = false;
+        app.playlists_state.select(Some(0));
         app.time_pos = 61.0;
         app.duration = 220.0;
         app.status.clear();

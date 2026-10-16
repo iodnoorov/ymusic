@@ -1,6 +1,6 @@
 //! Application state and logic.
 
-use crate::api::{default_stations, iso_now, Account, Api, Station, Track, WaveBatch, MY_WAVE};
+use crate::api::{default_stations, iso_now, Account, Api, Playlist, Station, Track, WaveBatch, MY_WAVE};
 use crate::player::{Player, PlayerEvent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
@@ -17,7 +17,9 @@ pub enum Msg {
     Liked(Result<Vec<Track>, String>),
     Stations(Vec<Station>),
     Search(Result<Vec<Track>, String>),
-    ArtistTracks { name: String, result: Result<Vec<Track>, String> },
+    Playlists(Result<Vec<Playlist>, String>),
+    /// Tracks loaded in the background to be played as a list named `name`.
+    ListLoaded { name: String, shuffle: bool, playlist: Option<String>, result: Result<Vec<Track>, String> },
     WaveStarted { station: String, name: String, result: Result<WaveBatch, String> },
     WaveMore(Result<WaveBatch, String>),
     LikeFailed { track: Track, like: bool, err: String },
@@ -38,10 +40,11 @@ pub enum Tab {
     Stations,
     Liked,
     Search,
+    Playlists,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Wave, Tab::Stations, Tab::Liked, Tab::Search];
+    pub const ALL: [Tab; 5] = [Tab::Wave, Tab::Stations, Tab::Liked, Tab::Search, Tab::Playlists];
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap()
     }
@@ -107,6 +110,12 @@ pub struct App {
     pub search_loading: bool,
     pub search_state: TableState,
 
+    pub playlists: Vec<Playlist>,
+    pub playlists_loading: bool,
+    pub playlists_state: TableState,
+    /// Key of the playlist the queue was started from.
+    pub playing_playlist: Option<String>,
+
     pub time_pos: f64,
     pub duration: f64,
     pub paused: bool,
@@ -160,6 +169,10 @@ impl App {
             search_results: Vec::new(),
             search_loading: false,
             search_state: TableState::default(),
+            playlists: Vec::new(),
+            playlists_loading: true,
+            playlists_state: TableState::default(),
+            playing_playlist: None,
             time_pos: 0.0,
             duration: 0.0,
             paused: false,
@@ -178,6 +191,7 @@ impl App {
         app.set_stations(default_stations());
         app.load_liked();
         app.load_stations();
+        app.load_playlists();
         if !app.account.has_plus {
             app.set_status("Внимание: без подписки Плюс доступны только 30-секундные фрагменты");
         }
@@ -247,6 +261,11 @@ impl App {
             let _ = tx.send(Msg::LikedIds(ids.clone()));
             Some(Msg::Liked(api.tracks(&ids).map_err(|e| format!("{e:#}"))))
         });
+    }
+
+    fn load_playlists(&mut self) {
+        self.playlists_loading = true;
+        self.spawn(|api| Some(Msg::Playlists(api.playlists().map_err(|e| format!("{e:#}")))));
     }
 
     fn load_stations(&self) {
@@ -427,6 +446,7 @@ impl App {
         self.report_end(End::Skip);
         self.queue = tracks;
         self.preload = None;
+        self.playing_playlist = None;
         self.source = Source::List(name.to_string());
         self.wave = None;
         self.pos = None;
@@ -621,13 +641,32 @@ impl App {
                     Err(e) => self.set_status(format!("Ошибка поиска: {e}")),
                 }
             }
-            Msg::ArtistTracks { name, result } => match result {
-                Ok(list) if list.is_empty() => self.set_status(format!("У исполнителя «{name}» нет треков")),
-                Ok(list) => {
-                    self.play_list(&format!("Исполнитель: {name}"), list, 0);
+            Msg::Playlists(r) => {
+                self.playlists_loading = false;
+                match r {
+                    Ok(list) => {
+                        self.playlists = list;
+                        let n = self.playlists.len();
+                        let sel = self.playlists_state.selected().unwrap_or(0);
+                        self.playlists_state.select((n > 0).then(|| sel.min(n - 1)));
+                    }
+                    Err(e) => self.set_status(format!("Не удалось загрузить плейлисты: {e}")),
+                }
+            }
+            Msg::ListLoaded { name, shuffle, playlist, result } => match result {
+                Ok(list) if list.is_empty() => self.set_status(format!("{name}: нет треков")),
+                Ok(mut list) => {
+                    let name = if shuffle {
+                        shuffle_tracks(&mut list);
+                        format!("{name} (перемешано)")
+                    } else {
+                        name
+                    };
+                    self.play_list(&name, list, 0);
+                    self.playing_playlist = playlist;
                     self.tab = Tab::Wave;
                 }
-                Err(e) => self.set_status(format!("Не удалось загрузить треки исполнителя: {e}")),
+                Err(e) => self.set_status(format!("{name}: не удалось загрузить треки: {e}")),
             },
             Msg::WaveStarted { station, name, result } => match result {
                 Ok(b) => {
@@ -769,10 +808,12 @@ impl App {
             }
             KeyCode::Char('y') => self.copy_link(),
             KeyCode::Char('A') => self.play_artist(),
+            KeyCode::Char('s') if self.tab == Tab::Playlists => self.play_playlist(true),
             KeyCode::Char('s') => self.shuffle_play(),
             KeyCode::Char('R') => {
                 self.load_liked();
                 self.load_stations();
+                self.load_playlists();
                 self.set_status("Обновление…");
             }
             KeyCode::Left => self.player.seek(-10.0),
@@ -784,8 +825,9 @@ impl App {
             KeyCode::Char('2') => self.tab = Tab::Stations,
             KeyCode::Char('3') => self.tab = Tab::Liked,
             KeyCode::Char('4') => self.tab = Tab::Search,
-            KeyCode::Tab => self.tab = Tab::ALL[(self.tab.index() + 1) % 4],
-            KeyCode::BackTab => self.tab = Tab::ALL[(self.tab.index() + 3) % 4],
+            KeyCode::Char('5') => self.tab = Tab::Playlists,
+            KeyCode::Tab => self.tab = Tab::ALL[(self.tab.index() + 1) % Tab::ALL.len()],
+            KeyCode::BackTab => self.tab = Tab::ALL[(self.tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len()],
             KeyCode::Char('/') => {
                 self.tab = Tab::Search;
                 self.search_editing = true;
@@ -832,7 +874,7 @@ impl App {
             Tab::Liked => self.liked_state.selected().and_then(|i| self.liked.get(i)),
             Tab::Search => self.search_state.selected().and_then(|i| self.search_results.get(i)),
             Tab::Wave => self.queue_state.selected().and_then(|i| self.queue.get(i)),
-            Tab::Stations => None,
+            Tab::Stations | Tab::Playlists => None,
         }
     }
 
@@ -844,6 +886,7 @@ impl App {
             Tab::Wave => self.queue_state.select(step(self.queue_state.selected(), self.queue.len())),
             Tab::Liked => self.liked_state.select(step(self.liked_state.selected(), self.liked.len())),
             Tab::Search => self.search_state.select(step(self.search_state.selected(), self.search_results.len())),
+            Tab::Playlists => self.playlists_state.select(step(self.playlists_state.selected(), self.playlists.len())),
             Tab::Stations => {
                 self.stations_state.select(step(self.stations_state.selected(), self.stations.len()));
                 self.fix_station_selection(if d >= 0 { 1 } else { -1 });
@@ -874,7 +917,20 @@ impl App {
                     self.play_list("Поиск", self.search_results.clone(), i);
                 }
             }
+            Tab::Playlists => self.play_playlist(false),
         }
+    }
+
+    /// Loads the selected playlist and plays it (in order or shuffled).
+    fn play_playlist(&mut self, shuffle: bool) {
+        let Some(pl) = self.playlists_state.selected().and_then(|i| self.playlists.get(i)).cloned() else {
+            return;
+        };
+        self.set_status(format!("Загрузка плейлиста «{}»…", pl.title));
+        self.spawn(move |api| {
+            let result = api.playlist_tracks(&pl).map_err(|e| format!("{e:#}"));
+            Some(Msg::ListLoaded { name: format!("Плейлист: {}", pl.title), shuffle, playlist: Some(pl.key()), result })
+        });
     }
 
     /// Copies the link to the selected (or current) track to the clipboard.
@@ -901,7 +957,7 @@ impl App {
         self.set_status(format!("Загрузка треков: {name}…"));
         self.spawn(move |api| {
             let result = api.artist_tracks(&id).map_err(|e| format!("{e:#}"));
-            Some(Msg::ArtistTracks { name, result })
+            Some(Msg::ListLoaded { name: format!("Исполнитель: {name}"), shuffle: false, playlist: None, result })
         });
     }
 
@@ -910,18 +966,22 @@ impl App {
             Tab::Search => ("Поиск (перемешано)", self.search_results.clone()),
             _ => ("Мне нравится (перемешано)", self.liked.clone()),
         };
-        let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
-        for i in (1..list.len()).rev() {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            list.swap(i, (seed % (i as u64 + 1)) as usize);
-        }
+        shuffle_tracks(&mut list);
         self.play_list(name, list, 0);
     }
 
     pub fn save_volume(&self) -> u8 {
         self.volume.clamp(0.0, 100.0) as u8
+    }
+}
+
+fn shuffle_tracks(list: &mut [Track]) {
+    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
+    for i in (1..list.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        list.swap(i, (seed % (i as u64 + 1)) as usize);
     }
 }
 
