@@ -54,7 +54,7 @@ impl Player {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .context("не удалось запустить mpv — установите его (pacman -S mpv / nix: pkgs.mpv)")?;
+            .context("не удалось запустить mpv — установите его")?;
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let stream = loop {

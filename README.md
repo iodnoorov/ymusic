@@ -75,54 +75,6 @@ makepkg -si
 
 После установки приложение запускается командой `ymusic` из любого терминала. Удалить: `sudo pacman -R ymusic-cli`.
 
-### NixOS / Nix
-
-Запуск без установки:
-
-```bash
-nix run github:iodnoorov/ymusic
-```
-
-В профиль:
-
-```bash
-nix profile install github:iodnoorov/ymusic
-```
-
-В конфигурации NixOS через flake:
-
-```nix
-# flake.nix
-{
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    ymusic-cli = {
-      url = "github:iodnoorov/ymusic";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-  };
-
-  outputs = { nixpkgs, ymusic-cli, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        ./configuration.nix
-        ({ pkgs, ... }: {
-          environment.systemPackages = [ ymusic-cli.packages.${pkgs.stdenv.hostPlatform.system}.default ];
-        })
-      ];
-    };
-  };
-}
-```
-
-Или через overlay: `nixpkgs.overlays = [ ymusic-cli.overlays.default ];` и затем `pkgs.ymusic-cli`
-(подходит и для home-manager: `home.packages = [ pkgs.ymusic-cli ];`).
-
-Без flakes: `nix-build` в корне репозитория или `pkgs.callPackage (fetchTarball "https://github.com/iodnoorov/ymusic/archive/main.tar.gz") { }`.
-
-mpv подтягивается автоматически.
-
 ### Из исходников (Cargo)
 
 Нужны Rust ≥ 1.80 и `mpv` в `PATH`.
@@ -233,6 +185,7 @@ ymusic --no-icons            # без иконок Nerd Font
 - `!` — окно «О программе»: версия и кликабельные ссылки на репозиторий, пакет в AUR и оригинальный проект.
 - Проект перенесён в репозиторий `iodnoorov/ymusic`, ссылки и пакеты AUR указывают на него.
 - Программа переименована в `ymusic`, пакет — в `ymusic-cli`. Настройки — в `~/.config/ymusic/`, переменные окружения — `YMUSIC_*`.
+- Убрана поддержка Nix/NixOS: проект поддерживает только Arch Linux (AUR), готовый бинарник и сборку из исходников.
 - Пакет `ymusic-cli` в AUR и готовые статические бинарники (x86_64, aarch64) в релизах GitHub.
 
 ## Дополнительная информация
