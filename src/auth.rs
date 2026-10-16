@@ -20,8 +20,8 @@ type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub fn auth_url() -> String {
-    std::env::var("YAMUSIC_LOGIN_URL")
-        .unwrap_or_else(|_| format!("https://oauth.yandex.ru/authorize?response_type=token&client_id={CLIENT_ID}"))
+    crate::config::env_str("LOGIN_URL")
+        .unwrap_or_else(|| format!("https://oauth.yandex.ru/authorize?response_type=token&client_id={CLIENT_ID}"))
 }
 
 /// Interactive menu shown by `ymusic login` and on first start.
@@ -164,7 +164,7 @@ fn default_browser_bin() -> Option<String> {
 }
 
 fn find_browser() -> Option<Browser> {
-    if let Ok(b) = std::env::var("YAMUSIC_BROWSER") {
+    if let Some(b) = crate::config::env_str("BROWSER") {
         let bin = which(&b)?;
         let kind = classify(&bin).unwrap_or(Kind::Chromium);
         return Some(Browser { bin, kind });
@@ -197,13 +197,13 @@ fn free_port() -> Result<u16> {
 
 pub fn browser_login() -> Result<String> {
     let browser = find_browser().ok_or_else(|| {
-        anyhow!("не найден поддерживаемый браузер (Firefox/Zen/LibreWolf или Chromium/Chrome/Brave/Яндекс Браузер); укажите его в YAMUSIC_BROWSER")
+        anyhow!("не найден поддерживаемый браузер (Firefox/Zen/LibreWolf или Chromium/Chrome/Brave/Яндекс Браузер); укажите его в YMUSIC_BROWSER")
     })?;
     let port = free_port()?;
     let profile = std::env::temp_dir().join(format!("ymusic-login-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&profile);
     std::fs::create_dir_all(&profile)?;
-    let headless = std::env::var_os("YAMUSIC_BROWSER_HEADLESS").is_some();
+    let headless = crate::config::env("BROWSER_HEADLESS").is_some();
 
     let mut cmd = Command::new(&browser.bin);
     match browser.kind {

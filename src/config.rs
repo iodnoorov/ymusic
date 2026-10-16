@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -27,13 +28,39 @@ impl Default for Config {
     }
 }
 
-pub fn dir() -> PathBuf {
+/// Environment variable `YMUSIC_<name>`, falling back to the pre-rename `YAMUSIC_<name>`.
+pub fn env(name: &str) -> Option<OsString> {
+    std::env::var_os(format!("YMUSIC_{name}")).or_else(|| std::env::var_os(format!("YAMUSIC_{name}")))
+}
+
+/// Like [`env`], as a string (`None` if unset or not valid UTF-8).
+pub fn env_str(name: &str) -> Option<String> {
+    env(name).and_then(|v| v.into_string().ok())
+}
+
+fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("yamusic-cli")
+}
+
+pub fn dir() -> PathBuf {
+    config_home().join("ymusic")
+}
+
+/// Config directory used before the program was renamed to `ymusic`.
+fn legacy_dir() -> PathBuf {
+    config_home().join("yamusic-cli")
+}
+
+/// Moves the pre-rename config directory to the new location (once, if only the old one exists).
+fn migrate() {
+    let (old, new) = (legacy_dir(), dir());
+    if old.is_dir() && !new.exists() {
+        let _ = std::fs::rename(&old, &new);
+    }
 }
 
 pub fn path() -> PathBuf {
@@ -42,6 +69,7 @@ pub fn path() -> PathBuf {
 
 impl Config {
     pub fn load() -> Config {
+        migrate();
         std::fs::read_to_string(path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())

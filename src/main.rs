@@ -80,7 +80,7 @@ fn main() -> Result<()> {
         app.start_station_id(api::MY_WAVE);
     }
 
-    ui::set_nerd_icons(cfg.icons && !cli.no_icons && std::env::var_os("YAMUSIC_NO_ICONS").is_none());
+    ui::set_nerd_icons(cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none());
     let mut terminal = ratatui::init();
     // Must run after entering the alternate screen and before reading events.
     app.picker = Some(
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
 }
 
 fn token(cfg: &mut Config) -> Result<String> {
-    if let Some(t) = std::env::var("YAMUSIC_TOKEN").ok().filter(|t| !t.is_empty()) {
+    if let Some(t) = config::env_str("TOKEN").filter(|t| !t.is_empty()) {
         return Ok(t);
     }
     if let Some(t) = cfg.token.clone() {
