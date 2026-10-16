@@ -16,6 +16,24 @@ const MD5_SALT: &str = "XGRlBW9FXlekgbPrRHuSiA";
 const FILE_INFO_KEY: &str = "p93jhgh689SBReK6ghtw62";
 pub const MY_WAVE: &str = "user:onyourwave";
 
+pub struct Quality {
+    /// `quality` parameter of `get-file-info`; stored in the config.
+    pub id: &'static str,
+    pub name: &'static str,
+    pub note: &'static str,
+}
+
+pub const QUALITIES: &[Quality] = &[
+    Quality { id: "lq", name: "Экономия трафика", note: "≈64 кбит/с" },
+    Quality { id: "nq", name: "Обычное качество", note: "≈192 кбит/с" },
+    Quality { id: "lossless", name: "Лучшее качество", note: "максимум, что отдаёт сервер" },
+];
+
+/// Index of the quality with this id (normal quality if unknown).
+pub fn quality_index(id: &str) -> usize {
+    QUALITIES.iter().position(|q| q.id == id).unwrap_or(1)
+}
+
 #[derive(Clone, Debug)]
 pub struct Track {
     pub id: String,
@@ -492,10 +510,11 @@ impl Api {
         Ok(image::load_from_memory(&bytes)?)
     }
 
-    pub fn track_url(&self, track_id: &str) -> Result<String> {
-        match self.download_info_url(track_id) {
-            Ok(u) => Ok(u),
-            Err(e) => self.file_info_url(track_id).map_err(|e2| anyhow!("{e:#}; {e2:#}")),
+    /// Stream URL of a track in the given quality (`QUALITIES` id).
+    pub fn track_url(&self, track_id: &str, quality: &str) -> Result<String> {
+        match self.file_info(track_id, quality) {
+            Ok(info) => Ok(info.url),
+            Err(e) => self.download_info_url(track_id).map_err(|e2| anyhow!("{e:#}; {e2:#}")),
         }
     }
 
@@ -522,10 +541,11 @@ impl Api {
         Ok(format!("https://{host}/get-mp3/{sign}/{ts}{path}"))
     }
 
-    fn file_info_url(&self, track_id: &str) -> Result<String> {
+    fn file_info(&self, track_id: &str, quality: &str) -> Result<FileInfo> {
         let id = track_id.split(':').next().unwrap_or(track_id);
         let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
-        let (quality, codecs, transports) = ("lossless", "flac,aac,he-aac,mp3", "raw");
+        // Low quality exists only in mp4 containers: without `*-mp4` codecs the server falls back to 192 kbit/s.
+        let (codecs, transports) = ("flac,flac-mp4,aac,he-aac,mp3,aac-mp4,he-aac-mp4", "raw");
         let mut mac = Hmac::<Sha256>::new_from_slice(FILE_INFO_KEY.as_bytes())?;
         mac.update(format!("{ts}{id}{quality}{}{transports}", codecs.replace(',', "")).as_bytes());
         let sign = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
@@ -535,12 +555,21 @@ impl Api {
             &[("ts", &ts), ("trackId", id), ("quality", quality), ("codecs", codecs), ("transports", transports), ("sign", sign)],
         )?;
         let di = &r["downloadInfo"];
-        di["url"]
-            .as_str()
-            .or(di["urls"][0].as_str())
-            .map(String::from)
-            .context("get-file-info не вернул ссылку")
+        let url = di["url"].as_str().or(di["urls"][0].as_str()).context("get-file-info не вернул ссылку")?;
+        Ok(FileInfo {
+            url: url.to_string(),
+            codec: di["codec"].as_str().unwrap_or("").to_string(),
+            bitrate: di["bitrate"].as_u64().unwrap_or(0),
+        })
     }
+}
+
+struct FileInfo {
+    url: String,
+    #[cfg_attr(not(test), allow(dead_code))]
+    codec: String,
+    #[cfg_attr(not(test), allow(dead_code))]
+    bitrate: u64,
 }
 
 pub fn category_name(ty: &str) -> &str {
@@ -740,6 +769,21 @@ mod tests {
 
         api.delete_playlist(&pl).unwrap();
         assert!(!api.playlists().unwrap().iter().any(|p| p.key() == pl.key()));
+    }
+
+    /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn qualities() {
+        let api = Api::new(&test_token());
+        let lq = api.file_info("39089632", "lq").unwrap();
+        let nq = api.file_info("39089632", "nq").unwrap();
+        let best = api.file_info("39089632", "lossless").unwrap();
+        assert!(lq.bitrate > 0 && lq.bitrate < nq.bitrate, "{} {}", lq.bitrate, nq.bitrate);
+        assert!(best.bitrate >= nq.bitrate || best.codec.starts_with("flac"));
+        assert!(api.track_url("39089632:60058", "lq").unwrap().starts_with("https://"));
+        // Uploaded (UGC) tracks resolve too.
+        assert!(api.track_url("bfc384d6-bd20-47e0-89d7-7a8657a2236a", "lq").unwrap().starts_with("https://"));
     }
 
     /// Network test: downloads and decodes a real image from Yandex CDN.

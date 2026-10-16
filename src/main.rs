@@ -3,6 +3,7 @@ mod app;
 mod auth;
 mod clipboard;
 mod config;
+mod eq;
 mod player;
 mod ui;
 
@@ -74,6 +75,8 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let player = player::Player::spawn(tx.clone(), cfg.volume)?;
     let mut app = app::App::new(api, account, tx, player, cfg.volume);
+    app.set_eq(eq::index(&cfg.eq));
+    app.quality = api::quality_index(&cfg.quality);
     if let Some(id) = cli.station {
         app.start_station_id(&id);
     } else if cli.wave {
@@ -118,6 +121,8 @@ fn main() -> Result<()> {
     ratatui::restore();
 
     cfg.volume = app.save_volume();
+    cfg.eq = eq::PRESETS[app.eq].id.to_string();
+    cfg.quality = api::QUALITIES[app.quality].id.to_string();
     let _ = cfg.save();
     res
 }

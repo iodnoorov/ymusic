@@ -1,6 +1,6 @@
 //! Application state and logic.
 
-use crate::api::{default_stations, iso_now, Account, Api, Playlist, Station, Track, WaveBatch, MY_WAVE};
+use crate::api::{default_stations, iso_now, Account, Api, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
 use crate::player::{Player, PlayerEvent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
@@ -90,6 +90,9 @@ pub enum Modal {
     ConfirmRemove { pl: Playlist, index: usize, track: Track },
     ConfirmDelete { pl: Playlist },
     Rename { pl: Playlist, input: String },
+    /// Equalizer preset picker; `prev` is restored on Esc.
+    Equalizer { prev: usize, sel: usize },
+    Quality { sel: usize },
 }
 
 pub enum StationRow {
@@ -138,6 +141,10 @@ pub struct App {
     pub open_playlist: Option<OpenPlaylist>,
     pub open_state: TableState,
     pub modal: Option<Modal>,
+    /// Current equalizer preset (index into `eq::PRESETS`).
+    pub eq: usize,
+    /// Sound quality (index into `api::QUALITIES`).
+    pub quality: usize,
 
     pub time_pos: f64,
     pub duration: f64,
@@ -200,6 +207,8 @@ impl App {
             open_playlist: None,
             open_state: TableState::default(),
             modal: None,
+            eq: 0,
+            quality: 1,
             time_pos: 0.0,
             duration: 0.0,
             paused: false,
@@ -366,7 +375,8 @@ impl App {
         }
         let gen = self.gen;
         let id = self.queue[idx].full_id();
-        self.spawn(move |api| Some(Msg::Url { gen, result: api.track_url(&id).map_err(|e| format!("{e:#}")) }));
+        let q = QUALITIES[self.quality].id;
+        self.spawn(move |api| Some(Msg::Url { gen, result: api.track_url(&id, q).map_err(|e| format!("{e:#}")) }));
     }
 
     /// Updates state for a new current track. `preloaded`: mpv already switched to it.
@@ -409,8 +419,9 @@ impl App {
         self.preload_pending = true;
         self.load_cover(track.cover.clone());
         let gen = self.gen;
+        let q = QUALITIES[self.quality].id;
         self.spawn(move |api| {
-            let result = api.track_url(&track.full_id()).map_err(|e| format!("{e:#}"));
+            let result = api.track_url(&track.full_id(), q).map_err(|e| format!("{e:#}"));
             Some(Msg::Preload { gen, idx, id: track.id, result })
         });
     }
@@ -845,6 +856,8 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
             KeyCode::Char('!') => self.show_about = true,
+            KeyCode::Char('E') => self.modal = Some(Modal::Equalizer { prev: self.eq, sel: self.eq }),
+            KeyCode::Char('B') => self.modal = Some(Modal::Quality { sel: self.quality }),
             KeyCode::Char(' ') | KeyCode::Char('p') => self.player.toggle_pause(),
             KeyCode::Char('n') => self.next(End::Skip),
             KeyCode::Char('b') => self.prev(),
@@ -935,6 +948,12 @@ impl App {
             KeyCode::Char(c) => self.search_input.push(c),
             _ => {}
         }
+    }
+
+    pub fn set_eq(&mut self, idx: usize) {
+        let idx = idx.min(crate::eq::PRESETS.len() - 1);
+        self.eq = idx;
+        self.player.set_audio_filter(&crate::eq::PRESETS[idx].filter());
     }
 
     fn change_volume(&mut self, d: f64) {
@@ -1153,6 +1172,42 @@ impl App {
                     });
                 }
             }
+            Modal::Equalizer { prev, mut sel } => {
+                let last = crate::eq::PRESETS.len() - 1;
+                match code {
+                    KeyCode::Esc | KeyCode::Char('q') => self.set_eq(prev),
+                    KeyCode::Enter => {
+                        self.set_eq(sel);
+                        self.set_status(format!("Эквалайзер: {}", crate::eq::PRESETS[sel].name));
+                    }
+                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                        sel = if matches!(code, KeyCode::Down | KeyCode::Char('j')) {
+                            (sel + 1).min(last)
+                        } else {
+                            sel.saturating_sub(1)
+                        };
+                        // Applied right away so the preset can be heard before confirming.
+                        self.set_eq(sel);
+                        self.modal = Some(Modal::Equalizer { prev, sel });
+                    }
+                    _ => self.modal = Some(Modal::Equalizer { prev, sel }),
+                }
+            }
+            Modal::Quality { sel } => match code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.modal = Some(Modal::Quality { sel: (sel + 1).min(QUALITIES.len() - 1) })
+                }
+                KeyCode::Up | KeyCode::Char('k') => self.modal = Some(Modal::Quality { sel: sel.saturating_sub(1) }),
+                KeyCode::Enter => {
+                    if sel != self.quality {
+                        self.quality = sel;
+                        // The current (and already preloaded) track keeps its stream.
+                        self.set_status(format!("Качество: {} — со следующего трека", QUALITIES[sel].name));
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {}
+                _ => self.modal = Some(Modal::Quality { sel }),
+            },
             Modal::Rename { pl, mut input } => match code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
@@ -1349,6 +1404,36 @@ mod tests {
         assert!(app.modal.is_none());
         app.playlists_state.select(Some(1));
         app.on_key(key(KeyCode::Char('x')));
+        assert!(app.modal.is_none());
+
+        // `E` (`У`): moving applies presets right away, Esc restores, Enter keeps.
+        app.set_eq(crate::eq::index("rock"));
+        app.on_key(key(KeyCode::Char('У')));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.eq, crate::eq::index("electronic"));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(app.eq, crate::eq::index("rock"));
+        assert!(app.modal.is_none());
+        app.on_key(key(KeyCode::Char('E')));
+        for _ in 0..10 {
+            app.on_key(key(KeyCode::Char('k')));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.eq, 0);
+        assert!(app.modal.is_none());
+
+        // `B` (`И`): quality is changed only by Enter.
+        assert_eq!(QUALITIES[app.quality].id, "nq");
+        app.on_key(key(KeyCode::Char('И')));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(QUALITIES[app.quality].id, "nq");
+        app.on_key(key(KeyCode::Char('B')));
+        app.on_key(key(KeyCode::Char('k')));
+        app.on_key(key(KeyCode::Char('k')));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(QUALITIES[app.quality].id, "lq");
         assert!(app.modal.is_none());
     }
 

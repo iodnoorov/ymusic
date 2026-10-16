@@ -146,6 +146,11 @@ impl Player {
         self.cmd(json!(["set_property", "volume", v]));
     }
 
+    /// Replaces the audio filter chain (empty string removes it).
+    pub fn set_audio_filter(&mut self, af: &str) {
+        self.cmd(json!(["set_property", "af", af]));
+    }
+
     pub fn stop(&mut self) {
         self.cmd(json!(["stop"]));
     }

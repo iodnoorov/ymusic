@@ -12,6 +12,12 @@ pub struct Config {
     /// Nerd Font icons (false — plain Unicode symbols).
     #[serde(default = "default_true")]
     pub icons: bool,
+    /// Equalizer preset id (see `eq::PRESETS`).
+    #[serde(default)]
+    pub eq: String,
+    /// Sound quality id (see `api::QUALITIES`).
+    #[serde(default)]
+    pub quality: String,
 }
 
 fn default_true() -> bool {
@@ -24,7 +30,7 @@ fn default_volume() -> u8 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { token: None, volume: default_volume(), icons: true }
+        Config { token: None, volume: default_volume(), icons: true, eq: String::new(), quality: String::new() }
     }
 }
 

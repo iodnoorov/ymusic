@@ -680,12 +680,19 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     };
     let filled = ((app.volume.min(100.0) / 10.0).round() as usize).min(10);
     let vol_color = if app.muted { MUTED } else { ACCENT };
-    let right = Line::from(vec![
+    let mut right = vec![];
+    let preset = &crate::eq::PRESETS[app.eq];
+    if !preset.is_flat() {
+        right.push(Span::styled("EQ ", Style::new().fg(ACCENT).bold()));
+        right.push(Span::styled(format!("{}   ", preset.name), Style::new().fg(SUB)));
+    }
+    right.extend([
         Span::styled(format!("{vol_icon} "), Style::new().fg(vol_color)),
         Span::styled("━".repeat(filled), Style::new().fg(vol_color)),
         Span::styled("━".repeat(10 - filled), Style::new().fg(BORDER)),
         Span::styled(format!(" {:>3.0}%", app.volume), Style::new().fg(SUB)),
     ]);
+    let right = Line::from(right);
 
     let play_icon = if app.paused || app.current().is_none() { i.play } else { i.pause };
     let mut left = vec![
@@ -743,6 +750,8 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
             Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => &[("Enter", "удалить"), ("Esc", "отмена")],
             Modal::Rename { .. } => &[("Enter", "сохранить"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
+            Modal::Equalizer { .. } => &[("↑↓", "выбор (слышно сразу)"), ("Enter", "оставить"), ("Esc", "отмена")],
+            Modal::Quality { .. } => &[("↑↓", "выбор"), ("Enter", "сохранить"), ("Esc", "отмена")],
         }
     } else if app.tab == Tab::Playlists && app.open_playlist.is_some() {
         &[
@@ -794,11 +803,29 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             ],
         }
     };
+    // «О программе» sits at the right edge, except while text is typed (`!` is input there).
+    let about = (!app.search_editing && app.modal.is_none()).then(|| {
+        Line::from(vec![
+            Span::styled("!", Style::new().fg(ACCENT).bold()),
+            Span::styled(" о программе ", Style::new().fg(MUTED)),
+        ])
+    });
+    let right_w = about.as_ref().map_or(0, Line::width);
+    // Drop hints from the end (keeping «? помощь») until they fit next to it.
+    let hint_w = |(k, d): &(&str, &str)| Line::from(key_hint(k, d).to_vec()).width();
+    let mut shown: Vec<(&str, &str)> = keys.to_vec();
+    while 1 + shown.iter().map(hint_w).sum::<usize>() + right_w > area.width as usize {
+        let Some(last) = shown.iter().rposition(|(k, _)| *k != "?") else { break };
+        shown.remove(last);
+    }
     let mut spans = vec![Span::raw(" ")];
-    for (k, d) in keys {
+    for (k, d) in shown {
         spans.extend(key_hint(k, d));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+    if let Some(about) = about {
+        f.render_widget(Paragraph::new(about).alignment(Alignment::Right), area);
+    }
 }
 
 type HelpSection = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
@@ -815,6 +842,8 @@ fn draw_help(f: &mut Frame) {
                 ("←  →", "перемотка ±10 с"),
                 ("+  -", "громкость"),
                 ("m", "без звука"),
+                ("E", "эквалайзер"),
+                ("B", "качество звука"),
             ],
         ),
         (i.heart, "Оценки", &[("l", "лайк текущего трека"), ("L", "лайк выбранного в списке"), ("d", "дизлайк и пропуск")]),
@@ -1033,6 +1062,39 @@ fn draw_modal(f: &mut Frame, app: &App) {
             ];
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
+        Modal::Equalizer { sel, .. } => {
+            let presets = crate::eq::PRESETS;
+            let inner = popup(f, i.note, "Эквалайзер", 30, presets.len() as u16);
+            let items: Vec<ListItem> = presets.iter().map(|p| ListItem::new(p.name)).collect();
+            let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
+            let widget = List::new(items)
+                .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+                .highlight_symbol("▌ ")
+                .highlight_spacing(HighlightSpacing::Always);
+            f.render_stateful_widget(widget, inner, &mut st);
+        }
+        Modal::Quality { sel } => {
+            let qualities = crate::api::QUALITIES;
+            let inner = popup(f, i.note, "Качество звука", 50, qualities.len() as u16);
+            let items: Vec<ListItem> = qualities
+                .iter()
+                .enumerate()
+                .map(|(n, q)| {
+                    let mark = if n == app.quality { "● " } else { "  " };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(mark, Style::new().fg(ACCENT)),
+                        Span::raw(q.name),
+                        Span::styled(format!("  {}", q.note), Style::new().fg(MUTED)),
+                    ]))
+                })
+                .collect();
+            let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
+            let widget = List::new(items)
+                .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+                .highlight_symbol("▌ ")
+                .highlight_spacing(HighlightSpacing::Always);
+            f.render_stateful_widget(widget, inner, &mut st);
+        }
         Modal::Rename { input, .. } => {
             let inner = popup(f, i.queue, "Название плейлиста", 48, 1);
             let mut spans = vec![Span::styled(input.clone(), Style::new().fg(Color::Reset).bold())];
@@ -1114,8 +1176,18 @@ mod tests {
             Some(Modal::AddTo { track: t.clone(), choices: app.playlists.clone(), sel: 1 }),
             Some(Modal::ConfirmRemove { pl: pl.clone(), index: 2, track: app.queue[2].clone() }),
             Some(Modal::Rename { pl: pl.clone(), input: "Новое название".into() }),
+            Some(Modal::Equalizer { prev: 0, sel: 3 }),
+            Some(Modal::Quality { sel: 2 }),
         ];
-        let expect = ["Плейлист будет удалён из аккаунта.", "Искала", "Добавить в плейлист", "из плейлиста «Bloodborne soundtracks»?", "Новое название"];
+        let expect = [
+            "Плейлист будет удалён из аккаунта.",
+            "Искала",
+            "Добавить в плейлист",
+            "из плейлиста «Bloodborne soundtracks»?",
+            "Новое название",
+            "Электроника",
+            "максимум, что отдаёт сервер",
+        ];
         for (modal, want) in modals.into_iter().zip(expect) {
             app.modal = modal;
             let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -1129,6 +1201,19 @@ mod tests {
         }
         app.modal = None;
         app.open_playlist = None;
+
+        // The player bar names a non-flat equalizer preset.
+        app.set_eq(crate::eq::index("rock"));
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let bar: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .filter(|l| l.contains("%"))
+            .collect();
+        println!("{bar}");
+        assert!(bar.contains("EQ Рок"));
+        app.set_eq(0);
 
         app.show_about = true;
         let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
