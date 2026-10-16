@@ -7,7 +7,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "ymusic-cli";
-  version = "0.7.0";
+  version = "0.8.0";
 
   src = lib.fileset.toSource {
     root = ./..;
