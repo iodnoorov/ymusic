@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
-#[command(name = "yamusic", version, about = "Яндекс Музыка в терминале: Моя волна, лайки, станции")]
+#[command(name = "ymusic", version, about = "Яндекс Музыка в терминале: Моя волна, лайки, станции")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,
@@ -69,7 +69,7 @@ fn main() -> Result<()> {
 
     let token = token(&mut cfg)?;
     let mut api = api::Api::new(&token);
-    let account = api.account_status().context("не удалось войти (попробуйте `yamusic login`)")?;
+    let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
     let player = player::Player::spawn(tx.clone(), cfg.volume)?;

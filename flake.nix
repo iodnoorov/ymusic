@@ -1,5 +1,5 @@
 {
-  description = "yamusic-cli — Yandex Music in the terminal";
+  description = "ymusic-cli — Yandex Music in the terminal";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -14,19 +14,19 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        yamusic-cli = pkgs.callPackage ./nix/package.nix { };
-        default = yamusic-cli;
+        ymusic-cli = pkgs.callPackage ./nix/package.nix { };
+        default = ymusic-cli;
       });
 
       apps = forAllSystems (pkgs: {
         default = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/yamusic";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/ymusic";
         };
       });
 
       overlays.default = final: _prev: {
-        yamusic-cli = final.callPackage ./nix/package.nix { };
+        ymusic-cli = final.callPackage ./nix/package.nix { };
       };
 
       devShells = forAllSystems (pkgs: {

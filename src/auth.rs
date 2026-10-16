@@ -24,7 +24,7 @@ pub fn auth_url() -> String {
         .unwrap_or_else(|_| format!("https://oauth.yandex.ru/authorize?response_type=token&client_id={CLIENT_ID}"))
 }
 
-/// Interactive menu shown by `yamusic login` and on first start.
+/// Interactive menu shown by `ymusic login` and on first start.
 pub fn interactive_login() -> Result<String> {
     println!("\n  \x1b[1;33mВход в Яндекс Музыку\x1b[0m\n");
     println!("  1) Через браузер — откроется окно Яндекса, войдите, токен подхватится сам");
@@ -200,7 +200,7 @@ pub fn browser_login() -> Result<String> {
         anyhow!("не найден поддерживаемый браузер (Firefox/Zen/LibreWolf или Chromium/Chrome/Brave/Яндекс Браузер); укажите его в YAMUSIC_BROWSER")
     })?;
     let port = free_port()?;
-    let profile = std::env::temp_dir().join(format!("yamusic-login-{}", std::process::id()));
+    let profile = std::env::temp_dir().join(format!("ymusic-login-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&profile);
     std::fs::create_dir_all(&profile)?;
     let headless = std::env::var_os("YAMUSIC_BROWSER_HEADLESS").is_some();

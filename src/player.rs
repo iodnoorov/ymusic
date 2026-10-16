@@ -30,7 +30,7 @@ pub struct Player {
 impl Player {
     pub fn spawn<M: From<PlayerEvent> + Send + 'static>(tx: Sender<M>, volume: u8) -> Result<Player> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let sock = dir.join(format!("yamusic-cli-{}.sock", std::process::id()));
+        let sock = dir.join(format!("ymusic-cli-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
         let child = Command::new("mpv")
             .args([

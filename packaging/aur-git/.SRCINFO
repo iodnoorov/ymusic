@@ -1,6 +1,6 @@
-pkgbase = yamusic-cli-git
-	pkgdesc = Terminal client for Yandex Music: My Wave, likes, stations (TUI) — git version
-	pkgver = 0.1.0.r0.g0000000
+pkgbase = ymusic-cli-git
+	pkgdesc = Terminal client for Yandex Music: My Wave, likes, stations (TUI); fork of https://github.com/Rexilone/yamusic-cli — git version
+	pkgver = 0.5.0.r0.g0000000
 	pkgrel = 1
 	url = https://github.com/iodnoorov/yamusic-cli
 	arch = x86_64
@@ -9,12 +9,12 @@ pkgbase = yamusic-cli-git
 	makedepends = cargo
 	makedepends = git
 	depends = mpv
-	depends = gcc-libs
+	depends = libgcc
 	depends = glibc
-	provides = yamusic-cli
-	conflicts = yamusic-cli
+	provides = ymusic-cli
+	conflicts = ymusic-cli
 	options = !lto
-	source = yamusic-cli::git+https://github.com/iodnoorov/yamusic-cli.git
+	source = ymusic-cli::git+https://github.com/iodnoorov/yamusic-cli.git
 	sha256sums = SKIP
 
-pkgname = yamusic-cli-git
+pkgname = ymusic-cli-git

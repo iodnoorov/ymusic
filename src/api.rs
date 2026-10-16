@@ -147,7 +147,7 @@ fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
                 })
                 .unwrap_or_else(|| body.chars().take(200).collect());
             if code == 401 {
-                bail!("HTTP 401: токен недействителен, выполните `yamusic login` ({msg})");
+                bail!("HTTP 401: токен недействителен, выполните `ymusic login` ({msg})");
             }
             bail!("HTTP {code}: {msg}")
         }

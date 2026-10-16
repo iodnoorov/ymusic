@@ -208,7 +208,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let tabs = [(i.wave, "Волна"), (i.stations, "Станции"), (i.liked, "Мне нравится"), (i.search, "Поиск")];
     let mut spans = vec![
         Span::styled(format!(" {} ", i.logo), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()),
-        Span::styled(" yamusic ", Style::new().fg(ACCENT).bold()),
+        Span::styled(" ymusic ", Style::new().fg(ACCENT).bold()),
         Span::raw("  "),
     ];
     let compact = area.width < 110;
@@ -455,7 +455,7 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
             ("?", "все горячие клавиши"),
         ];
         let mut lines = vec![
-            Line::from(Span::styled(format!("{}  yamusic", i.logo), Style::new().fg(ACCENT).bold())),
+            Line::from(Span::styled(format!("{}  ymusic", i.logo), Style::new().fg(ACCENT).bold())),
             Line::from(Span::styled("Яндекс Музыка в терминале", Style::new().fg(SUB))),
             Line::from(""),
         ];

@@ -1,4 +1,4 @@
-# yamusic-cli
+# ymusic-cli
 
 **Яндекс Музыка в терминале.** Моя волна, лайки, станции по жанрам и настроениям, поиск — с понятными горячими клавишами.
 
@@ -15,7 +15,7 @@
 </table>
 
 > Иконки — из [Nerd Fonts](https://www.nerdfonts.com) (например, JetBrainsMono Nerd Font: `pacman -S ttf-jetbrains-mono-nerd`).
-> Без Nerd Font запускайте `yamusic --no-icons` или поставьте `"icons": false` в конфиге.
+> Без Nerd Font запускайте `ymusic --no-icons` или поставьте `"icons": false` в конфиге.
 
 ## Возможности
 
@@ -39,6 +39,14 @@
 
 ## Установка
 
+### Arch Linux (AUR)
+
+```bash
+yay -S ymusic-cli
+```
+
+### Из исходников
+
 Вручную из склонированного репозитория (собирает текущие исходники):
 
 ```bash
@@ -47,7 +55,7 @@ cd yamusic-cli/packaging/local
 makepkg -si
 ```
 
-После установки приложение запускается командой `yamusic` из любого терминала. Удалить: `sudo pacman -R yamusic-cli`.
+После установки приложение запускается командой `ymusic` из любого терминала. Удалить: `sudo pacman -R ymusic-cli`.
 
 ### NixOS / Nix
 
@@ -70,19 +78,19 @@ nix profile install github:iodnoorov/yamusic-cli
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    yamusic-cli = {
+    ymusic-cli = {
       url = "github:iodnoorov/yamusic-cli";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { nixpkgs, yamusic-cli, ... }: {
+  outputs = { nixpkgs, ymusic-cli, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
         ./configuration.nix
         ({ pkgs, ... }: {
-          environment.systemPackages = [ yamusic-cli.packages.${pkgs.stdenv.hostPlatform.system}.default ];
+          environment.systemPackages = [ ymusic-cli.packages.${pkgs.stdenv.hostPlatform.system}.default ];
         })
       ];
     };
@@ -90,8 +98,8 @@ nix profile install github:iodnoorov/yamusic-cli
 }
 ```
 
-Или через overlay: `nixpkgs.overlays = [ yamusic-cli.overlays.default ];` и затем `pkgs.yamusic-cli`
-(подходит и для home-manager: `home.packages = [ pkgs.yamusic-cli ];`).
+Или через overlay: `nixpkgs.overlays = [ ymusic-cli.overlays.default ];` и затем `pkgs.ymusic-cli`
+(подходит и для home-manager: `home.packages = [ pkgs.ymusic-cli ];`).
 
 Без flakes: `nix-build` в корне репозитория или `pkgs.callPackage (fetchTarball "https://github.com/iodnoorov/yamusic-cli/archive/main.tar.gz") { }`.
 
@@ -105,13 +113,13 @@ mpv подтягивается автоматически.
 cargo install --git https://github.com/iodnoorov/yamusic-cli
 # или
 git clone https://github.com/iodnoorov/yamusic-cli && cd yamusic-cli
-cargo build --release && ./target/release/yamusic
+cargo build --release && ./target/release/ymusic
 ```
 
 ## Вход
 
 ```bash
-yamusic login
+ymusic login
 ```
 
 Появится меню:
@@ -119,18 +127,18 @@ yamusic login
 1. **Через браузер** — откроется отдельное окно браузера со страницей входа Яндекса. Войдите как обычно
    (пароль, QR, Яндекс ID) — токен подхватится автоматически, окно закроется само.
    Поддерживаются Firefox, Zen, LibreWolf, Floorp, Chromium, Chrome, Brave, Vivaldi, Edge, Яндекс Браузер.
-   Используется браузер по умолчанию; другой можно указать: `YAMUSIC_BROWSER=chromium yamusic login`.
+   Используется браузер по умолчанию; другой можно указать: `YAMUSIC_BROWSER=chromium ymusic login`.
    Окно запускается с временным чистым профилем, ваш основной профиль не затрагивается.
 2. **По токену** — вставить OAuth-токен (или целиком URL с `access_token=`).
 
 Без меню:
 
 ```bash
-yamusic login --browser              # сразу через браузер
-yamusic login --token y0_AgAAAA...   # готовый токен
-YAMUSIC_TOKEN=y0_... yamusic         # токен из переменной окружения (не сохраняется)
-yamusic whoami                       # проверить аккаунт
-yamusic logout                       # удалить токен
+ymusic login --browser              # сразу через браузер
+ymusic login --token y0_AgAAAA...   # готовый токен
+YAMUSIC_TOKEN=y0_... ymusic         # токен из переменной окружения (не сохраняется)
+ymusic whoami                       # проверить аккаунт
+ymusic logout                       # удалить токен
 ```
 
 <details>
@@ -141,15 +149,15 @@ yamusic logout                       # удалить токен
 Токен — всё между `access_token=` и `&`.
 </details>
 
-Токен хранится в `~/.config/yamusic-cli/config.json` (права `0600`). Если запустить `yamusic` без входа — меню входа появится автоматически.
+Токен хранится в `~/.config/yamusic-cli/config.json` (права `0600`). Если запустить `ymusic` без входа — меню входа появится автоматически.
 
 ## Использование
 
 ```bash
-yamusic                       # открыть интерфейс
-yamusic --wave                # сразу включить Мою волну
-yamusic --station genre:metal # сразу включить станцию (genre:rock, mood:calm, activity:workout, epoch:nineties…)
-yamusic --no-icons            # без иконок Nerd Font
+ymusic                       # открыть интерфейс
+ymusic --wave                # сразу включить Мою волну
+ymusic --station genre:metal # сразу включить станцию (genre:rock, mood:calm, activity:workout, epoch:nineties…)
+ymusic --no-icons            # без иконок Nerd Font
 ```
 
 ### Горячие клавиши
@@ -198,6 +206,7 @@ yamusic --no-icons            # без иконок Nerd Font
 - `y` — копирование в буфер обмена ссылки на выбранный (или текущий) трек.
 - `A` — плейлист из всех треков исполнителя выбранного (или текущего) трека.
 - Проект перенесён в репозиторий `iodnoorov/yamusic-cli`, ссылки и пакеты AUR указывают на него.
+- Программа переименована в `ymusic`, пакет — в `ymusic-cli`.
 
 ## Дополнительная информация
 

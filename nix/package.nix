@@ -6,8 +6,8 @@
 }:
 
 rustPlatform.buildRustPackage {
-  pname = "yamusic-cli";
-  version = "0.4.0";
+  pname = "ymusic-cli";
+  version = "0.5.0";
 
   src = lib.fileset.toSource {
     root = ./..;
@@ -24,14 +24,14 @@ rustPlatform.buildRustPackage {
 
   # mpv is looked up in PATH at runtime
   postInstall = ''
-    wrapProgram $out/bin/yamusic --prefix PATH : ${lib.makeBinPath [ mpv ]}
+    wrapProgram $out/bin/ymusic --prefix PATH : ${lib.makeBinPath [ mpv ]}
   '';
 
   meta = {
     description = "Terminal client for Yandex Music: My Wave, likes, stations (TUI)";
     homepage = "https://github.com/iodnoorov/yamusic-cli";
     license = lib.licenses.mit;
-    mainProgram = "yamusic";
+    mainProgram = "ymusic";
     platforms = lib.platforms.linux;
   };
 }

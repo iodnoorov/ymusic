@@ -8,6 +8,6 @@
 | `stations.png`  | вкладка «Станции»                             |
 | `liked.png`     | вкладка «Мне нравится»                        |
 | `search.png`    | вкладка «Поиск» с результатами                |
-| `login.png`     | меню входа (`yamusic login`)                  |
+| `login.png`     | меню входа (`ymusic login`)                  |
 
 Снять окно в foot/Wayland: `grim -g "$(slurp)" docs/screenshots/wave.png`
