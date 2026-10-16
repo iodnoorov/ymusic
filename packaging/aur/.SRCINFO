@@ -12,6 +12,6 @@ pkgbase = yamusic-cli
 	depends = glibc
 	options = !lto
 	source = yamusic-cli-0.3.0.tar.gz::https://github.com/iodnoorov/yamusic-cli/archive/refs/tags/v0.3.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 056350f3f0ec454f782cc66e191eacc8c3a6bb06501683cf7c2952a54316a89e
 
 pkgname = yamusic-cli
