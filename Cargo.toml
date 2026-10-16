@@ -1,6 +1,6 @@
 [package]
 name = "ymusic-cli"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Terminal client for Yandex Music: My Wave, likes, stations"
 license = "MIT"

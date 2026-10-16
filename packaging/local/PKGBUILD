@@ -1,7 +1,7 @@
 # Builds and installs ymusic-cli from this local checkout:
 #   cd packaging/local && makepkg -si
 pkgname=ymusic-cli
-pkgver=0.6.0
+pkgver=0.7.0
 pkgrel=1
 pkgdesc="Terminal client for Yandex Music: My Wave, likes, stations (TUI); fork of https://github.com/Rexilone/yamusic-cli"
 arch=('x86_64' 'aarch64')
