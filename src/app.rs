@@ -17,6 +17,7 @@ pub enum Msg {
     Liked(Result<Vec<Track>, String>),
     Stations(Vec<Station>),
     Search(Result<Vec<Track>, String>),
+    ArtistTracks { name: String, result: Result<Vec<Track>, String> },
     WaveStarted { station: String, name: String, result: Result<WaveBatch, String> },
     WaveMore(Result<WaveBatch, String>),
     LikeFailed { track: Track, like: bool, err: String },
@@ -620,6 +621,14 @@ impl App {
                     Err(e) => self.set_status(format!("Ошибка поиска: {e}")),
                 }
             }
+            Msg::ArtistTracks { name, result } => match result {
+                Ok(list) if list.is_empty() => self.set_status(format!("У исполнителя «{name}» нет треков")),
+                Ok(list) => {
+                    self.play_list(&format!("Исполнитель: {name}"), list, 0);
+                    self.tab = Tab::Wave;
+                }
+                Err(e) => self.set_status(format!("Не удалось загрузить треки исполнителя: {e}")),
+            },
             Msg::WaveStarted { station, name, result } => match result {
                 Ok(b) => {
                     self.report_end(End::Skip);
@@ -759,6 +768,7 @@ impl App {
                 }
             }
             KeyCode::Char('y') => self.copy_link(),
+            KeyCode::Char('A') => self.play_artist(),
             KeyCode::Char('s') => self.shuffle_play(),
             KeyCode::Char('R') => {
                 self.load_liked();
@@ -878,6 +888,23 @@ impl App {
         self.set_status(format!("Ссылка скопирована: {url}"));
     }
 
+    /// Plays all tracks of the selected (or current) track's main artist.
+    fn play_artist(&mut self) {
+        let Some(t) = self.selected_track().or(self.current()) else {
+            self.set_status("Нет выбранного трека");
+            return;
+        };
+        let Some((id, name)) = t.main_artist.clone() else {
+            self.set_status("У трека не указан исполнитель");
+            return;
+        };
+        self.set_status(format!("Загрузка треков: {name}…"));
+        self.spawn(move |api| {
+            let result = api.artist_tracks(&id).map_err(|e| format!("{e:#}"));
+            Some(Msg::ArtistTracks { name, result })
+        });
+    }
+
     fn shuffle_play(&mut self) {
         let (name, mut list) = match self.tab {
             Tab::Search => ("Поиск (перемешано)", self.search_results.clone()),
@@ -913,6 +940,7 @@ mod tests {
         assert_eq!(super::ru_to_en('т'), 'n');
         assert_eq!(super::ru_to_en('Д'), 'L');
         assert_eq!(super::ru_to_en('.'), '/');
+        assert_eq!(super::ru_to_en('Ф'), 'A');
         assert_eq!(super::ru_to_en('x'), 'x');
     }
 
@@ -931,6 +959,7 @@ mod tests {
             album_id: None,
             title: id.into(),
             artists: "A".into(),
+            main_artist: None,
             album: String::new(),
             duration_ms: 1000,
             available: true,

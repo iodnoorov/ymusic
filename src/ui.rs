@@ -717,7 +717,16 @@ fn draw_help(f: &mut Frame) {
             ],
         ),
         (i.heart, "Оценки", &[("l", "лайк текущего трека"), ("L", "лайк выбранного в списке"), ("d", "дизлайк и пропуск")]),
-        (i.wave, "Волны", &[("w", "Моя волна"), ("2  Enter", "станция: жанр, настроение…"), ("r", "волна по треку")]),
+        (
+            i.wave,
+            "Волны",
+            &[
+                ("w", "Моя волна"),
+                ("2  Enter", "станция: жанр, настроение…"),
+                ("r", "волна по треку"),
+                ("A", "все треки исполнителя"),
+            ],
+        ),
         (
             i.keys,
             "Навигация",
@@ -780,6 +789,7 @@ mod tests {
             album_id: Some("2".into()),
             title: "Выхода нет".into(),
             artists: "Сплин".into(),
+            main_artist: None,
             album: "Гранатовый альбом".into(),
             duration_ms: 220_000,
             available: true,
@@ -842,6 +852,7 @@ mod tests {
                 album_id: None,
                 title: "Cover".into(),
                 artists: "A".into(),
+                main_artist: None,
                 album: String::new(),
                 duration_ms: 1000,
                 available: true,

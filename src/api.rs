@@ -22,6 +22,8 @@ pub struct Track {
     pub album_id: Option<String>,
     pub title: String,
     pub artists: String,
+    /// Main (first) artist: (id, name).
+    pub main_artist: Option<(String, String)>,
     pub album: String,
     pub duration_ms: u64,
     pub available: bool,
@@ -63,11 +65,13 @@ impl Track {
             })
             .unwrap_or_default();
         let album = &v["albums"][0];
+        let first = &v["artists"][0];
         Some(Track {
             id,
             album_id: id_str(&album["id"]),
             title,
             artists: if artists.is_empty() { "Неизвестный исполнитель".into() } else { artists },
+            main_artist: id_str(&first["id"]).map(|id| (id, first["name"].as_str().unwrap_or("").to_string())),
             album: album["title"].as_str().unwrap_or("").to_string(),
             duration_ms: v["durationMs"].as_u64().unwrap_or(0),
             available: v["available"].as_bool().unwrap_or(true),
@@ -220,6 +224,25 @@ impl Api {
     pub fn search(&self, text: &str) -> Result<Vec<Track>> {
         let r = self.get("/search", &[("text", text), ("type", "track"), ("page", "0"), ("nocorrect", "false")])?;
         Ok(r["tracks"]["results"].as_array().into_iter().flatten().filter_map(Track::from_json).collect())
+    }
+
+    /// Tracks of an artist, most popular first.
+    pub fn artist_tracks(&self, artist_id: &str) -> Result<Vec<Track>> {
+        const PAGE: usize = 100;
+        const MAX: usize = 1000;
+        let mut out = Vec::new();
+        for page in 0.. {
+            let page = page.to_string();
+            let size = PAGE.to_string();
+            let r = self.get(&format!("/artists/{artist_id}/tracks"), &[("page", &page), ("page-size", &size)])?;
+            let tracks = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
+            out.extend(tracks.iter().filter_map(Track::from_json));
+            let total = r["pager"]["total"].as_u64().unwrap_or(0) as usize;
+            if tracks.len() < PAGE || out.len() >= total.min(MAX) {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     // ---------------------------------------------------------------- likes
@@ -540,8 +563,21 @@ mod tests {
         assert_eq!(t.web_url(), "https://music.yandex.ru/album/9/track/123");
         assert_eq!(t.title, "Song (Remix)");
         assert_eq!(t.artists, "A, B");
+        assert_eq!(t.main_artist, None);
+        let v = json!({"id": 1, "artists": [{"id": 42, "name": "A"}, {"id": 7, "name": "B"}]});
+        assert_eq!(Track::from_json(&v).unwrap().main_artist, Some(("42".into(), "A".into())));
         assert_eq!(t.cover, None);
         assert_eq!(cover_url("avatars.yandex.net/x/%%"), "https://avatars.yandex.net/x/400x400");
+    }
+
+    /// Network test: needs a token in the config. Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn artist_tracks() {
+        let token = crate::config::Config::load().token.expect("token");
+        let tracks = Api::new(&token).artist_tracks("161243").unwrap();
+        assert!(tracks.len() > 100, "{}", tracks.len());
+        assert!(tracks.iter().all(|t| t.main_artist.is_some()));
     }
 
     /// Network test: downloads and decodes a real image from Yandex CDN.
