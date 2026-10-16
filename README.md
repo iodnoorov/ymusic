@@ -52,7 +52,7 @@ yay -S ymusic-cli
 Есть сборки для x86_64 и aarch64 (ARM64); сборка для aarch64 не проверялась на реальном ARM-устройстве.
 
 ```bash
-V=0.5.0         # номер последнего релиза
+V=0.6.0         # номер последнего релиза
 A=$(uname -m)   # x86_64 или aarch64
 curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz
 curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz.sha256
