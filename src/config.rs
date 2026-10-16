@@ -28,9 +28,9 @@ impl Default for Config {
     }
 }
 
-/// Environment variable `YMUSIC_<name>`, falling back to the pre-rename `YAMUSIC_<name>`.
+/// Environment variable `YMUSIC_<name>`.
 pub fn env(name: &str) -> Option<OsString> {
-    std::env::var_os(format!("YMUSIC_{name}")).or_else(|| std::env::var_os(format!("YAMUSIC_{name}")))
+    std::env::var_os(format!("YMUSIC_{name}"))
 }
 
 /// Like [`env`], as a string (`None` if unset or not valid UTF-8).
@@ -50,26 +50,12 @@ pub fn dir() -> PathBuf {
     config_home().join("ymusic")
 }
 
-/// Config directory used before the program was renamed to `ymusic`.
-fn legacy_dir() -> PathBuf {
-    config_home().join("yamusic-cli")
-}
-
-/// Moves the pre-rename config directory to the new location (once, if only the old one exists).
-fn migrate() {
-    let (old, new) = (legacy_dir(), dir());
-    if old.is_dir() && !new.exists() {
-        let _ = std::fs::rename(&old, &new);
-    }
-}
-
 pub fn path() -> PathBuf {
     dir().join("config.json")
 }
 
 impl Config {
     pub fn load() -> Config {
-        migrate();
         std::fs::read_to_string(path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
