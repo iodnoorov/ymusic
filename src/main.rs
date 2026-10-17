@@ -76,6 +76,7 @@ fn main() -> Result<()> {
     let player = player::Player::spawn(tx.clone(), cfg.volume)?;
     let mut app = app::App::new(api, account, tx, player, cfg.volume);
     app.set_eq(eq::index(&cfg.eq));
+    app.set_crossfade(cfg.crossfade);
     app.quality = api::quality_index(&cfg.quality);
     if let Some(id) = cli.station {
         app.start_station_id(&id);

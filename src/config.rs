@@ -18,7 +18,13 @@ pub struct Config {
     /// Sound quality id (see `api::QUALITIES`).
     #[serde(default)]
     pub quality: String,
+    /// Fade-in at the start and fade-out at the end of each track, seconds (0 — off).
+    #[serde(default)]
+    pub crossfade: u8,
 }
+
+/// Longest allowed fade-in/fade-out, seconds.
+pub const MAX_CROSSFADE: u8 = 15;
 
 fn default_true() -> bool {
     true
@@ -30,7 +36,14 @@ fn default_volume() -> u8 {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { token: None, volume: default_volume(), icons: true, eq: String::new(), quality: String::new() }
+        Config {
+            token: None,
+            volume: default_volume(),
+            icons: true,
+            eq: String::new(),
+            quality: String::new(),
+            crossfade: 0,
+        }
     }
 }
 

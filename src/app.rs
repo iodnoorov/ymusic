@@ -640,7 +640,10 @@ impl App {
                         self.schedule_preload();
                     }
                 }
-                PlayerEvent::Duration(d) => self.duration = d,
+                PlayerEvent::Duration(d) => {
+                    self.duration = d;
+                    self.player.set_track_duration(d);
+                }
                 PlayerEvent::Pause(p) => self.paused = p,
                 PlayerEvent::Volume(v) => self.volume = v,
                 PlayerEvent::Mute(m) => self.muted = m,
@@ -1048,7 +1051,12 @@ impl App {
     pub fn set_eq(&mut self, idx: usize) {
         let idx = idx.min(crate::eq::PRESETS.len() - 1);
         self.eq = idx;
-        self.player.set_audio_filter(&crate::eq::PRESETS[idx].filter());
+        self.player.set_eq_filter(&crate::eq::PRESETS[idx].filter());
+    }
+
+    /// Fade-in/fade-out length in seconds from the config (0 — off).
+    pub fn set_crossfade(&mut self, secs: u8) {
+        self.player.set_fade(f64::from(secs.min(crate::config::MAX_CROSSFADE)));
     }
 
     fn change_volume(&mut self, d: f64) {

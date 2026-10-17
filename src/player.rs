@@ -25,6 +25,22 @@ pub struct Player {
     child: Child,
     stream: UnixStream,
     sock: PathBuf,
+    /// Equalizer part of the `af` chain.
+    eq: String,
+    /// Fade length in seconds (0 — off) and the current track's duration it is computed for.
+    fade: f64,
+    duration: f64,
+}
+
+/// Volume filter for fades: rises over `fade` seconds from the track start and falls over the
+/// last `fade` seconds before `duration`. `t` is the position within the current track: mpv
+/// recreates the filter for each track, which is also why the duration has to be set again.
+fn fade_filter(fade: f64, duration: f64) -> String {
+    if fade <= 0.0 {
+        return String::new();
+    }
+    let expr = if duration > 0.0 { format!("min(1,min(t,{duration:.3}-t)/{fade})") } else { format!("min(1,t/{fade})") };
+    format!("@fade:lavfi=[volume=volume='{expr}':eval=frame]")
 }
 
 impl Player {
@@ -104,7 +120,7 @@ impl Player {
             let _ = tx.send(PlayerEvent::Died.into());
         });
 
-        let mut p = Player { child, stream, sock };
+        let mut p = Player { child, stream, sock, eq: String::new(), fade: 0.0, duration: 0.0 };
         for (i, prop) in ["time-pos", "duration", "pause", "volume", "mute"].iter().enumerate() {
             p.cmd(json!(["observe_property", i + 1, prop]));
         }
@@ -146,8 +162,30 @@ impl Player {
         self.cmd(json!(["set_property", "volume", v]));
     }
 
-    /// Replaces the audio filter chain (empty string removes it).
-    pub fn set_audio_filter(&mut self, af: &str) {
+    /// Sets the equalizer filter (empty string removes it).
+    pub fn set_eq_filter(&mut self, af: &str) {
+        self.eq = af.to_string();
+        self.apply_filters();
+    }
+
+    /// Sets the fade length in seconds (0 — off).
+    pub fn set_fade(&mut self, secs: f64) {
+        self.fade = secs.max(0.0);
+        self.apply_filters();
+    }
+
+    /// Duration of the track mpv has just started: the fade-out is placed before its end.
+    pub fn set_track_duration(&mut self, secs: f64) {
+        // Changing the chain re-creates the filters, so skip insignificant duration refinements.
+        if self.fade > 0.0 && (secs - self.duration).abs() > 0.5 {
+            self.duration = secs;
+            self.apply_filters();
+        }
+    }
+
+    fn apply_filters(&mut self) {
+        let fade = fade_filter(self.fade, self.duration);
+        let af = [fade.as_str(), self.eq.as_str()].into_iter().filter(|f| !f.is_empty()).collect::<Vec<_>>().join(",");
         self.cmd(json!(["set_property", "af", af]));
     }
 
@@ -163,5 +201,17 @@ impl Drop for Player {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fade_filter;
+
+    #[test]
+    fn fade() {
+        assert_eq!(fade_filter(0.0, 200.0), "");
+        assert_eq!(fade_filter(5.0, 0.0), "@fade:lavfi=[volume=volume='min(1,t/5)':eval=frame]");
+        assert_eq!(fade_filter(5.0, 200.5), "@fade:lavfi=[volume=volume='min(1,min(t,200.500-t)/5)':eval=frame]");
     }
 }
