@@ -11,6 +11,6 @@ pkgbase = ymusic-cli
 	depends = glibc
 	options = !lto
 	source = ymusic-cli-1.2.0.tar.gz::https://github.com/iodnoorov/ymusic/archive/refs/tags/v1.2.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 30b08d739f3c5680dcdcf9f58f01818c40d3458fe46a596adc919a8d469c6219
 
 pkgname = ymusic-cli
