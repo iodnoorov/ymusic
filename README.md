@@ -16,12 +16,8 @@
     <td align="center"><img src="docs/screenshots/search2.png" alt="Поиск с результатами" width="440"><br><sub>Вкладка «Поиск» с результатами</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/screenshots/equilizer.png" alt="Эквалайзер" width="440"><br><sub>Эквалайзер</sub></td>
-    <td align="center"><img src="docs/screenshots/sound_quality.png" alt="Качество звука" width="440"><br><sub>Выбор качества треков</sub></td>
-  </tr>
-  <tr>
+    <td align="center"><img src="docs/screenshots/settings.png" alt="Настройки" width="440"><br><sub>Окно настроек</sub></td>
     <td align="center"><img src="docs/screenshots/help.png" alt="Помощь" width="440"><br><sub>Окно помощи</sub></td>
-    <td align="center"><img src="docs/screenshots/about.png" alt="О программе" width="440"><br><sub>Окно «О программе»</sub></td>
   </tr>
 </table>
 
