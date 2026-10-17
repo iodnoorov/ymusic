@@ -159,8 +159,12 @@ pub struct App {
 
     /// Terminal graphics (sixel / kitty / iTerm2 / half blocks); `None` in tests.
     pub picker: Option<Picker>,
-    /// Recently used covers: (url, encoded image), newest last.
-    pub covers: Vec<(String, StatefulProtocol)>,
+    /// Recently used covers: (url, decoded image), newest last.
+    pub covers: Vec<(String, image::DynamicImage)>,
+    /// Cover on screen: (url, encoded image). Rebuilt when the cover changes or the terminal
+    /// is resized, so kitty-protocol terminals always get the image data again: an image
+    /// transmitted earlier may already be dropped by the terminal (Konsole drops them on resize).
+    shown_cover: Option<(String, StatefulProtocol)>,
     covers_loading: HashSet<String>,
 
     /// Next track already resolved and appended to mpv's playlist: (queue index, track id).
@@ -219,6 +223,7 @@ impl App {
             tick: 0,
             picker: None,
             covers: Vec::new(),
+            shown_cover: None,
             covers_loading: HashSet::new(),
             preload: None,
             preload_pending: false,
@@ -525,7 +530,16 @@ impl App {
     /// Cover of the current track, if it is loaded.
     pub fn current_cover(&mut self) -> Option<&mut StatefulProtocol> {
         let want = self.current()?.cover.clone()?;
-        self.covers.iter_mut().find(|(u, _)| *u == want).map(|(_, p)| p)
+        if self.shown_cover.as_ref().is_none_or(|(u, _)| *u != want) {
+            let img = self.covers.iter().find(|(u, _)| *u == want)?.1.clone();
+            self.shown_cover = Some((want, self.picker.as_ref()?.new_resize_protocol(img)));
+        }
+        self.shown_cover.as_mut().map(|(_, p)| p)
+    }
+
+    /// Terminal was resized: send the cover to the terminal again on the next draw.
+    pub fn on_resize(&mut self) {
+        self.shown_cover = None;
     }
 
     pub fn start_station_id(&mut self, id: &str) {
@@ -788,12 +802,12 @@ impl App {
             Msg::Status(s) => self.set_status(s),
             Msg::Cover { url, result } => {
                 self.covers_loading.remove(&url);
-                if let (Ok(img), Some(picker)) = (result, &self.picker) {
+                if let Ok(img) = result {
                     // Keep the current, the next and one previous cover.
                     if self.covers.len() >= 3 {
                         self.covers.remove(0);
                     }
-                    self.covers.push((url, picker.new_resize_protocol(img)));
+                    self.covers.push((url, img));
                 }
             }
             Msg::Preload { gen, idx, id, result } => {

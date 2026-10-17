@@ -105,7 +105,7 @@ fn main() -> Result<()> {
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
-                    Event::Resize(..) => {}
+                    Event::Resize(..) => app.on_resize(),
                     _ => continue,
                 }
                 dirty = true;

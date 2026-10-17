@@ -1266,6 +1266,52 @@ mod tests {
         println!("{text}");
     }
 
+    /// Kitty protocol: the cover is sent to the terminal again after switching back to
+    /// an earlier track and after a resize, not only placeholders for an old image id.
+    #[test]
+    #[ignore]
+    fn cover_retransmit() {
+        use ratatui_image::picker::{Picker, ProtocolType};
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let player = crate::player::Player::spawn(tx.clone(), 50).expect("mpv");
+        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
+        let mut app = App::new(Api::new("x"), acc, tx, player, 50);
+        let mut picker = Picker::from_fontsize((10, 20));
+        picker.set_protocol_type(ProtocolType::Kitty);
+        app.picker = Some(picker);
+        let track = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: Some(format!("cover-{id}")),
+            batch: None,
+        };
+        app.queue = vec![track("a"), track("b")];
+        app.covers = ["a", "b"]
+            .iter()
+            .map(|id| (format!("cover-{id}"), image::DynamicImage::new_rgb8(40, 40)))
+            .collect();
+        let mut term = Terminal::new(TestBackend::new(120, 34)).unwrap();
+        let mut transmits = |app: &mut App| {
+            term.draw(|f| super::draw(f, app)).unwrap();
+            term.backend().buffer().content().iter().any(|c| c.symbol().contains("_G"))
+        };
+        app.pos = Some(0);
+        assert!(transmits(&mut app), "first show");
+        assert!(!transmits(&mut app), "same cover is not sent twice");
+        app.pos = Some(1);
+        assert!(transmits(&mut app), "next track");
+        app.pos = Some(0);
+        assert!(transmits(&mut app), "back to the previous track");
+        app.on_resize();
+        assert!(transmits(&mut app), "after resize");
+    }
+
     /// Downloads a real image and renders it as sixel and half blocks. Needs network.
     #[test]
     #[ignore]
@@ -1280,8 +1326,9 @@ mod tests {
         for proto in [ProtocolType::Sixel, ProtocolType::Halfblocks, ProtocolType::Kitty] {
             let mut picker = Picker::from_fontsize((10, 20));
             picker.set_protocol_type(proto);
-            app.covers = vec![(url.clone(), picker.new_resize_protocol(img.clone()))];
+            app.covers = vec![(url.clone(), img.clone())];
             app.picker = Some(picker);
+            app.on_resize();
             app.queue = vec![Track {
                 id: "1".into(),
                 album_id: None,
