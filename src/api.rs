@@ -245,6 +245,17 @@ impl Api {
         })
     }
 
+    /// «Меньше ИИ-музыки»: an account setting, recommendations mix in fewer AI-generated tracks.
+    pub fn ai_reduction(&self) -> Result<bool> {
+        let r = self.get("/account/settings", &[])?;
+        r["aiContentReductionEnabled"].as_bool().ok_or_else(|| anyhow!("нет aiContentReductionEnabled"))
+    }
+
+    pub fn set_ai_reduction(&self, on: bool) -> Result<()> {
+        self.post_form("/account/settings", &[("aiContentReductionEnabled", if on { "true" } else { "false" })])?;
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- tracks
 
     pub fn tracks(&self, ids: &[String]) -> Result<Vec<Track>> {
@@ -724,6 +735,13 @@ mod tests {
         let tracks = Api::new(&token).artist_tracks("161243").unwrap();
         assert!(tracks.len() > 100, "{}", tracks.len());
         assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+    }
+
+    /// Network test: needs a token (see `test_token`). Only reads the setting.
+    #[test]
+    #[ignore]
+    fn ai_reduction() {
+        Api::new(&test_token()).ai_reduction().unwrap();
     }
 
     /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.

@@ -29,6 +29,10 @@ pub enum Msg {
     LikeFailed { track: Track, like: bool, err: String },
     Cover { url: String, result: Result<image::DynamicImage, String> },
     Preload { gen: u64, idx: usize, id: String, result: Result<String, String> },
+    /// «Меньше ИИ-музыки» loaded from the account.
+    LessAi(Result<bool, String>),
+    /// Result of switching «Меньше ИИ-музыки» to `on`.
+    LessAiSet { on: bool, result: Result<(), String> },
     Status(String),
 }
 
@@ -102,14 +106,22 @@ pub enum Setting {
     Quality,
     Equalizer,
     Crossfade,
+    LessAi,
     Icons,
     About,
     Logout,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 6] =
-        [Setting::Quality, Setting::Equalizer, Setting::Crossfade, Setting::Icons, Setting::About, Setting::Logout];
+    pub const ALL: [Setting; 7] = [
+        Setting::Quality,
+        Setting::Equalizer,
+        Setting::Crossfade,
+        Setting::LessAi,
+        Setting::Icons,
+        Setting::About,
+        Setting::Logout,
+    ];
 
     fn index(self) -> usize {
         Setting::ALL.iter().position(|s| *s == self).unwrap_or(0)
@@ -184,6 +196,8 @@ pub struct App {
     pub crossfade: u8,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
+    /// «Меньше ИИ-музыки» from the account settings; `None` until loaded.
+    pub less_ai: Option<bool>,
 
     pub time_pos: f64,
     pub duration: f64,
@@ -260,6 +274,7 @@ impl App {
             quality: 1,
             crossfade: 0,
             icons: true,
+            less_ai: None,
             time_pos: 0.0,
             duration: 0.0,
             paused: false,
@@ -280,6 +295,7 @@ impl App {
         app.load_liked();
         app.load_stations();
         app.load_playlists();
+        app.load_account_settings();
         if !app.account.has_plus {
             app.set_status("Внимание: без подписки Плюс доступны только 30-секундные фрагменты");
         }
@@ -355,6 +371,10 @@ impl App {
     fn load_playlists(&mut self) {
         self.playlists_loading = true;
         self.spawn(|api| Some(Msg::Playlists(api.playlists().map_err(|e| format!("{e:#}")))));
+    }
+
+    fn load_account_settings(&self) {
+        self.spawn(|api| Some(Msg::LessAi(api.ai_reduction().map_err(|e| format!("{e:#}")))));
     }
 
     fn load_stations(&self) {
@@ -877,6 +897,19 @@ impl App {
                 self.set_status(format!("Ошибка лайка: {err}"));
             }
             Msg::Status(s) => self.set_status(s),
+            Msg::LessAi(r) => match r {
+                Ok(on) => self.less_ai = Some(on),
+                Err(e) => self.set_status(format!("Не удалось загрузить настройки аккаунта: {e}")),
+            },
+            Msg::LessAiSet { on, result } => {
+                if let Err(e) = result {
+                    // Only roll back if nothing changed it since.
+                    if self.less_ai == Some(on) {
+                        self.less_ai = Some(!on);
+                    }
+                    self.set_status(format!("Не удалось изменить «Меньше ИИ-музыки»: {e}"));
+                }
+            }
             Msg::Cover { url, result } => {
                 self.covers_loading.remove(&url);
                 if let Ok(img) = result {
@@ -991,6 +1024,7 @@ impl App {
                 self.load_liked();
                 self.load_stations();
                 self.load_playlists();
+                self.load_account_settings();
                 self.reload_open_playlist();
                 self.set_status("Обновление…");
             }
@@ -1108,6 +1142,10 @@ impl App {
             Setting::Equalizer => crate::eq::PRESETS[self.eq].name.to_string(),
             Setting::Crossfade if self.crossfade == 0 => "выкл".to_string(),
             Setting::Crossfade => format!("{} с", self.crossfade),
+            Setting::LessAi => match self.less_ai {
+                Some(on) => if on { "вкл" } else { "выкл" }.to_string(),
+                None => "…".to_string(),
+            },
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::About | Setting::Logout => return None,
         })
@@ -1131,6 +1169,17 @@ impl App {
                 };
                 self.set_crossfade(next);
             }
+            Setting::LessAi => match self.less_ai {
+                // Shown right away; rolled back if the server refuses.
+                Some(cur) => {
+                    let on = !cur;
+                    self.less_ai = Some(on);
+                    self.spawn(move |api| {
+                        Some(Msg::LessAiSet { on, result: api.set_ai_reduction(on).map_err(|e| format!("{e:#}")) })
+                    });
+                }
+                None => self.set_status("Настройки аккаунта ещё загружаются"),
+            },
             Setting::Icons => self.set_icons(!self.icons),
             Setting::About | Setting::Logout => {}
         }
@@ -1609,6 +1658,20 @@ mod tests {
         app.crossfade = 7;
         app.on_key(key(KeyCode::Left));
         assert_eq!(app.crossfade, 5, "a config value between steps snaps to the nearest one");
+
+        // «Меньше ИИ-музыки»: not loaded yet — nothing changes; then switched at once, rolled back on error.
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.less_ai, None);
+        app.on_msg(Msg::LessAi(Ok(false)));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.less_ai, Some(true));
+        app.on_msg(Msg::LessAiSet { on: true, result: Err("нет сети".into()) });
+        assert_eq!(app.less_ai, Some(false));
+        app.on_key(key(KeyCode::Enter));
+        app.on_msg(Msg::LessAiSet { on: true, result: Ok(()) });
+        assert_eq!(app.less_ai, Some(true));
+
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
         assert!(!app.icons);
@@ -1621,14 +1684,14 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 4 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 5 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 5 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 6 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
