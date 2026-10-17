@@ -930,6 +930,7 @@ fn draw_help(f: &mut Frame) {
 pub const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 pub const UPSTREAM_URL: &str = "https://github.com/Rexilone/yamusic-cli";
 pub const AUR_URL: &str = "https://aur.archlinux.org/packages/ymusic-cli";
+pub const AUR_BIN_URL: &str = "https://aur.archlinux.org/packages/ymusic-cli-bin";
 
 /// Renders `text` as a clickable link (OSC 8) in one line starting at `x`, `y`.
 fn render_link(buf: &mut Buffer, x: u16, y: u16, text: &str, url: &str, style: Style) {
@@ -959,6 +960,7 @@ fn draw_about(f: &mut Frame) {
         vec![],
         vec![(REPO_URL.into(), link, Some(REPO_URL))],
         vec![(AUR_URL.into(), link, Some(AUR_URL))],
+        vec![(AUR_BIN_URL.into(), link, Some(AUR_BIN_URL))],
         vec![],
         vec![],
         vec![("Forked from: ".into(), faint, None), (UPSTREAM_URL.into(), faint.underlined(), Some(UPSTREAM_URL))],
@@ -1248,12 +1250,14 @@ mod tests {
             "О программе",
             env!("CARGO_PKG_VERSION"),
             "https://github.com/iodnoorov/ymusic",
-            "https://aur.archlinux.org/packages/ymusic-cli",
+            "https://aur.archlinux.org/packages/ymusic-cli ",
+            "https://aur.archlinux.org/packages/ymusic-cli-bin",
             "Forked from: https://github.com/Rexilone/yamusic-cli",
         ] {
             assert!(plain.contains(want), "{want}");
         }
         assert!(text.contains(&format!("\x1b]8;;{}\x07", super::UPSTREAM_URL)));
+        assert!(text.contains(&format!("\x1b]8;;{}\x07", super::AUR_BIN_URL)));
         app.show_about = false;
 
         app.show_help = true;
