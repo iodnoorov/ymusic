@@ -3,14 +3,25 @@
 **Яндекс Музыка в терминале.** Моя волна, лайки, станции по жанрам и настроениям, поиск — с понятными горячими клавишами.
 
 <p align="center">
-  <img src="docs/screenshots/wave.png" alt="Моя волна" width="900">
+  <img src="docs/screenshots/mywave.png" alt="Моя волна" width="900">
 </p>
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/stations.png" alt="Станции" width="290"><br><sub>Станции: жанры, настроения, занятия</sub></td>
-    <td align="center"><img src="docs/screenshots/liked.png" alt="Мне нравится" width="290"><br><sub>Мне нравится</sub></td>
-    <td align="center"><img src="docs/screenshots/search.png" alt="Поиск" width="290"><br><sub>Поиск</sub></td>
+    <td align="center"><img src="docs/screenshots/stations.png" alt="Станции" width="440"><br><sub>Вкладка «Станции»</sub></td>
+    <td align="center"><img src="docs/screenshots/playlists.png" alt="Плейлисты" width="440"><br><sub>Вкладка «Плейлисты»</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/search.png" alt="Поиск" width="440"><br><sub>Вкладка «Поиск» без результатов</sub></td>
+    <td align="center"><img src="docs/screenshots/search2.png" alt="Поиск с результатами" width="440"><br><sub>Вкладка «Поиск» с результатами</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/equilizer.png" alt="Эквалайзер" width="440"><br><sub>Эквалайзер</sub></td>
+    <td align="center"><img src="docs/screenshots/sound_quality.png" alt="Качество звука" width="440"><br><sub>Выбор качества треков</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/help.png" alt="Помощь" width="440"><br><sub>Окно помощи</sub></td>
+    <td align="center"><img src="docs/screenshots/about.png" alt="О программе" width="440"><br><sub>Окно «О программе»</sub></td>
   </tr>
 </table>
 
@@ -189,7 +200,7 @@ ymusic --no-icons            # без иконок Nerd Font
 - `a` — добавить выбранный (или текущий) трек в свой плейлист.
 - `E` — эквалайзер с пресетами (через фильтры mpv), выбор сохраняется в настройках.
 - `B` — выбор качества звука (экономия трафика / обычное / лучшее), сохраняется в настройках.
-- `!` — окно «О программе»: версия и кликабельные ссылки на репозиторий, пакет в AUR и оригинальный проект.
+- `!` — окно «О программе»: версия и кликабельные ссылки на репозиторий, пакеты в AUR (`ymusic-cli` и `ymusic-cli-bin`) и оригинальный проект.
 - Проект перенесён в репозиторий `iodnoorov/ymusic`, ссылки и пакеты AUR указывают на него.
 - Программа переименована в `ymusic`, пакет — в `ymusic-cli`. Настройки — в `~/.config/ymusic/`, переменные окружения — `YMUSIC_*`.
 - Убрана поддержка Nix/NixOS: проект поддерживает только Arch Linux (AUR), готовый бинарник и сборку из исходников.
