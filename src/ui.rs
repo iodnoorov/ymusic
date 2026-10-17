@@ -1,7 +1,7 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Modal, Source, StationRow, Tab};
+use crate::app::{App, Modal, Setting, Source, StationRow, Tab};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -12,7 +12,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use ratatui_image::{FilterType, Resize, StatefulImage};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------- theme
 
@@ -47,6 +47,7 @@ pub struct Icons {
     plus: &'static str,
     note: &'static str,
     info: &'static str,
+    settings: &'static str,
     error: &'static str,
     keys: &'static str,
     genre: &'static str,
@@ -79,6 +80,7 @@ const NERD: Icons = Icons {
     plus: "󰆥",
     note: "󰎇",
     info: "󰋽",
+    settings: "󰒓",
     error: "󰗖",
     keys: "󰌌",
     genre: "󰋄",
@@ -111,6 +113,7 @@ const PLAIN: Icons = Icons {
     plus: "✦",
     note: "♪",
     info: "•",
+    settings: "⚙",
     error: "!",
     keys: "⌨",
     genre: "♪",
@@ -122,14 +125,19 @@ const PLAIN: Icons = Icons {
     queue: "≡",
 };
 
-static ICONS: OnceLock<&'static Icons> = OnceLock::new();
+/// Nerd Font icons or plain Unicode symbols; switched from the settings window.
+static NERD_ICONS: AtomicBool = AtomicBool::new(true);
 
 pub fn set_nerd_icons(nerd: bool) {
-    let _ = ICONS.set(if nerd { &NERD } else { &PLAIN });
+    NERD_ICONS.store(nerd, Ordering::Relaxed);
 }
 
 fn ic() -> &'static Icons {
-    ICONS.get().copied().unwrap_or(&NERD)
+    if NERD_ICONS.load(Ordering::Relaxed) {
+        &NERD
+    } else {
+        &PLAIN
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -752,8 +760,8 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
             Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => &[("Enter", "удалить"), ("Esc", "отмена")],
             Modal::Rename { .. } => &[("Enter", "сохранить"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
-            Modal::Equalizer { .. } => &[("↑↓", "выбор (слышно сразу)"), ("Enter", "оставить"), ("Esc", "отмена")],
-            Modal::Quality { .. } => &[("↑↓", "выбор"), ("Enter", "сохранить"), ("Esc", "отмена")],
+            Modal::Settings { .. } => &[("↑↓", "выбор"), ("←→", "изменить"), ("Enter", "открыть"), ("Esc", "закрыть")],
+            Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
         }
     } else if app.tab == Tab::Playlists && app.open_playlist.is_some() {
         &[
@@ -805,11 +813,11 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             ],
         }
     };
-    // «О программе» sits at the right edge, except while text is typed (`!` is input there).
+    // «Настройки» sit at the right edge, except while text is typed (`o` is input there).
     let about = (!app.search_editing && app.modal.is_none()).then(|| {
         Line::from(vec![
-            Span::styled("!", Style::new().fg(ACCENT).bold()),
-            Span::styled(" о программе ", Style::new().fg(MUTED)),
+            Span::styled("o", Style::new().fg(ACCENT).bold()),
+            Span::styled(" настройки ", Style::new().fg(MUTED)),
         ])
     });
     let right_w = about.as_ref().map_or(0, Line::width);
@@ -844,8 +852,6 @@ fn draw_help(f: &mut Frame) {
                 ("←  →", "перемотка ±10 с"),
                 ("+  -", "громкость"),
                 ("m", "без звука"),
-                ("E", "эквалайзер"),
-                ("B", "качество звука"),
             ],
         ),
         (i.heart, "Оценки", &[("l", "лайк текущего трека"), ("L", "лайк выбранного в списке"), ("d", "дизлайк и пропуск")]),
@@ -871,7 +877,7 @@ fn draw_help(f: &mut Frame) {
                 ("y", "копировать ссылку на трек"),
                 ("/", "поиск"),
                 ("R", "обновить"),
-                ("!", "о программе"),
+                ("o", "настройки, о программе"),
                 ("q", "выход"),
             ],
         ),
@@ -1002,13 +1008,41 @@ fn draw_about(f: &mut Frame) {
     }
 }
 
+fn setting_name(s: Setting) -> &'static str {
+    match s {
+        Setting::Quality => "Качество звука",
+        Setting::Equalizer => "Эквалайзер",
+        Setting::Crossfade => "Плавные переходы",
+        Setting::Icons => "Иконки Nerd Font",
+        Setting::About => "О программе",
+        Setting::Logout => "Выйти из аккаунта",
+    }
+}
+
+/// Explanation shown under the settings list for the selected row.
+fn setting_note(app: &App, s: Setting) -> String {
+    match s {
+        Setting::Quality => format!("{} · со следующего трека", crate::api::QUALITIES[app.quality].note),
+        Setting::Equalizer => "Слышно сразу".into(),
+        Setting::Crossfade => "Затухание в конце трека и нарастание в начале".into(),
+        Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
+        Setting::About => "Версия и ссылки на проект".into(),
+        Setting::Logout => "Токен будет удалён, программа закроется".into(),
+    }
+}
+
 /// Centered pop-up box of the given inner size; returns the inner area.
 fn popup(f: &mut Frame, icon: &str, title: &str, w: u16, h: u16) -> Rect {
+    popup_block(f, panel(icon, title.to_string()), w, h)
+}
+
+/// Like [`popup`], for a box with extra decorations (e.g. a bottom title).
+fn popup_block(f: &mut Frame, block: Block, w: u16, h: u16) -> Rect {
     let area = f.area();
     let [v] = Layout::vertical([Constraint::Length((h + 4).min(area.height))]).flex(Flex::Center).areas(area);
     let [r] = Layout::horizontal([Constraint::Length((w + 4).min(area.width))]).flex(Flex::Center).areas(v);
     f.render_widget(Clear, r);
-    let block = panel(icon, title.to_string()).border_style(Style::new().fg(ACCENT)).padding(Padding::uniform(1));
+    let block = block.border_style(Style::new().fg(ACCENT)).padding(Padding::uniform(1));
     let inner = block.inner(r);
     f.render_widget(block, r);
     inner
@@ -1066,30 +1100,26 @@ fn draw_modal(f: &mut Frame, app: &App) {
             ];
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
-        Modal::Equalizer { sel, .. } => {
-            let presets = crate::eq::PRESETS;
-            let inner = popup(f, i.note, "Эквалайзер", 30, presets.len() as u16);
-            let items: Vec<ListItem> = presets.iter().map(|p| ListItem::new(p.name)).collect();
-            let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
-            let widget = List::new(items)
-                .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
-                .highlight_symbol("▌ ")
-                .highlight_spacing(HighlightSpacing::Always);
-            f.render_stateful_widget(widget, inner, &mut st);
-        }
-        Modal::Quality { sel } => {
-            let qualities = crate::api::QUALITIES;
-            let inner = popup(f, i.note, "Качество звука", 50, qualities.len() as u16);
-            let items: Vec<ListItem> = qualities
+        Modal::Settings { sel } => {
+            let rows = Setting::ALL;
+            let n = rows.len() as u16;
+            let block = panel(i.settings, "Настройки")
+                .title_bottom(Line::from(Span::styled(" Esc — закрыть окно ", Style::new().fg(MUTED))).centered());
+            let inner = popup_block(f, block, 54, n + 2);
+            let [list, _, note] =
+                Layout::vertical([Constraint::Length(n), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+            let items: Vec<ListItem> = rows
                 .iter()
-                .enumerate()
-                .map(|(n, q)| {
-                    let mark = if n == app.quality { "● " } else { "  " };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(mark, Style::new().fg(ACCENT)),
-                        Span::raw(q.name),
-                        Span::styled(format!("  {}", q.note), Style::new().fg(MUTED)),
-                    ]))
+                .map(|&s| {
+                    let name = setting_name(s);
+                    let label = if s == Setting::Logout { Style::new().fg(ERROR) } else { Style::new() };
+                    let mut spans = vec![Span::styled(format!("{name:<20}"), label)];
+                    if let Some(v) = app.setting_value(s) {
+                        spans.push(Span::styled("‹ ", Style::new().fg(MUTED)));
+                        spans.push(Span::styled(v, Style::new().fg(ACCENT).bold()));
+                        spans.push(Span::styled(" ›", Style::new().fg(MUTED)));
+                    }
+                    ListItem::new(Line::from(spans))
                 })
                 .collect();
             let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
@@ -1097,7 +1127,22 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
                 .highlight_symbol("▌ ")
                 .highlight_spacing(HighlightSpacing::Always);
-            f.render_stateful_widget(widget, inner, &mut st);
+            f.render_stateful_widget(widget, list, &mut st);
+            let text = setting_note(app, rows[*sel]);
+            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(MUTED))), note);
+        }
+        Modal::ConfirmLogout => {
+            let inner = popup(f, i.error, "Выход из аккаунта", 48, 4);
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("Выйти из аккаунта {}?", app.account.login),
+                    Style::new().fg(Color::Reset).bold(),
+                )),
+                Line::from(Span::styled("Токен будет удалён, программа закроется.", Style::new().fg(SUB))),
+                Line::from(""),
+                Line::from([key_hint("Enter", "выйти"), key_hint("Esc", "отмена")].concat()),
+            ];
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         Modal::Rename { input, .. } => {
             let inner = popup(f, i.queue, "Название плейлиста", 48, 1);
@@ -1180,8 +1225,8 @@ mod tests {
             Some(Modal::AddTo { track: t.clone(), choices: app.playlists.clone(), sel: 1 }),
             Some(Modal::ConfirmRemove { pl: pl.clone(), index: 2, track: app.queue[2].clone() }),
             Some(Modal::Rename { pl: pl.clone(), input: "Новое название".into() }),
-            Some(Modal::Equalizer { prev: 0, sel: 3 }),
-            Some(Modal::Quality { sel: 2 }),
+            Some(Modal::Settings { sel: 2 }),
+            Some(Modal::ConfirmLogout),
         ];
         let expect = [
             "Плейлист будет удалён из аккаунта.",
@@ -1189,8 +1234,8 @@ mod tests {
             "Добавить в плейлист",
             "из плейлиста «Bloodborne soundtracks»?",
             "Новое название",
-            "Электроника",
-            "максимум, что отдаёт сервер",
+            "Затухание в конце трека и нарастание в начале",
+            "Выйти из аккаунта tester?",
         ];
         for (modal, want) in modals.into_iter().zip(expect) {
             app.modal = modal;

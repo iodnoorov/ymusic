@@ -177,9 +177,11 @@ impl Player {
     /// Duration of the track mpv has just started: the fade-out is placed before its end.
     pub fn set_track_duration(&mut self, secs: f64) {
         // Changing the chain re-creates the filters, so skip insignificant duration refinements.
-        if self.fade > 0.0 && (secs - self.duration).abs() > 0.5 {
+        if (secs - self.duration).abs() > 0.5 {
             self.duration = secs;
-            self.apply_filters();
+            if self.fade > 0.0 {
+                self.apply_filters();
+            }
         }
     }
 

@@ -77,6 +77,10 @@ fn main() -> Result<()> {
     let mut app = app::App::new(api, account, tx, player, cfg.volume);
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);
+    // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
+    // unless icons are switched in the settings window.
+    let icons = cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
+    app.set_icons(icons);
     app.quality = api::quality_index(&cfg.quality);
     if let Some(id) = cli.station {
         app.start_station_id(&id);
@@ -84,7 +88,6 @@ fn main() -> Result<()> {
         app.start_station_id(api::MY_WAVE);
     }
 
-    ui::set_nerd_icons(cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none());
     let mut terminal = ratatui::init();
     // Must run after entering the alternate screen and before reading events.
     app.picker = Some(
@@ -124,7 +127,17 @@ fn main() -> Result<()> {
     cfg.volume = app.save_volume();
     cfg.eq = eq::PRESETS[app.eq].id.to_string();
     cfg.quality = api::QUALITIES[app.quality].id.to_string();
+    cfg.crossfade = app.crossfade;
+    if app.icons != icons {
+        cfg.icons = app.icons;
+    }
+    if app.logout {
+        cfg.token = None;
+    }
     let _ = cfg.save();
+    if app.logout && res.is_ok() {
+        println!("Вы вышли из аккаунта. Войти снова: ymusic login");
+    }
     res
 }
 

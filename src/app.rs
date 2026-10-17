@@ -91,10 +91,33 @@ pub enum Modal {
     ConfirmRemove { pl: Playlist, index: usize, track: Track },
     ConfirmDelete { pl: Playlist },
     Rename { pl: Playlist, input: String },
-    /// Equalizer preset picker; `prev` is restored on Esc.
-    Equalizer { prev: usize, sel: usize },
-    Quality { sel: usize },
+    /// Settings window; `sel` is an index into `Setting::ALL`.
+    Settings { sel: usize },
+    ConfirmLogout,
 }
+
+/// Rows of the settings window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Setting {
+    Quality,
+    Equalizer,
+    Crossfade,
+    Icons,
+    About,
+    Logout,
+}
+
+impl Setting {
+    pub const ALL: [Setting; 6] =
+        [Setting::Quality, Setting::Equalizer, Setting::Crossfade, Setting::Icons, Setting::About, Setting::Logout];
+
+    fn index(self) -> usize {
+        Setting::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+}
+
+/// Fade lengths offered in the settings window, seconds (0 — off).
+pub const CROSSFADE_STEPS: [u8; 6] = [0, 3, 5, 8, 12, 15];
 
 pub enum StationRow {
     Header(String),
@@ -110,6 +133,10 @@ pub struct App {
     pub quit: bool,
     pub show_help: bool,
     pub show_about: bool,
+    /// «О программе» was opened from the settings window: closing it returns there.
+    about_from_settings: bool,
+    /// The user chose «Выйти из аккаунта»: the token is removed on exit.
+    pub logout: bool,
 
     pub queue: Vec<Track>,
     pub pos: Option<usize>,
@@ -153,6 +180,10 @@ pub struct App {
     pub eq: usize,
     /// Sound quality (index into `api::QUALITIES`).
     pub quality: usize,
+    /// Fade-in/fade-out length, seconds (0 — off).
+    pub crossfade: u8,
+    /// Nerd Font icons (false — plain Unicode symbols).
+    pub icons: bool,
 
     pub time_pos: f64,
     pub duration: f64,
@@ -193,6 +224,8 @@ impl App {
             quit: false,
             show_help: false,
             show_about: false,
+            about_from_settings: false,
+            logout: false,
             queue: Vec::new(),
             pos: None,
             source: Source::None,
@@ -225,6 +258,8 @@ impl App {
             modal: None,
             eq: 0,
             quality: 1,
+            crossfade: 0,
+            icons: true,
             time_pos: 0.0,
             duration: 0.0,
             paused: false,
@@ -902,6 +937,9 @@ impl App {
         if self.show_help || self.show_about {
             self.show_help = false;
             self.show_about = false;
+            if std::mem::take(&mut self.about_from_settings) {
+                self.modal = Some(Modal::Settings { sel: Setting::About.index() });
+            }
             return;
         }
         let code = match key.code {
@@ -911,9 +949,7 @@ impl App {
         match code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
-            KeyCode::Char('!') => self.show_about = true,
-            KeyCode::Char('E') => self.modal = Some(Modal::Equalizer { prev: self.eq, sel: self.eq }),
-            KeyCode::Char('B') => self.modal = Some(Modal::Quality { sel: self.quality }),
+            KeyCode::Char('o') => self.modal = Some(Modal::Settings { sel: 0 }),
             KeyCode::Char(' ') | KeyCode::Char('p') => self.player.toggle_pause(),
             KeyCode::Char('n') => self.next(End::Skip),
             KeyCode::Char('b') => self.prev(),
@@ -1054,9 +1090,50 @@ impl App {
         self.player.set_eq_filter(&crate::eq::PRESETS[idx].filter());
     }
 
-    /// Fade-in/fade-out length in seconds from the config (0 — off).
+    /// Fade-in/fade-out length in seconds (0 — off).
     pub fn set_crossfade(&mut self, secs: u8) {
-        self.player.set_fade(f64::from(secs.min(crate::config::MAX_CROSSFADE)));
+        self.crossfade = secs.min(crate::config::MAX_CROSSFADE);
+        self.player.set_fade(f64::from(self.crossfade));
+    }
+
+    pub fn set_icons(&mut self, nerd: bool) {
+        self.icons = nerd;
+        crate::ui::set_nerd_icons(nerd);
+    }
+
+    /// Current value of a settings row; `None` for rows that are actions.
+    pub fn setting_value(&self, s: Setting) -> Option<String> {
+        Some(match s {
+            Setting::Quality => QUALITIES[self.quality].name.to_string(),
+            Setting::Equalizer => crate::eq::PRESETS[self.eq].name.to_string(),
+            Setting::Crossfade if self.crossfade == 0 => "выкл".to_string(),
+            Setting::Crossfade => format!("{} с", self.crossfade),
+            Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
+            Setting::About | Setting::Logout => return None,
+        })
+    }
+
+    /// Switches a settings row to the next (`d` > 0) or previous value, wrapping around.
+    fn change_setting(&mut self, s: Setting, d: i32) {
+        let cycle = |cur: usize, len: usize| (cur as i64 + i64::from(d.signum())).rem_euclid(len as i64) as usize;
+        match s {
+            // The current (and already preloaded) track keeps its stream.
+            Setting::Quality => self.quality = cycle(self.quality, QUALITIES.len()),
+            // Applied right away, so the preset can be heard.
+            Setting::Equalizer => self.set_eq(cycle(self.eq, crate::eq::PRESETS.len())),
+            Setting::Crossfade => {
+                // A value from the config may lie between the steps.
+                let cur = self.crossfade;
+                let next = if d > 0 {
+                    CROSSFADE_STEPS.iter().find(|&&s| s > cur).copied().unwrap_or(CROSSFADE_STEPS[0])
+                } else {
+                    CROSSFADE_STEPS.iter().rev().find(|&&s| s < cur).copied().unwrap_or(CROSSFADE_STEPS[CROSSFADE_STEPS.len() - 1])
+                };
+                self.set_crossfade(next);
+            }
+            Setting::Icons => self.set_icons(!self.icons),
+            Setting::About | Setting::Logout => {}
+        }
     }
 
     fn change_volume(&mut self, d: f64) {
@@ -1278,42 +1355,38 @@ impl App {
                     });
                 }
             }
-            Modal::Equalizer { prev, mut sel } => {
-                let last = crate::eq::PRESETS.len() - 1;
+            Modal::Settings { mut sel } => {
+                let row = Setting::ALL[sel];
                 match code {
-                    KeyCode::Esc | KeyCode::Char('q') => self.set_eq(prev),
-                    KeyCode::Enter => {
-                        self.set_eq(sel);
-                        self.set_status(format!("Эквалайзер: {}", crate::eq::PRESETS[sel].name));
-                    }
-                    KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
-                        sel = if matches!(code, KeyCode::Down | KeyCode::Char('j')) {
-                            (sel + 1).min(last)
-                        } else {
-                            sel.saturating_sub(1)
-                        };
-                        // Applied right away so the preset can be heard before confirming.
-                        self.set_eq(sel);
-                        self.modal = Some(Modal::Equalizer { prev, sel });
-                    }
-                    _ => self.modal = Some(Modal::Equalizer { prev, sel }),
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => return,
+                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(Setting::ALL.len() - 1),
+                    KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+                    KeyCode::Left | KeyCode::Char('h') => self.change_setting(row, -1),
+                    KeyCode::Right | KeyCode::Char('l') => self.change_setting(row, 1),
+                    KeyCode::Enter => match row {
+                        Setting::About => {
+                            self.show_about = true;
+                            self.about_from_settings = true;
+                            return;
+                        }
+                        Setting::Logout => {
+                            self.modal = Some(Modal::ConfirmLogout);
+                            return;
+                        }
+                        _ => self.change_setting(row, 1),
+                    },
+                    _ => {}
+                }
+                self.modal = Some(Modal::Settings { sel });
+            }
+            Modal::ConfirmLogout => {
+                if code == KeyCode::Enter {
+                    self.logout = true;
+                    self.quit = true;
+                } else {
+                    self.modal = Some(Modal::Settings { sel: Setting::Logout.index() });
                 }
             }
-            Modal::Quality { sel } => match code {
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.modal = Some(Modal::Quality { sel: (sel + 1).min(QUALITIES.len() - 1) })
-                }
-                KeyCode::Up | KeyCode::Char('k') => self.modal = Some(Modal::Quality { sel: sel.saturating_sub(1) }),
-                KeyCode::Enter => {
-                    if sel != self.quality {
-                        self.quality = sel;
-                        // The current (and already preloaded) track keeps its stream.
-                        self.set_status(format!("Качество: {} — со следующего трека", QUALITIES[sel].name));
-                    }
-                }
-                KeyCode::Esc | KeyCode::Char('q') => {}
-                _ => self.modal = Some(Modal::Quality { sel }),
-            },
             Modal::Rename { pl, mut input } => match code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
@@ -1516,35 +1589,56 @@ mod tests {
         app.on_key(key(KeyCode::Char('x')));
         assert!(app.modal.is_none());
 
-        // `E` (`У`): moving applies presets right away, Esc restores, Enter keeps.
+        // Settings window (`o`, `щ` in the Russian layout): ←/→ change values right away.
         app.set_eq(crate::eq::index("rock"));
-        app.on_key(key(KeyCode::Char('У')));
+        app.on_key(key(KeyCode::Char('щ')));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 0 })));
+        assert_eq!(QUALITIES[app.quality].id, "nq");
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(QUALITIES[app.quality].id, "lq");
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.quality, QUALITIES.len() - 1, "wraps around");
         app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Right));
         assert_eq!(app.eq, crate::eq::index("electronic"));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.crossfade, 0);
+        app.on_key(key(KeyCode::Right));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.crossfade, 5);
+        app.crossfade = 7;
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.crossfade, 5, "a config value between steps snaps to the nearest one");
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Right));
+        assert!(!app.icons);
+        app.on_key(key(KeyCode::Right));
+        assert!(app.icons);
+
+        // «О программе» opens from the settings and returns there.
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.show_about && app.modal.is_none());
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(!app.show_about);
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 4 })));
+
+        // Logout asks first; Esc goes back to the settings.
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert_eq!(app.eq, crate::eq::index("rock"));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 5 })));
+        assert!(!app.logout && !app.quit);
+        app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
-        app.on_key(key(KeyCode::Char('E')));
+        app.on_key(key(KeyCode::Char('o')));
         for _ in 0..10 {
-            app.on_key(key(KeyCode::Char('k')));
+            app.on_key(key(KeyCode::Char('j')));
         }
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.eq, 0);
-        assert!(app.modal.is_none());
-
-        // `B` (`И`): quality is changed only by Enter.
-        assert_eq!(QUALITIES[app.quality].id, "nq");
-        app.on_key(key(KeyCode::Char('И')));
-        app.on_key(key(KeyCode::Char('j')));
-        app.on_key(key(KeyCode::Char('j')));
-        app.on_key(key(KeyCode::Esc));
-        assert_eq!(QUALITIES[app.quality].id, "nq");
-        app.on_key(key(KeyCode::Char('B')));
-        app.on_key(key(KeyCode::Char('k')));
-        app.on_key(key(KeyCode::Char('k')));
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(QUALITIES[app.quality].id, "lq");
-        assert!(app.modal.is_none());
+        assert!(app.logout && app.quit);
     }
 
     /// Preload state machine (uses a real mpv). Run with `cargo test -- --ignored`.
