@@ -1,5 +1,5 @@
 pkgbase = ymusic-cli-bin
-	pkgdesc = Terminal client for Yandex Music: My Wave, likes, stations (TUI); fork of https://github.com/Rexilone/yamusic-cli — prebuilt static binary
+	pkgdesc = Terminal client for Yandex Music: My Wave, likes, stations (TUI) — prebuilt static binary
 	pkgver = 1.0.0
 	pkgrel = 1
 	url = https://github.com/iodnoorov/ymusic

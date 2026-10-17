@@ -1,10 +1,9 @@
 # Maintainer: Ivan Odnoorov <elcheshirecat at yandex dot ru>
-# Fork of https://github.com/Rexilone/yamusic-cli
 pkgname=ymusic-cli
 _repo=ymusic
 pkgver=1.0.0
 pkgrel=1
-pkgdesc="Terminal client for Yandex Music: My Wave, likes, stations (TUI); fork of https://github.com/Rexilone/yamusic-cli"
+pkgdesc="Terminal client for Yandex Music: My Wave, likes, stations (TUI)"
 arch=('x86_64')
 url="https://github.com/iodnoorov/ymusic"
 license=('MIT')
