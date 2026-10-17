@@ -16,7 +16,8 @@ pub enum Msg {
     LikedIds(Vec<String>),
     Liked(Result<Vec<Track>, String>),
     Stations(Vec<Station>),
-    Search(Result<Vec<Track>, String>),
+    /// Page `page` of the search for `query`: (tracks, total found).
+    Search { query: String, page: usize, result: Result<(Vec<Track>, usize), String> },
     Playlists(Result<Vec<Playlist>, String>),
     PlaylistOpened { key: String, result: Result<Vec<Track>, String> },
     /// Result of renaming a playlist or changing its tracks: status text on success.
@@ -131,6 +132,13 @@ pub struct App {
     pub search_editing: bool,
     pub search_results: Vec<Track>,
     pub search_loading: bool,
+    /// Last submitted query, pages loaded so far and the total number of found tracks.
+    search_query: String,
+    search_pages: usize,
+    pub search_total: usize,
+    /// The queue is played from the current search (`Some(shuffled)`): pages loaded later are
+    /// appended to it, and playing close to its end loads the next page.
+    search_queue: Option<bool>,
     pub search_state: TableState,
 
     pub playlists: Vec<Playlist>,
@@ -203,6 +211,10 @@ impl App {
             search_editing: false,
             search_results: Vec::new(),
             search_loading: false,
+            search_query: String::new(),
+            search_pages: 0,
+            search_total: 0,
+            search_queue: None,
             search_state: TableState::default(),
             playlists: Vec::new(),
             playlists_loading: true,
@@ -397,6 +409,7 @@ impl App {
         self.preload_pending = false;
         self.from_preload = preloaded;
         self.load_cover(track.cover.clone());
+        self.maybe_extend_search_queue();
         if self.source == Source::Wave {
             self.wave_feedback(
                 json!({"type": "trackStarted", "timestamp": iso_now(), "trackId": track.full_id()}),
@@ -489,6 +502,7 @@ impl App {
         }
         self.report_end(End::Skip);
         self.queue = tracks;
+        self.search_queue = None;
         self.preload = None;
         self.playing_playlist = None;
         self.source = Source::List(name.to_string());
@@ -681,15 +695,39 @@ impl App {
                 all.extend(rest.into_iter().filter(|s| s.id != MY_WAVE));
                 self.set_stations(all);
             }
-            Msg::Search(r) => {
+            Msg::Search { query, page, result } => {
+                // A reply to an older query or a page that is no longer expected.
+                if query != self.search_query || page != self.search_pages {
+                    return;
+                }
                 self.search_loading = false;
-                match r {
-                    Ok(list) => {
-                        if list.is_empty() {
-                            self.set_status("Ничего не найдено");
+                match result {
+                    Ok((list, total)) => {
+                        self.search_pages += 1;
+                        self.search_total = total;
+                        if page == 0 {
+                            if list.is_empty() {
+                                self.set_status("Ничего не найдено");
+                            }
+                            self.search_results.clear();
+                            self.search_state.select((!list.is_empty()).then_some(0));
                         }
-                        self.search_results = list;
-                        self.search_state.select((!self.search_results.is_empty()).then_some(0));
+                        // Pages may overlap if the results shift between requests.
+                        let seen: HashSet<String> = self.search_results.iter().map(|t| t.id.clone()).collect();
+                        let new: Vec<Track> = list.into_iter().filter(|t| !seen.contains(&t.id)).collect();
+                        if new.is_empty() && page > 0 {
+                            // Nothing new: stop asking for more pages.
+                            self.search_total = self.search_results.len();
+                        }
+                        if let Some(shuffled) = self.search_queue {
+                            let queued: HashSet<String> = self.queue.iter().map(|t| t.id.clone()).collect();
+                            let mut more: Vec<Track> = new.iter().filter(|t| !queued.contains(&t.id)).cloned().collect();
+                            if shuffled {
+                                shuffle_tracks(&mut more);
+                            }
+                            self.queue.extend(more);
+                        }
+                        self.search_results.extend(new);
                     }
                     Err(e) => self.set_status(format!("Ошибка поиска: {e}")),
                 }
@@ -765,6 +803,7 @@ impl App {
                     });
                     self.source = Source::Wave;
                     self.queue = b.tracks;
+                    self.search_queue = None;
                     self.preload = None;
                     self.pos = None;
                     self.wave_feedback(json!({"type": "radioStarted", "timestamp": iso_now(), "from": from}), None);
@@ -944,6 +983,44 @@ impl App {
         }
     }
 
+    /// Requests the next page of the current search.
+    fn load_search_page(&mut self) {
+        self.search_loading = true;
+        let (query, page) = (self.search_query.clone(), self.search_pages);
+        self.spawn(move |api| {
+            let result = api.search(&query, page).map_err(|e| format!("{e:#}"));
+            Some(Msg::Search { query, page, result })
+        });
+    }
+
+    /// The current search has pages that are not loaded yet and none is loading now.
+    fn can_load_more_search(&self) -> bool {
+        !self.search_loading && self.search_pages > 0 && self.search_results.len() < self.search_total
+    }
+
+    /// Loads the next search page when the queue played from the search is close to its end.
+    fn maybe_extend_search_queue(&mut self) {
+        let near_end = self.pos.is_some_and(|p| p + 20 >= self.queue.len());
+        if self.search_queue.is_some() && near_end && self.can_load_more_search() {
+            self.load_search_page();
+        }
+    }
+
+    /// Plays the loaded search results; later pages are appended to the queue.
+    fn play_search(&mut self, name: &str, tracks: Vec<Track>, start: usize, shuffled: bool) {
+        self.play_list(name, tracks, start);
+        self.search_queue = Some(shuffled);
+        self.maybe_extend_search_queue();
+    }
+
+    /// Loads more search results when the selection gets close to the end of the list.
+    fn maybe_load_more_search(&mut self) {
+        let sel = self.search_state.selected().unwrap_or(0);
+        if sel + 20 >= self.search_results.len() && self.can_load_more_search() {
+            self.load_search_page();
+        }
+    }
+
     fn on_search_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.search_editing = false,
@@ -951,8 +1028,12 @@ impl App {
                 self.search_editing = false;
                 let q = self.search_input.trim().to_string();
                 if !q.is_empty() {
-                    self.search_loading = true;
-                    self.spawn(move |api| Some(Msg::Search(api.search(&q).map_err(|e| format!("{e:#}")))));
+                    // The playing queue keeps the old results but no longer grows.
+                    self.search_queue = None;
+                    self.search_query = q;
+                    self.search_pages = 0;
+                    self.search_total = 0;
+                    self.load_search_page();
                 }
             }
             KeyCode::Backspace => {
@@ -995,7 +1076,10 @@ impl App {
         match self.tab {
             Tab::Wave => self.queue_state.select(step(self.queue_state.selected(), self.queue.len())),
             Tab::Liked => self.liked_state.select(step(self.liked_state.selected(), self.liked.len())),
-            Tab::Search => self.search_state.select(step(self.search_state.selected(), self.search_results.len())),
+            Tab::Search => {
+                self.search_state.select(step(self.search_state.selected(), self.search_results.len()));
+                self.maybe_load_more_search();
+            }
             Tab::Playlists => match &self.open_playlist {
                 Some(open) => self.open_state.select(step(self.open_state.selected(), open.tracks.len())),
                 None => self.playlists_state.select(step(self.playlists_state.selected(), self.playlists.len())),
@@ -1027,7 +1111,7 @@ impl App {
             }
             Tab::Search => {
                 if let Some(i) = self.search_state.selected() {
-                    self.play_list("Поиск", self.search_results.clone(), i);
+                    self.play_search("Поиск", self.search_results.clone(), i, false);
                 }
             }
             Tab::Playlists if self.open_playlist.is_some() => self.play_open(false),
@@ -1299,7 +1383,11 @@ impl App {
             _ => ("Мне нравится (перемешано)", self.liked.clone()),
         };
         shuffle_tracks(&mut list);
-        self.play_list(name, list, 0);
+        if self.tab == Tab::Search {
+            self.play_search(name, list, 0, true);
+        } else {
+            self.play_list(name, list, 0);
+        }
     }
 
     pub fn save_volume(&self) -> u8 {
@@ -1500,5 +1588,77 @@ mod tests {
         app.on_track_error();
         assert_eq!(app.pos, Some(2));
         assert!(!app.from_preload);
+    }
+
+    #[test]
+    #[ignore]
+    fn search_paging() {
+        use super::*;
+        use crate::api::Account;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let player = Player::spawn(tx.clone(), 0).expect("mpv");
+        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
+        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let t = |id: usize| Track {
+            id: id.to_string(),
+            album_id: None,
+            title: id.to_string(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let page = |r: std::ops::Range<usize>| r.map(t).collect::<Vec<_>>();
+        app.tab = Tab::Search;
+        app.search_query = "q".into();
+        app.search_loading = true;
+        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(0..100), 250)) });
+        assert_eq!((app.search_results.len(), app.search_total, app.search_loading), (100, 250, false));
+
+        // Far from the end: nothing more is requested.
+        app.move_sel(10);
+        assert!(!app.search_loading);
+        // Close to the end: the next page is requested.
+        app.move_sel(75);
+        assert!(app.search_loading);
+
+        // Replies to another query or page are ignored.
+        app.on_msg(Msg::Search { query: "old".into(), page: 1, result: Ok((page(500..600), 900)) });
+        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(500..600), 900)) });
+        assert_eq!(app.search_results.len(), 100);
+
+        // Overlapping tracks are not duplicated; selection stays in place.
+        app.on_msg(Msg::Search { query: "q".into(), page: 1, result: Ok((page(90..190), 250)) });
+        assert_eq!(app.search_results.len(), 190);
+        assert_eq!(app.search_state.selected(), Some(85));
+
+        // Playing from the search: later pages go to the queue, playing near its end loads more.
+        app.search_total = 400;
+        app.search_state.select(Some(0));
+        app.activate();
+        assert_eq!((app.queue.len(), app.pos, app.search_loading), (190, Some(0), false));
+        app.begin_track(175, false);
+        assert!(app.search_loading);
+        app.on_msg(Msg::Search { query: "q".into(), page: 2, result: Ok((page(180..290), 400)) });
+        assert_eq!((app.search_results.len(), app.queue.len()), (290, 290));
+        assert_eq!(app.queue[289].id, "289");
+        // A new search does not touch the playing queue.
+        app.search_input = "new".into();
+        app.on_search_key(KeyEvent::from(KeyCode::Enter));
+        app.on_msg(Msg::Search { query: "new".into(), page: 0, result: Ok((page(1000..1100), 900)) });
+        assert_eq!(app.queue.len(), 290);
+        app.search_query = "q".into();
+        app.search_pages = 3;
+        app.search_results = page(0..290);
+
+        // A page without new tracks ends the paging.
+        app.search_loading = true;
+        app.on_msg(Msg::Search { query: "q".into(), page: 3, result: Ok((page(0..100), 400)) });
+        assert_eq!(app.search_total, 290);
+        app.move_sel(1000);
+        assert!(!app.search_loading);
     }
 }

@@ -598,10 +598,12 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         ),
         input,
     );
-    let title = if app.search_loading {
-        format!("Результаты · {}", spinner(app.tick))
-    } else {
-        format!("Результаты · {}", app.search_results.len())
+    let shown = app.search_results.len();
+    let title = match (app.search_loading, shown) {
+        (true, 0) => format!("Результаты · {}", spinner(app.tick)),
+        (true, _) => format!("Результаты · {shown} из {} {}", app.search_total, spinner(app.tick)),
+        (false, _) if app.search_total > shown => format!("Результаты · {shown} из {}", app.search_total),
+        (false, _) => format!("Результаты · {shown}"),
     };
     let current = app.current().map(|c| c.id.clone());
     let playing = current.and_then(|id| app.search_results.iter().position(|t| t.id == id));

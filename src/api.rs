@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const CLIENT_ID: &str = "23cabbbdc6cd418abb4b39c32c41195d";
 
 const BASE: &str = "https://api.music.yandex.net";
+/// Tracks per search request (the API returns 20 by default and accepts up to 300).
+pub const SEARCH_PAGE: usize = 100;
 const MD5_SALT: &str = "XGRlBW9FXlekgbPrRHuSiA";
 const FILE_INFO_KEY: &str = "p93jhgh689SBReK6ghtw62";
 pub const MY_WAVE: &str = "user:onyourwave";
@@ -255,9 +257,16 @@ impl Api {
         Ok(out)
     }
 
-    pub fn search(&self, text: &str) -> Result<Vec<Track>> {
-        let r = self.get("/search", &[("text", text), ("type", "track"), ("page", "0"), ("nocorrect", "false")])?;
-        Ok(r["tracks"]["results"].as_array().into_iter().flatten().filter_map(Track::from_json).collect())
+    /// One page of track search results and the total number of found tracks.
+    pub fn search(&self, text: &str, page: usize) -> Result<(Vec<Track>, usize)> {
+        let page = page.to_string();
+        let size = SEARCH_PAGE.to_string();
+        let r = self.get(
+            "/search",
+            &[("text", text), ("type", "track"), ("page", &page), ("page-size", &size), ("nocorrect", "false")],
+        )?;
+        let tracks = r["tracks"]["results"].as_array().into_iter().flatten().filter_map(Track::from_json).collect();
+        Ok((tracks, r["tracks"]["total"].as_u64().unwrap_or(0) as usize))
     }
 
     /// Tracks of an artist, most popular first.
@@ -715,6 +724,19 @@ mod tests {
         let tracks = Api::new(&token).artist_tracks("161243").unwrap();
         assert!(tracks.len() > 100, "{}", tracks.len());
         assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+    }
+
+    /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn search_pages() {
+        let api = Api::new(&test_token());
+        let (first, total) = api.search("сплин", 0).unwrap();
+        assert_eq!(first.len(), SEARCH_PAGE);
+        assert!(total > 2 * SEARCH_PAGE, "{total}");
+        let (second, _) = api.search("сплин", 1).unwrap();
+        assert!(!second.is_empty());
+        assert_ne!(first[0].id, second[0].id);
     }
 
     /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
