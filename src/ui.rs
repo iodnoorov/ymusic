@@ -57,6 +57,7 @@ pub struct Icons {
     other: &'static str,
     clock: &'static str,
     queue: &'static str,
+    link: &'static str,
 }
 
 /// JetBrainsMono Nerd Font (Material Design icons).
@@ -90,6 +91,7 @@ const NERD: Icons = Icons {
     other: "󰐹",
     clock: "󰅐",
     queue: "󰲸",
+    link: "󰌹",
 };
 
 /// Fallback for terminals without a Nerd Font.
@@ -123,6 +125,7 @@ const PLAIN: Icons = Icons {
     other: "◉",
     clock: "◷",
     queue: "≡",
+    link: "↗",
 };
 
 /// Nerd Font icons or plain Unicode symbols; switched from the settings window.
@@ -760,6 +763,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
             Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => &[("Enter", "удалить"), ("Esc", "отмена")],
             Modal::Rename { .. } => &[("Enter", "сохранить"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
+            Modal::OpenLink { .. } => &[("Enter", "играть"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
             Modal::Settings { .. } => &[("↑↓", "выбор"), ("←→", "изменить"), ("Enter", "открыть"), ("Esc", "закрыть")],
             Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
         }
@@ -769,7 +773,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             ("s", "перемешать"),
             ("x", "удалить"),
             ("a", "в плейлист"),
-            ("e", "переименовать"),
+            ("E", "переименовать"),
             ("Esc", "назад"),
         ]
     } else {
@@ -786,7 +790,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             Tab::Playlists => &[
                 ("Enter", "открыть"),
                 ("s", "перемешать"),
-                ("e", "переименовать"),
+                ("E", "переименовать"),
                 ("x", "удалить"),
                 ("R", "обновить"),
                 ("?", "помощь"),
@@ -863,6 +867,7 @@ fn draw_help(f: &mut Frame) {
                 ("2  Enter", "станция: жанр, настроение…"),
                 ("r", "волна по треку"),
                 ("A", "все треки исполнителя"),
+                ("e", "альбом трека"),
             ],
         ),
         (
@@ -875,6 +880,7 @@ fn draw_help(f: &mut Frame) {
                 ("Enter", "играть"),
                 ("s", "перемешать список"),
                 ("y", "копировать ссылку на трек"),
+                ("Y", "играть по ссылке"),
                 ("/", "поиск"),
                 ("R", "обновить"),
                 ("o", "настройки, о программе"),
@@ -888,7 +894,7 @@ fn draw_help(f: &mut Frame) {
                 ("a", "добавить трек в плейлист"),
                 ("Enter  Esc", "открыть / закрыть плейлист"),
                 ("x", "удалить трек / плейлист"),
-                ("e", "переименовать плейлист"),
+                ("E", "переименовать плейлист"),
             ],
         ),
     ];
@@ -1150,6 +1156,20 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let inner = popup(f, i.queue, "Название плейлиста", 48, 1);
             let mut spans = vec![Span::styled(input.clone(), Style::new().fg(Color::Reset).bold())];
             if (app.tick / 2).is_multiple_of(2) {
+                spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+            }
+            f.render_widget(Paragraph::new(Line::from(spans)), inner);
+        }
+        Modal::OpenLink { input } => {
+            let inner = popup(f, i.link, "Играть по ссылке", 64, 1);
+            // Long links scroll: the end with the cursor stays visible.
+            let room = (inner.width as usize).saturating_sub(1);
+            let skip = input.chars().count().saturating_sub(room);
+            let text: String = input.chars().skip(skip).collect();
+            let mut spans = vec![Span::styled(text, Style::new().fg(Color::Reset).bold())];
+            if input.is_empty() {
+                spans.push(Span::styled("Ссылка на трек, альбом или плейлист", Style::new().fg(MUTED)));
+            } else if (app.tick / 2).is_multiple_of(2) {
                 spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), inner);

@@ -105,6 +105,50 @@ impl Track {
     }
 }
 
+/// Yandex Music domains a track link may point to.
+const MUSIC_HOSTS: [&str; 5] = ["music.yandex.ru", "music.yandex.com", "music.yandex.by", "music.yandex.kz", "music.yandex.uz"];
+
+/// What a Yandex Music link points to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// Track id (`track:album` when the album is known).
+    Track(String),
+    Album(String),
+    /// `/users/<owner>/playlists/<kind>`; the owner may be a login or a uid.
+    Playlist { owner: String, kind: String },
+    /// `/playlists/<uuid>` (newer links, optionally with a `lk.` style prefix).
+    PlaylistUuid(String),
+}
+
+/// Parses a Yandex Music link to a track, album or playlist, e.g.
+/// `https://music.yandex.ru/album/9/track/123?utm_source=…`. Query and fragment are dropped;
+/// anything that is not a Yandex Music link is rejected without being opened.
+pub fn parse_link(url: &str) -> Result<Link, &'static str> {
+    let url = url.trim();
+    let url = url.split(['?', '#']).next().unwrap_or("");
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if !MUSIC_HOSTS.contains(&host.to_ascii_lowercase().as_str()) {
+        return Err("Это не ссылка на Яндекс Музыку");
+    }
+    let num = |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let login = |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
+    let uuid = |s: &str| {
+        let s = s.split_once('.').filter(|(p, _)| p.bytes().all(|b| b.is_ascii_alphabetic())).map_or(s, |(_, u)| u);
+        (s.len() >= 32 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then(|| s.to_string())
+    };
+    match path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>()[..] {
+        ["album", a, "track", t] if num(&a) && num(&t) => Ok(Link::Track(format!("{t}:{a}"))),
+        ["track", t] if num(&t) => Ok(Link::Track(t.to_string())),
+        ["album", a] if num(&a) => Ok(Link::Album(a.to_string())),
+        ["users", o, "playlists", k] if login(&o) && num(&k) => {
+            Ok(Link::Playlist { owner: o.to_string(), kind: k.to_string() })
+        }
+        ["playlists", u] => uuid(u).map(Link::PlaylistUuid).ok_or("Ссылка не на трек, альбом или плейлист"),
+        _ => Err("Ссылка не на трек, альбом или плейлист"),
+    }
+}
+
 /// `avatars.yandex.net/get-music-content/…/%%` → full https URL of a 400x400 image.
 pub fn cover_url(uri: &str) -> String {
     let uri = uri.replace("%%", "400x400");
@@ -299,6 +343,20 @@ impl Api {
         Ok(out)
     }
 
+    /// Album title and its tracks in album order (all volumes).
+    pub fn album_tracks(&self, album_id: &str) -> Result<(String, Vec<Track>)> {
+        let r = self.get(&format!("/albums/{album_id}/with-tracks"), &[])?;
+        let tracks = r["volumes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(Track::from_json)
+            .collect();
+        Ok((r["title"].as_str().unwrap_or("").to_string(), tracks))
+    }
+
     // ---------------------------------------------------------------- playlists
 
     /// Playlists of the current user.
@@ -324,11 +382,26 @@ impl Api {
 
     /// Tracks of a playlist, in playlist order.
     pub fn playlist_tracks(&self, pl: &Playlist) -> Result<Vec<Track>> {
-        let r = self.get(&Self::playlist_path(pl), &[])?;
+        Ok(self.playlist_at(&Self::playlist_path(pl))?.1)
+    }
+
+    /// Playlist from a link: title and tracks in playlist order.
+    pub fn linked_playlist(&self, link: &Link) -> Result<(String, Vec<Track>)> {
+        match link {
+            Link::Playlist { owner, kind } => self.playlist_at(&format!("/users/{owner}/playlists/{kind}")),
+            Link::PlaylistUuid(uuid) => self.playlist_at(&format!("/playlist/{uuid}")),
+            _ => anyhow::bail!("ссылка не на плейлист"),
+        }
+    }
+
+    /// Title and tracks of the playlist at an API path.
+    fn playlist_at(&self, path: &str) -> Result<(String, Vec<Track>)> {
+        let r = self.get(path, &[])?;
+        let title = r["title"].as_str().unwrap_or("").to_string();
         let items = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
         let full: Option<Vec<Track>> = items.iter().map(|t| Track::from_json(&t["track"])).collect();
         if let Some(tracks) = full {
-            return Ok(tracks);
+            return Ok((title, tracks));
         }
         // Large playlists may come without track objects: resolve them by id.
         let ids: Vec<String> = items
@@ -341,7 +414,7 @@ impl Api {
                 })
             })
             .collect();
-        self.tracks(&ids)
+        Ok((title, self.tracks(&ids)?))
     }
 
     pub fn rename_playlist(&self, pl: &Playlist, title: &str) -> Result<()> {
@@ -735,6 +808,60 @@ mod tests {
         let tracks = Api::new(&token).artist_tracks("161243").unwrap();
         assert!(tracks.len() > 100, "{}", tracks.len());
         assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+    }
+
+    #[test]
+    fn links() {
+        let not_ym = Err("Это не ссылка на Яндекс Музыку");
+        let other = Err("Ссылка не на трек, альбом или плейлист");
+        assert_eq!(parse_link("https://music.yandex.ru/album/9/track/123?utm_source=x&utm_medium=y"), Ok(Link::Track("123:9".into())));
+        assert_eq!(parse_link("  music.yandex.com/track/123/#top "), Ok(Link::Track("123".into())));
+        assert_eq!(parse_link("http://MUSIC.yandex.kz/album/9/track/123"), Ok(Link::Track("123:9".into())));
+        assert_eq!(parse_link("https://music.yandex.ru/album/9?activeTab=about"), Ok(Link::Album("9".into())));
+        assert_eq!(
+            parse_link("https://music.yandex.ru/users/some.user-1/playlists/1002?utm_source=x"),
+            Ok(Link::Playlist { owner: "some.user-1".into(), kind: "1002".into() })
+        );
+        let uuid = "e46028ae-ce60-430d-bf2c-7e7c78e2c682";
+        assert_eq!(parse_link(&format!("https://music.yandex.ru/playlists/{uuid}")), Ok(Link::PlaylistUuid(uuid.into())));
+        assert_eq!(parse_link(&format!("https://music.yandex.ru/playlists/lk.{uuid}?x=1")), Ok(Link::PlaylistUuid(uuid.into())));
+        assert_eq!(parse_link("https://music.yandex.ru.evil.com/track/1"), not_ym);
+        assert_eq!(parse_link("https://evil.com/?r=music.yandex.ru/track/1"), not_ym);
+        assert_eq!(parse_link("https://user@music.yandex.ru/track/1"), not_ym);
+        assert_eq!(parse_link("https://yandex.ru/track/1"), not_ym);
+        assert_eq!(parse_link(""), not_ym);
+        assert_eq!(parse_link("https://music.yandex.ru/artist/9"), other);
+        assert_eq!(parse_link("https://music.yandex.ru/track/12a"), other);
+        assert_eq!(parse_link("https://music.yandex.ru/users/a/playlists/x"), other);
+        assert_eq!(parse_link("https://music.yandex.ru/playlists/../../x"), other);
+    }
+
+    /// Network test: needs a token (see `test_token`). Reads a playlist of the token's account.
+    #[test]
+    #[ignore]
+    fn linked_playlists() {
+        let mut api = Api::new(&test_token());
+        let acc = api.account_status().unwrap();
+        let r = api.get(&format!("/users/{}/playlists/list", acc.uid), &[]).unwrap();
+        let p = r.as_array().unwrap().iter().find(|p| p["trackCount"].as_u64() > Some(0)).expect("non-empty playlist");
+        let by_login = Link::Playlist { owner: acc.login.clone(), kind: id_str(&p["kind"]).unwrap() };
+        let by_uuid = Link::PlaylistUuid(p["playlistUuid"].as_str().unwrap().into());
+        let (t1, a) = api.linked_playlist(&by_login).unwrap();
+        let (t2, b) = api.linked_playlist(&by_uuid).unwrap();
+        assert_eq!(t1, p["title"].as_str().unwrap());
+        assert_eq!(t1, t2);
+        assert!(!a.is_empty());
+        assert_eq!(a.len(), b.len());
+    }
+
+    /// Network test: needs a token (see `test_token`).
+    #[test]
+    #[ignore]
+    fn album_tracks() {
+        let (title, tracks) = Api::new(&test_token()).album_tracks("3782599").unwrap();
+        assert!(!title.is_empty());
+        assert!(tracks.len() > 1, "{}", tracks.len());
+        assert!(tracks.iter().all(|t| t.album_id.as_deref() == Some("3782599")));
     }
 
     /// Network test: needs a token (see `test_token`). Only reads the setting.

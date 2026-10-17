@@ -1,6 +1,6 @@
 //! Application state and logic.
 
-use crate::api::{default_stations, iso_now, Account, Api, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
+use crate::api::{default_stations, iso_now, Account, Api, Link, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
 use crate::player::{Player, PlayerEvent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
@@ -95,6 +95,8 @@ pub enum Modal {
     ConfirmRemove { pl: Playlist, index: usize, track: Track },
     ConfirmDelete { pl: Playlist },
     Rename { pl: Playlist, input: String },
+    /// Link to a track to play.
+    OpenLink { input: String },
     /// Settings window; `sel` is an index into `Setting::ALL`.
     Settings { sel: usize },
     ConfirmLogout,
@@ -314,7 +316,7 @@ impl App {
         (self.pos.is_some() && !self.paused)
             || self.loading_track
             || self.search_editing
-            || matches!(self.modal, Some(Modal::Rename { .. }))
+            || matches!(self.modal, Some(Modal::Rename { .. } | Modal::OpenLink { .. }))
             || self.search_loading
             || self.liked_loading
             || self.wave.as_ref().is_some_and(|w| w.fetching)
@@ -1009,7 +1011,9 @@ impl App {
                 }
             }
             KeyCode::Char('y') => self.copy_link(),
+            KeyCode::Char('Y') => self.ask_link(),
             KeyCode::Char('A') => self.play_artist(),
+            KeyCode::Char('e') => self.play_album(),
             KeyCode::Char('s') if self.tab == Tab::Playlists && self.open_playlist.is_some() => self.play_open(true),
             KeyCode::Char('s') if self.tab == Tab::Playlists => self.play_playlist(true),
             KeyCode::Char('a') => self.ask_add_to_playlist(),
@@ -1017,7 +1021,7 @@ impl App {
                 self.ask_remove_from_playlist()
             }
             KeyCode::Char('x') if self.tab == Tab::Playlists => self.ask_delete_playlist(),
-            KeyCode::Char('e') if self.tab == Tab::Playlists => self.ask_rename_playlist(),
+            KeyCode::Char('E') if self.tab == Tab::Playlists => self.ask_rename_playlist(),
             KeyCode::Esc | KeyCode::Backspace if self.tab == Tab::Playlists => self.open_playlist = None,
             KeyCode::Char('s') => self.shuffle_play(),
             KeyCode::Char('R') => {
@@ -1352,7 +1356,7 @@ impl App {
         let Some(modal) = self.modal.take() else { return };
         let code = match (&modal, key.code) {
             // Text input gets characters as typed; elsewhere map the Russian layout.
-            (Modal::Rename { .. }, c) => c,
+            (Modal::Rename { .. } | Modal::OpenLink { .. }, c) => c,
             (_, KeyCode::Char(c)) => KeyCode::Char(ru_to_en(c)),
             (_, c) => c,
         };
@@ -1464,6 +1468,22 @@ impl App {
                 }
                 _ => self.modal = Some(Modal::Rename { pl, input }),
             },
+            Modal::OpenLink { mut input } => match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.play_link(&input),
+                KeyCode::Backspace => {
+                    input.pop();
+                    self.modal = Some(Modal::OpenLink { input });
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.modal = Some(Modal::OpenLink { input: String::new() });
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    self.modal = Some(Modal::OpenLink { input });
+                }
+                _ => self.modal = Some(Modal::OpenLink { input }),
+            },
         }
     }
 
@@ -1490,6 +1510,39 @@ impl App {
         self.set_status(format!("Ссылка скопирована: {url}"));
     }
 
+    /// Asks for a link; a Yandex Music link from the clipboard is filled in.
+    fn ask_link(&mut self) {
+        let input = crate::clipboard::paste()
+            .map(|s| s.trim().to_string())
+            .filter(|s| crate::api::parse_link(s).is_ok())
+            .unwrap_or_default();
+        self.modal = Some(Modal::OpenLink { input });
+    }
+
+    /// Plays a track, album or playlist from a Yandex Music link; other links are not opened.
+    fn play_link(&mut self, url: &str) {
+        let link = match crate::api::parse_link(url) {
+            Ok(link) => link,
+            Err(e) => return self.set_status(e),
+        };
+        self.set_status("Загрузка по ссылке…");
+        self.spawn(move |api| {
+            let titled = |kind: &str, r: anyhow::Result<(String, Vec<Track>)>| match r {
+                Ok((title, tracks)) => {
+                    let name = if title.is_empty() { format!("{kind} по ссылке") } else { format!("{kind}: {title}") };
+                    (name, Ok(tracks))
+                }
+                Err(e) => (format!("{kind} по ссылке"), Err(format!("{e:#}"))),
+            };
+            let (name, result) = match &link {
+                Link::Track(id) => ("Трек по ссылке".to_string(), api.tracks(std::slice::from_ref(id)).map_err(|e| format!("{e:#}"))),
+                Link::Album(id) => titled("Альбом", api.album_tracks(id)),
+                Link::Playlist { .. } | Link::PlaylistUuid(_) => titled("Плейлист", api.linked_playlist(&link)),
+            };
+            Some(Msg::ListLoaded { name, shuffle: false, playlist: None, result })
+        });
+    }
+
     /// Plays all tracks of the selected (or current) track's main artist.
     fn play_artist(&mut self) {
         let Some(t) = self.selected_track().or(self.current()) else {
@@ -1504,6 +1557,28 @@ impl App {
         self.spawn(move |api| {
             let result = api.artist_tracks(&id).map_err(|e| format!("{e:#}"));
             Some(Msg::ListLoaded { name: format!("Исполнитель: {name}"), shuffle: false, playlist: None, result })
+        });
+    }
+
+    /// Plays the album of the selected (or current) track.
+    fn play_album(&mut self) {
+        let Some(t) = self.selected_track().or(self.current()) else {
+            self.set_status("Нет выбранного трека");
+            return;
+        };
+        let Some(id) = t.album_id.clone() else {
+            self.set_status("У трека не указан альбом");
+            return;
+        };
+        let fallback = t.album.clone();
+        self.set_status(format!("Загрузка альбома: {fallback}…"));
+        self.spawn(move |api| {
+            let result = api.album_tracks(&id).map_err(|e| format!("{e:#}"));
+            let name = match &result {
+                Ok((title, _)) if !title.is_empty() => format!("Альбом: {title}"),
+                _ => format!("Альбом: {fallback}"),
+            };
+            Some(Msg::ListLoaded { name, shuffle: false, playlist: None, result: result.map(|(_, t)| t) })
         });
     }
 
@@ -1603,7 +1678,7 @@ mod tests {
         // Rename: Russian letters are typed as is (no layout mapping), Esc cancels.
         app.tab = Tab::Playlists;
         app.playlists_state.select(Some(0));
-        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('E')));
         for c in ['д', 'а'] {
             app.on_key(key(KeyCode::Char(c)));
         }
@@ -1614,8 +1689,19 @@ mod tests {
 
         // Someone else's playlist cannot be renamed.
         app.playlists_state.select(Some(1));
-        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('E')));
         assert!(app.modal.is_none());
+
+        // A link to another site is rejected without any request; text is typed as is.
+        app.modal = Some(Modal::OpenLink { input: String::new() });
+        for c in "https://evil.com/track/1".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        let Some(Modal::OpenLink { input }) = &app.modal else { panic!("no link input") };
+        assert_eq!(input, "https://evil.com/track/1");
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.status, "Это не ссылка на Яндекс Музыку");
 
         // `x` asks for confirmation; any key other than Enter cancels.
         app.open_playlist = Some(OpenPlaylist { pl: app.playlists[0].clone(), tracks: vec![t], loading: false });

@@ -1,4 +1,4 @@
-//! Copying text to the system clipboard.
+//! Copying text to the system clipboard and reading it back.
 //!
 //! Text is sent both through the terminal (OSC 52 — works over SSH and without extra tools in
 //! kitty, foot, alacritty, wezterm, tmux with `set-clipboard on`…) and through the first available
@@ -7,6 +7,7 @@
 use base64::Engine;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 pub fn copy(text: &str) {
     osc52(text);
@@ -33,6 +34,27 @@ fn copy_with_tool(text: &str) -> bool {
         (x11, "xsel", &["--clipboard", "--input"]),
     ];
     tools.iter().filter(|(ok, ..)| *ok).any(|(_, bin, args)| run(bin, args, text))
+}
+
+/// Text from the clipboard via wl-paste, xclip or xsel (None if none of them works within
+/// a short timeout, so a hanging tool does not freeze the UI).
+pub fn paste() -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let x11 = std::env::var_os("DISPLAY").is_some();
+        let tools: [(bool, &str, &[&str]); 3] = [
+            (wayland, "wl-paste", &["--no-newline"]),
+            (x11, "xclip", &["-selection", "clipboard", "-o"]),
+            (x11, "xsel", &["--clipboard", "--output"]),
+        ];
+        let text = tools.iter().filter(|(ok, ..)| *ok).find_map(|(_, bin, args)| {
+            let out = Command::new(bin).args(*args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        });
+        let _ = tx.send(text);
+    });
+    rx.recv_timeout(Duration::from_millis(300)).ok().flatten()
 }
 
 fn run(bin: &str, args: &[&str], text: &str) -> bool {
