@@ -12,6 +12,9 @@ pub struct Config {
     /// Nerd Font icons (false — plain Unicode symbols).
     #[serde(default = "default_true")]
     pub icons: bool,
+    /// Album cover of the playing track.
+    #[serde(default = "default_true")]
+    pub covers: bool,
     /// Equalizer preset id (see `eq::PRESETS`).
     #[serde(default)]
     pub eq: String,
@@ -40,6 +43,7 @@ impl Default for Config {
             token: None,
             volume: default_volume(),
             icons: true,
+            covers: true,
             eq: String::new(),
             quality: String::new(),
             crossfade: 0,

@@ -312,30 +312,7 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // Square cover: cell aspect ratio comes from the terminal font size.
-    let (fw, fh) = app.picker.as_ref().map_or((1, 2), |p| p.font_size());
-    let ratio = f64::from(fh.max(1)) / f64::from(fw.max(1));
-    let mut cover_h = (inner.height * 45 / 100).min(inner.height.saturating_sub(9));
-    let mut cover_w = (f64::from(cover_h) * ratio).round() as u16;
-    if cover_w > inner.width {
-        cover_w = inner.width;
-        cover_h = (f64::from(cover_w) / ratio).round() as u16;
-    }
-    let [_, cover_area, info] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(cover_h), Constraint::Min(0)]).areas(inner);
-    let [cover_area] = Layout::horizontal([Constraint::Length(cover_w)]).flex(Flex::Center).areas(cover_area);
-    if cover_h >= 3 {
-        if let Some(proto) = app.current_cover() {
-            f.render_stateful_widget(
-                StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))),
-                cover_area,
-                proto,
-            );
-        } else if let Some(t) = app.current() {
-            // Placeholder while the cover is loading (or when there is none).
-            draw_cover(f.buffer_mut(), cover_area, t.album_id.as_deref().unwrap_or(&t.id));
-        }
-    }
+    let info = if app.show_covers { draw_now_cover(f, app, inner) } else { inner };
     let Some(t) = app.current() else { return };
 
     let mut lines = vec![
@@ -361,6 +338,35 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }), info);
+}
+
+/// Draws the cover at the top of «Сейчас играет»; returns the area left for the track info.
+fn draw_now_cover(f: &mut Frame, app: &mut App, inner: Rect) -> Rect {
+    // Square cover: cell aspect ratio comes from the terminal font size.
+    let (fw, fh) = app.picker.as_ref().map_or((1, 2), |p| p.font_size());
+    let ratio = f64::from(fh.max(1)) / f64::from(fw.max(1));
+    let mut cover_h = (inner.height * 45 / 100).min(inner.height.saturating_sub(9));
+    let mut cover_w = (f64::from(cover_h) * ratio).round() as u16;
+    if cover_w > inner.width {
+        cover_w = inner.width;
+        cover_h = (f64::from(cover_w) / ratio).round() as u16;
+    }
+    let [_, cover_area, info] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(cover_h), Constraint::Min(0)]).areas(inner);
+    let [cover_area] = Layout::horizontal([Constraint::Length(cover_w)]).flex(Flex::Center).areas(cover_area);
+    if cover_h >= 3 {
+        if let Some(proto) = app.current_cover() {
+            f.render_stateful_widget(
+                StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))),
+                cover_area,
+                proto,
+            );
+        } else if let Some(t) = app.current() {
+            // Placeholder while the cover is loading (or when there is none).
+            draw_cover(f.buffer_mut(), cover_area, t.album_id.as_deref().unwrap_or(&t.id));
+        }
+    }
+    info
 }
 
 // ---------------------------------------------------------------- track tables
@@ -1019,6 +1025,7 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Equalizer => "Эквалайзер",
         Setting::Crossfade => "Плавные переходы",
         Setting::LessAi => "Меньше ИИ-музыки",
+        Setting::Covers => "Обложка трека",
         Setting::Icons => "Иконки Nerd Font",
         Setting::About => "О программе",
         Setting::Logout => "Выйти из аккаунта",
@@ -1032,6 +1039,7 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Equalizer => "Слышно сразу".into(),
         Setting::Crossfade => "Затухание в конце трека и нарастание в начале".into(),
         Setting::LessAi => "Реже ИИ-треки в рекомендациях · настройка аккаунта".into(),
+        Setting::Covers => "Обложка альбома в панели «Сейчас играет»".into(),
         Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
         Setting::About => "Версия и ссылки на проект".into(),
         Setting::Logout => "Токен будет удалён, программа закроется".into(),

@@ -115,17 +115,19 @@ pub enum Setting {
     Equalizer,
     Crossfade,
     LessAi,
+    Covers,
     Icons,
     About,
     Logout,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 7] = [
+    pub const ALL: [Setting; 8] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
         Setting::LessAi,
+        Setting::Covers,
         Setting::Icons,
         Setting::About,
         Setting::Logout,
@@ -220,6 +222,10 @@ pub struct App {
     pub crossfade: u8,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
+    /// Album cover in «Сейчас играет» (false — not even downloaded).
+    pub show_covers: bool,
+    /// The terminal keeps a drawn image until it is deleted: set when the cover is hidden.
+    pub clear_images: bool,
     /// «Меньше ИИ-музыки» from the account settings; `None` until loaded.
     pub less_ai: Option<bool>,
 
@@ -307,6 +313,8 @@ impl App {
             quality: 1,
             crossfade: 0,
             icons: true,
+            show_covers: true,
+            clear_images: false,
             less_ai: None,
             time_pos: 0.0,
             duration: 0.0,
@@ -665,7 +673,8 @@ impl App {
 
     fn load_cover(&mut self, url: Option<String>) {
         let Some(url) = url else { return };
-        if self.picker.is_none() || self.covers.iter().any(|(u, _)| *u == url) || !self.covers_loading.insert(url.clone())
+        if !self.show_covers
+            || self.picker.is_none() || self.covers.iter().any(|(u, _)| *u == url) || !self.covers_loading.insert(url.clone())
         {
             return;
         }
@@ -1293,6 +1302,17 @@ impl App {
         crate::ui::set_nerd_icons(nerd);
     }
 
+    pub fn set_show_covers(&mut self, on: bool) {
+        self.show_covers = on;
+        if on {
+            let cover = self.current().and_then(|t| t.cover.clone());
+            self.load_cover(cover);
+        } else {
+            self.shown_cover = None;
+            self.clear_images = true;
+        }
+    }
+
     /// Current value of a settings row; `None` for rows that are actions.
     pub fn setting_value(&self, s: Setting) -> Option<String> {
         Some(match s {
@@ -1304,6 +1324,7 @@ impl App {
                 Some(on) => if on { "вкл" } else { "выкл" }.to_string(),
                 None => "…".to_string(),
             },
+            Setting::Covers => if self.show_covers { "вкл" } else { "выкл" }.to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::About | Setting::Logout => return None,
         })
@@ -1338,6 +1359,7 @@ impl App {
                 }
                 None => self.set_status("Настройки аккаунта ещё загружаются"),
             },
+            Setting::Covers => self.set_show_covers(!self.show_covers),
             Setting::Icons => self.set_icons(!self.icons),
             Setting::About | Setting::Logout => {}
         }
@@ -1922,6 +1944,19 @@ mod tests {
         app.on_msg(Msg::LessAiSet { on: true, result: Ok(()) });
         assert_eq!(app.less_ai, Some(true));
 
+        // Covers off: the shown one is dropped and new ones are not downloaded.
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Right));
+        assert!(!app.show_covers && app.clear_images);
+        app.picker = Some(Picker::from_fontsize((8, 16)));
+        app.load_cover(Some("http://x/cover".into()));
+        assert!(app.covers_loading.is_empty());
+        app.on_key(key(KeyCode::Left));
+        assert!(app.show_covers);
+        app.load_cover(Some("http://x/cover".into()));
+        assert!(app.covers_loading.contains("http://x/cover"));
+        app.picker = None;
+
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
         assert!(!app.icons);
@@ -1934,14 +1969,14 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 5 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 6 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 6 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 7 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());

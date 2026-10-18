@@ -81,6 +81,7 @@ fn main() -> Result<()> {
     app.start();
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);
+    app.show_covers = cfg.covers;
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
     let icons = cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
@@ -110,6 +111,12 @@ fn main() -> Result<()> {
         let mut last_draw = Instant::now();
         let mut last_input = Instant::now();
         while !app.quit && !stop.load(Ordering::Relaxed) {
+            if std::mem::take(&mut app.clear_images) {
+                delete_images(app.picker.as_ref());
+                // Full redraw: the screen is erased, which also removes sixel images.
+                terminal.clear()?;
+                dirty = true;
+            }
             let frame = Duration::from_millis(if app.is_animating() { 200 } else { 1000 });
             if dirty || last_draw.elapsed() >= frame {
                 terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -179,6 +186,25 @@ fn query_picker() -> ratatui_image::picker::Picker {
     picker
 }
 
+/// Removes the images from the terminal: with the kitty protocol an image stays on screen until it
+/// is deleted, even when the text under it is redrawn.
+fn delete_images(picker: Option<&ratatui_image::picker::Picker>) {
+    use ratatui_image::picker::ProtocolType;
+    use std::io::Write;
+    if picker.is_none_or(|p| p.protocol_type() != ProtocolType::Kitty) {
+        return;
+    }
+    let cmd = "\x1b_Ga=d,d=A\x1b\\";
+    let mut out = std::io::stdout();
+    let _ = if std::env::var_os("TMUX").is_some() {
+        // Through tmux passthrough: ESC inside is doubled.
+        write!(out, "\x1bPtmux;{}\x1b\\", cmd.replace('\x1b', "\x1b\x1b"))
+    } else {
+        out.write_all(cmd.as_bytes())
+    };
+    let _ = out.flush();
+}
+
 /// Copies the settings changed in the program into the config; true if any of them changed.
 /// `icons`: the value this run started with (`--no-icons` is not saved unless switched by hand).
 fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
@@ -190,11 +216,13 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
         || cfg.eq != eq
         || cfg.quality != quality
         || cfg.crossfade != app.crossfade
+        || cfg.covers != app.show_covers
         || cfg.icons != icons;
     cfg.volume = volume;
     cfg.eq = eq.to_string();
     cfg.quality = quality.to_string();
     cfg.crossfade = app.crossfade;
+    cfg.covers = app.show_covers;
     cfg.icons = icons;
     changed
 }
