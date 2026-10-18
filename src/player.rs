@@ -50,6 +50,8 @@ pub trait Audio {
     /// Appends a URL to the playlist: it is prefetched and played after the current one.
     fn append(&mut self, url: &str);
     fn playlist_next(&mut self);
+    /// Drops the appended entries: only the current track stays in the playlist.
+    fn clear_next(&mut self);
     fn toggle_pause(&mut self);
     fn toggle_mute(&mut self);
     fn seek(&mut self, secs: f64);
@@ -220,6 +222,10 @@ impl Audio for Player {
         self.cmd(json!(["set_property", "pause", false]));
     }
 
+    fn clear_next(&mut self) {
+        self.cmd(json!(["playlist-clear"]));
+    }
+
     fn toggle_pause(&mut self) {
         self.cmd(json!(["cycle", "pause"]));
     }
@@ -298,6 +304,9 @@ impl Audio for FakeAudio {
     }
     fn playlist_next(&mut self) {
         self.push("next".into());
+    }
+    fn clear_next(&mut self) {
+        self.push("clear".into());
     }
     fn toggle_pause(&mut self) {
         self.push("pause".into());

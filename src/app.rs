@@ -78,6 +78,13 @@ pub struct Wave {
     pub pending_next: bool,
 }
 
+/// The first track of the queue is the one that was playing when the list was switched with
+/// «Доигрывать трек» on.
+struct Carried {
+    /// Wave it was played from: the end of the track is reported there.
+    wave: Option<Wave>,
+}
+
 #[derive(Clone, Copy)]
 enum End {
     Eof,
@@ -114,6 +121,7 @@ pub enum Setting {
     Quality,
     Equalizer,
     Crossfade,
+    FinishTrack,
     LessAi,
     Covers,
     Icons,
@@ -122,10 +130,11 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 8] = [
+    pub const ALL: [Setting; 9] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
+        Setting::FinishTrack,
         Setting::LessAi,
         Setting::Covers,
         Setting::Icons,
@@ -220,6 +229,8 @@ pub struct App {
     pub quality: usize,
     /// Fade-in/fade-out length, seconds (0 — off).
     pub crossfade: u8,
+    /// A new list waits for the current track to end instead of cutting it off.
+    pub finish_track: bool,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
     /// Album cover in «Сейчас играет» (false — not even downloaded).
@@ -259,6 +270,10 @@ pub struct App {
     load_deadline: Option<Instant>,
     /// The current track has already been restarted with a fresh link (after an error or a stall).
     retried: bool,
+    /// Playback was stopped (the queue ran out, the wave is loading, too many errors).
+    stopped: bool,
+    /// Set while the first track of the queue is one carried over from the previous list.
+    carried: Option<Carried>,
 }
 
 impl App {
@@ -312,6 +327,7 @@ impl App {
             eq: 0,
             quality: 1,
             crossfade: 0,
+            finish_track: false,
             icons: true,
             show_covers: true,
             clear_images: false,
@@ -333,6 +349,8 @@ impl App {
             preload_pending: false,
             load_deadline: None,
             retried: false,
+            stopped: false,
+            carried: None,
         };
         app.set_stations(default_stations());
         if !app.account.has_plus {
@@ -492,10 +510,12 @@ impl App {
     // ------------------------------------------------------------ playback
 
     fn report_end(&mut self, end: End) {
-        if self.source != Source::Wave {
-            return;
-        }
-        let Some(t) = self.current().cloned() else { return };
+        let wave = match &self.carried {
+            Some(c) if self.pos == Some(0) => c.wave.as_ref(),
+            _ if self.source == Source::Wave => self.wave.as_ref(),
+            _ => None,
+        };
+        let (Some(w), Some(t)) = (wave, self.current()) else { return };
         let ev = match end {
             End::Eof => json!({"type": "trackFinished", "timestamp": iso_now(), "trackId": t.full_id(),
                 "totalPlayedSeconds": self.duration.max(self.time_pos)}),
@@ -503,11 +523,16 @@ impl App {
                 "totalPlayedSeconds": self.time_pos}),
             End::Silent => return,
         };
-        self.wave_feedback(ev, t.batch.clone());
+        self.feedback(w, ev, t.batch.clone());
     }
 
     fn wave_feedback(&self, ev: Value, batch: Option<String>) {
-        let Some(w) = &self.wave else { return };
+        if let Some(w) = &self.wave {
+            self.feedback(w, ev, batch);
+        }
+    }
+
+    fn feedback(&self, w: &Wave, ev: Value, batch: Option<String>) {
         let (st, sess) = (w.station.clone(), w.session.clone());
         let batch = batch.unwrap_or_else(|| w.batch.clone());
         self.spawn(move |api| {
@@ -540,9 +565,12 @@ impl App {
         self.preload_pending = false;
         self.load_deadline = preloaded.then(|| Instant::now() + LOAD_TIMEOUT);
         self.retried = false;
+        self.stopped = false;
         self.load_cover(track.cover.clone());
         self.maybe_extend_search_queue();
-        if self.source == Source::Wave {
+        // A track carried over from another list is not part of this wave.
+        let carried = idx == 0 && self.carried.is_some();
+        if self.source == Source::Wave && !carried {
             self.wave_feedback(
                 json!({"type": "trackStarted", "timestamp": iso_now(), "trackId": track.full_id()}),
                 track.batch.clone(),
@@ -608,10 +636,12 @@ impl App {
             self.fetch_more_wave();
             self.load_deadline = None;
             self.player.stop();
+            self.stopped = true;
             self.set_status("Загрузка следующих треков волны…");
         } else {
             self.load_deadline = None;
             self.player.stop();
+            self.stopped = true;
             self.pos = None;
             self.set_status("Очередь закончилась");
         }
@@ -635,17 +665,54 @@ impl App {
             return;
         }
         self.new_intent();
+        let start = (start..tracks.len()).find(|&i| tracks[i].available).unwrap_or(start);
+        if self.finishing_track() {
+            self.queue_after_current(tracks.into_iter().skip(start).collect(), Source::List(name.to_string()), None);
+            self.set_status(format!("После этого трека: {name}"));
+            return;
+        }
         self.report_end(End::Skip);
         self.queue = tracks;
         self.search_queue = None;
         self.preload = None;
+        self.carried = None;
         self.playing_playlist = None;
         self.source = Source::List(name.to_string());
         self.wave = None;
         self.pos = None;
-        let start = (start..self.queue.len()).find(|&i| self.queue[i].available).unwrap_or(start);
         self.play_index(start);
         self.set_status(format!("Играет: {name}"));
+    }
+
+    /// «Доигрывать трек»: a new list waits for the playing track to end (a paused one is
+    /// switched at once: it is not being listened to).
+    fn finishing_track(&self) -> bool {
+        self.finish_track && self.pos.is_some() && !self.paused && !self.loading_track && !self.stopped
+    }
+
+    /// Replaces the queue with `tracks` but keeps the playing track as its first entry, so the
+    /// list goes on from there when the track ends (`n` switches at once).
+    fn queue_after_current(&mut self, tracks: Vec<Track>, source: Source, wave: Option<Wave>) {
+        let Some(cur) = self.current().cloned() else { return };
+        // Switched again before the track ended: it still belongs to its first list.
+        let carried = match self.carried.take() {
+            Some(c) if self.pos == Some(0) => c,
+            _ => Carried { wave: if self.source == Source::Wave { self.wave.take() } else { None } },
+        };
+        self.carried = Some(carried);
+        self.queue = std::iter::once(cur.clone()).chain(tracks.into_iter().filter(|t| t.id != cur.id)).collect();
+        self.pos = Some(0);
+        self.queue_state.select(Some(0));
+        self.source = source;
+        self.wave = wave;
+        self.search_queue = None;
+        self.playing_playlist = None;
+        // The next track of the old list may already be in mpv: replies for it are dropped too.
+        self.gen += 1;
+        self.preload = None;
+        self.preload_pending = false;
+        self.player.clear_next();
+        self.schedule_preload();
     }
 
     /// The user started something new to play; returns its number for the async reply.
@@ -962,25 +1029,36 @@ impl App {
             },
             Msg::WaveStarted { station, name, result, .. } => match result {
                 Ok(b) => {
-                    self.report_end(End::Skip);
                     let from = station.replace(':', "-");
-                    self.wave = Some(Wave {
+                    let wave = Wave {
                         station,
                         name: name.clone(),
                         session: b.session_id,
                         batch: b.batch_id.clone(),
                         fetching: false,
                         pending_next: false,
-                    });
-                    self.source = Source::Wave;
-                    self.queue = b.tracks;
-                    self.search_queue = None;
-                    self.preload = None;
-                    self.pos = None;
+                    };
+                    let finishing = self.finishing_track();
+                    if finishing {
+                        self.queue_after_current(b.tracks, Source::Wave, Some(wave));
+                    } else {
+                        self.report_end(End::Skip);
+                        self.wave = Some(wave);
+                        self.source = Source::Wave;
+                        self.queue = b.tracks;
+                        self.search_queue = None;
+                        self.preload = None;
+                        self.carried = None;
+                        self.pos = None;
+                    }
                     self.wave_feedback(json!({"type": "radioStarted", "timestamp": iso_now(), "from": from}), None);
                     self.tab = Tab::Wave;
-                    self.set_status(format!("Играет: {name}"));
-                    self.next(End::Silent);
+                    if finishing {
+                        self.set_status(format!("После этого трека: {name}"));
+                    } else {
+                        self.set_status(format!("Играет: {name}"));
+                        self.next(End::Silent);
+                    }
                 }
                 Err(e) => self.set_error(format!("Не удалось запустить волну: {e}")),
             },
@@ -1098,6 +1176,7 @@ impl App {
             self.next(End::Silent);
         } else {
             self.player.stop();
+            self.stopped = true;
         }
     }
 
@@ -1324,6 +1403,7 @@ impl App {
                 Some(on) => if on { "вкл" } else { "выкл" }.to_string(),
                 None => "…".to_string(),
             },
+            Setting::FinishTrack => if self.finish_track { "вкл" } else { "выкл" }.to_string(),
             Setting::Covers => if self.show_covers { "вкл" } else { "выкл" }.to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::About | Setting::Logout => return None,
@@ -1359,6 +1439,7 @@ impl App {
                 }
                 None => self.set_status("Настройки аккаунта ещё загружаются"),
             },
+            Setting::FinishTrack => self.finish_track = !self.finish_track,
             Setting::Covers => self.set_show_covers(!self.show_covers),
             Setting::Icons => self.set_icons(!self.icons),
             Setting::About | Setting::Logout => {}
@@ -1931,6 +2012,12 @@ mod tests {
         app.on_key(key(KeyCode::Left));
         assert_eq!(app.crossfade, 5, "a config value between steps snaps to the nearest one");
 
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Right));
+        assert!(app.finish_track);
+        app.on_key(key(KeyCode::Left));
+        assert!(!app.finish_track);
+
         // «Меньше ИИ-музыки»: not loaded yet — nothing changes; then switched at once, rolled back on error.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
@@ -1969,14 +2056,14 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 6 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 7 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 7 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 8 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
@@ -1987,6 +2074,83 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         app.on_key(key(KeyCode::Enter));
         assert!(app.logout && app.quit);
+    }
+
+    /// «Доигрывать трек»: a new list goes after the playing track.
+    #[test]
+    fn finish_track() {
+        use super::*;
+        let (mut app, audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let ids = |app: &App| app.queue.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        app.finish_track = true;
+        app.queue = vec![t("a"), t("b")];
+        app.source = Source::Wave;
+        app.wave = Some(Wave {
+            station: "user:onyourwave".into(),
+            name: "Моя волна".into(),
+            session: None,
+            batch: String::new(),
+            fetching: false,
+            pending_next: false,
+        });
+        app.begin_track(0, false);
+        app.loading_track = false;
+        app.on_msg(Msg::Preload { gen: app.gen, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        audio.take();
+
+        // The playing track stays and comes first; the new list starts from the chosen track,
+        // without a second copy of the playing one; mpv drops the preloaded old next track.
+        let gen = app.gen;
+        app.play_list("Новый", vec![t("x"), t("y"), t("a"), t("z")], 1);
+        assert_eq!(ids(&app), ["a", "y", "z"]);
+        assert_eq!((app.pos, app.source_name()), (Some(0), "Новый".to_string()));
+        assert!(app.wave.is_none() && app.preload.is_none());
+        assert_eq!(audio.take(), ["clear"]);
+        app.on_msg(Msg::Preload { gen, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        assert!(audio.take().is_empty(), "late preload of the old list is dropped");
+        assert!(app.carried.as_ref().is_some_and(|c| c.wave.is_some()), "its end is reported to the old wave");
+
+        // Another list before the track ends replaces the waiting one; the track keeps its wave.
+        app.play_list("Ещё", vec![t("p"), t("q")], 0);
+        assert_eq!(ids(&app), ["a", "p", "q"]);
+        assert!(app.carried.as_ref().is_some_and(|c| c.wave.is_some()));
+
+        // The track ends: the new list plays.
+        app.on_msg(Msg::Player(PlayerEvent::Eof));
+        assert_eq!((app.pos, app.loading_track), (Some(1), true));
+        app.loading_track = false;
+
+        // Paused: switched at once.
+        app.paused = true;
+        app.play_list("Сразу", vec![t("m"), t("n")], 1);
+        assert_eq!((ids(&app), app.pos), (vec!["m".to_string(), "n".to_string()], Some(1)));
+        assert!(app.carried.is_none());
+        app.paused = false;
+        app.loading_track = false;
+
+        // Off: switched at once.
+        app.finish_track = false;
+        app.play_list("Выкл", vec![t("k")], 0);
+        assert_eq!((ids(&app), app.pos), (vec!["k".to_string()], Some(0)));
+
+        // Nothing plays after the queue ran out: switched at once.
+        app.finish_track = true;
+        app.loading_track = false;
+        app.next(End::Eof);
+        app.play_list("Снова", vec![t("u"), t("v")], 0);
+        assert_eq!((ids(&app), app.pos), (vec!["u".to_string(), "v".to_string()], Some(0)));
     }
 
     /// Preload state machine.

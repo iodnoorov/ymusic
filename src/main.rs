@@ -82,6 +82,7 @@ fn main() -> Result<()> {
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);
     app.show_covers = cfg.covers;
+    app.finish_track = cfg.finish_track;
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
     let icons = cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
@@ -217,12 +218,14 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
         || cfg.quality != quality
         || cfg.crossfade != app.crossfade
         || cfg.covers != app.show_covers
+        || cfg.finish_track != app.finish_track
         || cfg.icons != icons;
     cfg.volume = volume;
     cfg.eq = eq.to_string();
     cfg.quality = quality.to_string();
     cfg.crossfade = app.crossfade;
     cfg.covers = app.show_covers;
+    cfg.finish_track = app.finish_track;
     cfg.icons = icons;
     changed
 }

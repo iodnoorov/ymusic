@@ -24,6 +24,9 @@ pub struct Config {
     /// Fade-in at the start and fade-out at the end of each track, seconds (0 — off).
     #[serde(default)]
     pub crossfade: u8,
+    /// A new list starts after the current track instead of cutting it off.
+    #[serde(default)]
+    pub finish_track: bool,
 }
 
 /// Longest allowed fade-in/fade-out, seconds.
@@ -47,6 +50,7 @@ impl Default for Config {
             eq: String::new(),
             quality: String::new(),
             crossfade: 0,
+            finish_track: false,
         }
     }
 }
