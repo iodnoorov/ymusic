@@ -59,6 +59,7 @@ fn main() -> Result<()> {
             cfg.token = None;
             cfg.save()?;
             println!("Токен удалён.");
+            warn_env_token();
             return Ok(());
         }
         Some(Cmd::Whoami) => {
@@ -148,6 +149,7 @@ fn main() -> Result<()> {
     let _ = cfg.save();
     if app.logout && res.is_ok() {
         println!("Вы вышли из аккаунта. Войти снова: ymusic login");
+        warn_env_token();
     }
     match app.exit_error.take() {
         Some(e) if res.is_ok() => Err(anyhow::anyhow!(e)),
@@ -194,6 +196,13 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
     cfg.crossfade = app.crossfade;
     cfg.icons = icons;
     changed
+}
+
+/// Logout removes only the saved token: one from the environment keeps working.
+fn warn_env_token() {
+    if config::env_str("TOKEN").is_some_and(|t| !t.is_empty()) {
+        println!("Задан YMUSIC_TOKEN: пока переменная есть, программа входит с этим токеном.");
+    }
 }
 
 fn token(cfg: &mut Config) -> Result<String> {

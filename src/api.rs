@@ -705,6 +705,11 @@ pub fn category_name(ty: &str) -> &str {
 }
 
 /// Built-in stations shown before (or instead of) the list from the API.
+/// «Моя волна» with the default settings.
+pub fn my_wave() -> Station {
+    Station { id: MY_WAVE.into(), name: "Моя волна".into(), category: "Моя волна".into(), settings: None }
+}
+
 pub fn default_stations() -> Vec<Station> {
     let wave = |name: &str, s: Option<(&'static str, &'static str)>| Station {
         id: MY_WAVE.into(),
@@ -713,7 +718,7 @@ pub fn default_stations() -> Vec<Station> {
         settings: s,
     };
     let mut v = vec![
-        wave("Моя волна", None),
+        my_wave(),
         wave("Моя волна · Любимое", Some(("all", "favorite"))),
         wave("Моя волна · Незнакомое", Some(("all", "discover"))),
         wave("Моя волна · Популярное", Some(("all", "popular"))),

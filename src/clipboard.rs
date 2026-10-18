@@ -9,23 +9,17 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub fn copy(text: &str) {
-    osc52(text);
-    let text = text.to_string();
-    // Utilities may block (e.g. a misbehaving X server): keep the UI responsive.
-    std::thread::spawn(move || {
-        let _ = copy_with_tool(&text);
-    });
-}
-
-fn osc52(text: &str) {
+/// Sends the text to the terminal's clipboard (OSC 52). Whether the terminal supports it is unknown.
+pub fn osc52(text: &str) {
     let b64 = base64::engine::general_purpose::STANDARD.encode(text);
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "\x1b]52;c;{b64}\x07");
     let _ = out.flush();
 }
 
-fn copy_with_tool(text: &str) -> bool {
+/// Copies with the first clipboard utility that works; false if there is none.
+/// May block (e.g. a misbehaving X server): call it off the UI thread.
+pub fn copy_with_tool(text: &str) -> bool {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
     let x11 = std::env::var_os("DISPLAY").is_some();
     let tools: [(bool, &str, &[&str]); 3] = [

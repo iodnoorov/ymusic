@@ -300,7 +300,7 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
     let block = panel(i.note, "Сейчас играет");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let Some(t) = app.current() else {
+    if app.current().is_none() {
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled("Ничего не играет", Style::new().fg(SUB))),
@@ -310,9 +310,8 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         ];
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
         return;
-    };
+    }
 
-    let t = t.clone();
     // Square cover: cell aspect ratio comes from the terminal font size.
     let (fw, fh) = app.picker.as_ref().map_or((1, 2), |p| p.font_size());
     let ratio = f64::from(fh.max(1)) / f64::from(fw.max(1));
@@ -326,22 +325,23 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(cover_h), Constraint::Min(0)]).areas(inner);
     let [cover_area] = Layout::horizontal([Constraint::Length(cover_w)]).flex(Flex::Center).areas(cover_area);
     if cover_h >= 3 {
-        match app.current_cover() {
-            Some(proto) => f.render_stateful_widget(
+        if let Some(proto) = app.current_cover() {
+            f.render_stateful_widget(
                 StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))),
                 cover_area,
                 proto,
-            ),
+            );
+        } else if let Some(t) = app.current() {
             // Placeholder while the cover is loading (or when there is none).
-            None => draw_cover(f.buffer_mut(), cover_area, t.album_id.as_deref().unwrap_or(&t.id)),
+            draw_cover(f.buffer_mut(), cover_area, t.album_id.as_deref().unwrap_or(&t.id));
         }
     }
-    let t = &t;
+    let Some(t) = app.current() else { return };
 
     let mut lines = vec![
         Line::from(""),
-        Line::from(Span::styled(t.title.clone(), Style::new().fg(Color::Reset).bold())),
-        Line::from(Span::styled(t.artists.clone(), Style::new().fg(SUB))),
+        Line::from(Span::styled(t.title.as_str(), Style::new().fg(Color::Reset).bold())),
+        Line::from(Span::styled(t.artists.as_str(), Style::new().fg(SUB))),
     ];
     if !t.album.is_empty() {
         lines.push(Line::from(Span::styled(format!("{} {}", i.album, t.album), Style::new().fg(MUTED))));
@@ -433,8 +433,8 @@ fn track_table<'a>(app: &App, tracks: &'a [Track], base: usize, playing: Option<
             };
             Row::new(vec![
                 Cell::from(Line::from(num).alignment(Alignment::Right)),
-                Cell::from(Line::from(vec![heart, Span::styled(t.title.clone(), title_style)])),
-                Cell::from(Span::styled(t.artists.clone(), artist_style)),
+                Cell::from(Line::from(vec![heart, Span::styled(t.title.as_str(), title_style)])),
+                Cell::from(Span::styled(t.artists.as_str(), artist_style)),
                 Cell::from(
                     Line::from(Span::styled(fmt_time(t.duration_ms as f64 / 1000.0), Style::new().fg(MUTED)))
                         .alignment(Alignment::Right),
@@ -563,7 +563,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
             let title_style = if on { Style::new().fg(ACCENT).bold() } else { Style::new().fg(Color::Reset) };
             Row::new(vec![
                 Cell::from(Line::from(num).alignment(Alignment::Right)),
-                Cell::from(Span::styled(p.title.clone(), title_style)),
+                Cell::from(Span::styled(p.title.as_str(), title_style)),
                 Cell::from(
                     Line::from(Span::styled(format!("{} {}", p.track_count, i.note), Style::new().fg(MUTED)))
                         .alignment(Alignment::Right),
@@ -655,10 +655,10 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
                     let mark = if app.paused { i.pause } else { equalizer(app.tick) };
                     Line::from(vec![
                         Span::styled(format!("   {mark:<3} "), Style::new().fg(ACCENT)),
-                        Span::styled(s.name.clone(), Style::new().fg(ACCENT).bold()),
+                        Span::styled(s.name.as_str(), Style::new().fg(ACCENT).bold()),
                     ])
                 } else {
-                    Line::from(vec![Span::styled("   ·   ", Style::new().fg(MUTED)), Span::raw(s.name.clone())])
+                    Line::from(vec![Span::styled("   ·   ", Style::new().fg(MUTED)), Span::raw(s.name.as_str())])
                 };
                 ListItem::new(line)
             }
@@ -716,7 +716,7 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     ];
     match app.current() {
         Some(t) => {
-            left.push(Span::styled(t.title.clone(), Style::new().fg(Color::Reset).bold()));
+            left.push(Span::styled(t.title.as_str(), Style::new().fg(Color::Reset).bold()));
             left.push(Span::styled(format!("  {}", t.artists), Style::new().fg(SUB)));
             if app.is_liked(t) {
                 left.push(Span::styled(format!("  {}", i.heart), Style::new().fg(HEART)));
@@ -751,8 +751,7 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
 fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
     let i = ic();
     if let Some(s) = app.visible_status() {
-        let err = s.contains("Ошибка") || s.contains("Не удалось") || s.contains("не удалось");
-        let (icon, color) = if err { (i.error, ERROR) } else { (i.info, ACCENT) };
+        let (icon, color) = if app.status_error { (i.error, ERROR) } else { (i.info, ACCENT) };
         f.render_widget(Paragraph::new(Span::styled(format!(" {icon} {s}"), Style::new().fg(color))), area);
         return;
     }

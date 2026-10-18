@@ -1,6 +1,6 @@
 //! Application state and logic.
 
-use crate::api::{default_stations, iso_now, Account, Api, Link, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
+use crate::api::{default_stations, iso_now, my_wave, Account, Api, Link, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
 use crate::player::{Audio, PlayerEvent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
@@ -33,7 +33,9 @@ pub enum Msg {
     LessAi(Result<bool, String>),
     /// Result of switching «Меньше ИИ-музыки» to `on`.
     LessAiSet { on: bool, result: Result<(), String> },
-    Status(String),
+    Error(String),
+    /// The link was sent to the terminal and, if `by_tool`, copied by a clipboard utility too.
+    Copied { url: String, by_tool: bool },
     /// A Yandex Music link found in the clipboard for «Играть по ссылке».
     ClipboardLink(String),
 }
@@ -226,6 +228,8 @@ pub struct App {
 
     pub status: String,
     status_at: Instant,
+    /// The status reports an error (see `set_error`).
+    pub status_error: bool,
     /// Frame counter for animations.
     pub tick: u64,
 
@@ -306,6 +310,7 @@ impl App {
             muted: false,
             status: String::new(),
             status_at: Instant::now(),
+            status_error: false,
             tick: 0,
             picker: None,
             covers: Vec::new(),
@@ -348,6 +353,13 @@ impl App {
     pub fn set_status(&mut self, s: impl Into<String>) {
         self.status = s.into();
         self.status_at = Instant::now();
+        self.status_error = false;
+    }
+
+    /// A status shown as an error (in red).
+    pub fn set_error(&mut self, s: impl Into<String>) {
+        self.set_status(s);
+        self.status_error = true;
     }
 
     /// Whether the UI has something moving (progress, equalizer, spinners, cursor).
@@ -695,10 +707,9 @@ impl App {
     fn toggle_like(&mut self, track: Track) {
         let like = !self.is_liked(&track);
         self.apply_like(&track, like);
-        if like && self.source == Source::Wave && self.queue.iter().any(|t| t.id == track.id) {
-            self.wave_feedback(json!({"type": "like", "timestamp": iso_now(), "trackId": track.full_id()}), track.batch.clone());
-        } else if !like && self.source == Source::Wave && self.queue.iter().any(|t| t.id == track.id) {
-            self.wave_feedback(json!({"type": "unlike", "timestamp": iso_now(), "trackId": track.full_id()}), track.batch.clone());
+        if self.source == Source::Wave && self.queue.iter().any(|t| t.id == track.id) {
+            let kind = if like { "like" } else { "unlike" };
+            self.wave_feedback(json!({"type": kind, "timestamp": iso_now(), "trackId": track.full_id()}), track.batch.clone());
         }
         self.set_status(if like {
             format!("♥ Добавлено в «Мне нравится»: {}", track.title)
@@ -739,7 +750,7 @@ impl App {
         }
         self.set_status(format!("✗ Не нравится: {} — больше не попадётся", track.title));
         let t = track.clone();
-        self.spawn(move |api| api.set_dislike(&t, true).err().map(|e| Msg::Status(format!("Ошибка дизлайка: {e:#}"))));
+        self.spawn(move |api| api.set_dislike(&t, true).err().map(|e| Msg::Error(format!("Ошибка дизлайка: {e:#}"))));
         self.next(End::Skip);
     }
 
@@ -770,7 +781,7 @@ impl App {
                     }
                 }
                 PlayerEvent::Error(e) => {
-                    self.set_status(format!("Ошибка воспроизведения: {e}"));
+                    self.set_error(format!("Ошибка воспроизведения: {e}"));
                     self.on_track_error();
                 }
                 PlayerEvent::Died => {
@@ -788,7 +799,7 @@ impl App {
                 match result {
                     Ok(url) => self.player.load(&url),
                     Err(e) => {
-                        self.set_status(format!("Не удалось получить трек: {e}"));
+                        self.set_error(format!("Не удалось получить трек: {e}"));
                         self.on_track_error();
                     }
                 }
@@ -816,7 +827,7 @@ impl App {
                             self.liked_state.select(Some(0));
                         }
                     }
-                    Err(e) => self.set_status(format!("Не удалось загрузить «Мне нравится»: {e}")),
+                    Err(e) => self.set_error(format!("Не удалось загрузить «Мне нравится»: {e}")),
                 }
             }
             Msg::Stations(list) => {
@@ -846,15 +857,16 @@ impl App {
                             self.search_state.select((!list.is_empty()).then_some(0));
                         }
                         // Pages may overlap if the results shift between requests.
-                        let seen: HashSet<String> = self.search_results.iter().map(|t| t.id.clone()).collect();
-                        let new: Vec<Track> = list.into_iter().filter(|t| !seen.contains(&t.id)).collect();
+                        let seen: HashSet<&str> = self.search_results.iter().map(|t| t.id.as_str()).collect();
+                        let new: Vec<Track> = list.into_iter().filter(|t| !seen.contains(t.id.as_str())).collect();
                         if new.is_empty() && page > 0 {
                             // Nothing new: stop asking for more pages.
                             self.search_total = self.search_results.len();
                         }
                         if let Some(shuffled) = self.search_queue {
-                            let queued: HashSet<String> = self.queue.iter().map(|t| t.id.clone()).collect();
-                            let mut more: Vec<Track> = new.iter().filter(|t| !queued.contains(&t.id)).cloned().collect();
+                            let queued: HashSet<&str> = self.queue.iter().map(|t| t.id.as_str()).collect();
+                            let mut more: Vec<Track> =
+                                new.iter().filter(|t| !queued.contains(t.id.as_str())).cloned().collect();
                             if shuffled {
                                 shuffle_tracks(&mut more);
                             }
@@ -862,7 +874,7 @@ impl App {
                         }
                         self.search_results.extend(new);
                     }
-                    Err(e) => self.set_status(format!("Ошибка поиска: {e}")),
+                    Err(e) => self.set_error(format!("Ошибка поиска: {e}")),
                 }
             }
             Msg::Playlists { req, .. } if req != self.playlists_req => {}
@@ -882,7 +894,7 @@ impl App {
                         let sel = self.playlists_state.selected().unwrap_or(0);
                         self.playlists_state.select((n > 0).then(|| sel.min(n - 1)));
                     }
-                    Err(e) => self.set_status(format!("Не удалось загрузить плейлисты: {e}")),
+                    Err(e) => self.set_error(format!("Не удалось загрузить плейлисты: {e}")),
                 }
             }
             Msg::PlaylistOpened { key, req, result } => {
@@ -897,7 +909,7 @@ impl App {
                         let sel = self.open_state.selected().unwrap_or(0);
                         self.open_state.select((n > 0).then(|| sel.min(n - 1)));
                     }
-                    Err(e) => self.set_status(format!("Не удалось открыть плейлист: {e}")),
+                    Err(e) => self.set_error(format!("Не удалось открыть плейлист: {e}")),
                 }
             }
             Msg::PlaylistEdited { key, result } => match result {
@@ -908,7 +920,7 @@ impl App {
                         self.reload_open_playlist();
                     }
                 }
-                Err(e) => self.set_status(format!("Ошибка: {e}")),
+                Err(e) => self.set_error(format!("Ошибка: {e}")),
             },
             Msg::ListLoaded { intent, .. } | Msg::WaveStarted { intent, .. } if intent != self.intent => {}
             Msg::ListLoaded { name, shuffle, playlist, result, .. } => match result {
@@ -924,7 +936,7 @@ impl App {
                     self.playing_playlist = playlist;
                     self.tab = Tab::Wave;
                 }
-                Err(e) => self.set_status(format!("{name}: не удалось загрузить треки: {e}")),
+                Err(e) => self.set_error(format!("{name}: не удалось загрузить треки: {e}")),
             },
             Msg::WaveStarted { station, name, result, .. } => match result {
                 Ok(b) => {
@@ -948,7 +960,7 @@ impl App {
                     self.set_status(format!("Играет: {name}"));
                     self.next(End::Silent);
                 }
-                Err(e) => self.set_status(format!("Не удалось запустить волну: {e}")),
+                Err(e) => self.set_error(format!("Не удалось запустить волну: {e}")),
             },
             Msg::WaveMore(r) => {
                 let Some(w) = &mut self.wave else { return };
@@ -960,22 +972,30 @@ impl App {
                             w.session = b.session_id;
                         }
                         let pending = std::mem::take(&mut w.pending_next);
-                        let known: HashSet<String> = self.queue.iter().map(|t| t.id.clone()).collect();
-                        self.queue.extend(b.tracks.into_iter().filter(|t| !known.contains(&t.id)));
+                        let known: HashSet<&str> = self.queue.iter().map(|t| t.id.as_str()).collect();
+                        let fresh: Vec<Track> = b.tracks.into_iter().filter(|t| !known.contains(t.id.as_str())).collect();
+                        self.queue.extend(fresh);
                         if pending {
                             self.next(End::Silent);
                         } else {
                             self.schedule_preload();
                         }
                     }
-                    Err(e) => self.set_status(format!("Волна: {e}")),
+                    Err(e) => self.set_error(format!("Волна: {e}")),
                 }
             }
             Msg::LikeFailed { track, like, err } => {
                 self.apply_like(&track, !like);
-                self.set_status(format!("Ошибка лайка: {err}"));
+                self.set_error(format!("Ошибка лайка: {err}"));
             }
-            Msg::Status(s) => self.set_status(s),
+            Msg::Error(s) => self.set_error(s),
+            // Without a utility it is up to the terminal (OSC 52), which may ignore it: the link
+            // stays in the status to be selected by hand.
+            Msg::Copied { url, by_tool } => self.set_status(if by_tool {
+                format!("Ссылка скопирована: {url}")
+            } else {
+                format!("Ссылка передана терминалу (OSC 52): {url}")
+            }),
             // Only into an empty field: what the user has typed or pasted meanwhile stays.
             Msg::ClipboardLink(link) => {
                 if let Some(Modal::OpenLink { input }) = &mut self.modal {
@@ -986,7 +1006,7 @@ impl App {
             }
             Msg::LessAi(r) => match r {
                 Ok(on) => self.less_ai = Some(on),
-                Err(e) => self.set_status(format!("Не удалось загрузить настройки аккаунта: {e}")),
+                Err(e) => self.set_error(format!("Не удалось загрузить настройки аккаунта: {e}")),
             },
             Msg::LessAiSet { on, result } => {
                 if let Err(e) = result {
@@ -994,7 +1014,7 @@ impl App {
                     if self.less_ai == Some(on) {
                         self.less_ai = Some(!on);
                     }
-                    self.set_status(format!("Не удалось изменить «Меньше ИИ-музыки»: {e}"));
+                    self.set_error(format!("Не удалось изменить «Меньше ИИ-музыки»: {e}"));
                 }
             }
             Msg::Cover { url, result } => {
@@ -1100,7 +1120,7 @@ impl App {
                 }
             }
             KeyCode::Char('d') => self.dislike_current(),
-            KeyCode::Char('w') => self.start_wave(default_stations().remove(0)),
+            KeyCode::Char('w') => self.start_wave(my_wave()),
             KeyCode::Char('r') => {
                 if let Some(t) = self.selected_track().or(self.current()).cloned() {
                     self.start_wave(Station {
@@ -1609,8 +1629,9 @@ impl App {
             return;
         };
         let url = t.web_url();
-        crate::clipboard::copy(&url);
-        self.set_status(format!("Ссылка скопирована: {url}"));
+        crate::clipboard::osc52(&url);
+        self.set_status(format!("Копирование: {url}"));
+        self.spawn(move |_| Some(Msg::Copied { by_tool: crate::clipboard::copy_with_tool(&url), url }));
     }
 
     /// Asks for a link; a Yandex Music link from the clipboard is filled in once read
@@ -2068,6 +2089,23 @@ mod tests {
         assert!(app.playlists.is_empty() && app.playlists_loading);
         app.on_msg(Msg::Playlists { req: app.playlists_req, result: Ok(vec![pl("new")]) });
         assert_eq!(app.playlists[0].kind, "new");
+    }
+
+    /// Errors are marked by a flag, not by the wording; copying reports how the link was copied.
+    #[test]
+    fn status_kinds() {
+        use super::*;
+        let (mut app, _audio) = App::for_test();
+        app.on_msg(Msg::Error("Ошибка дизлайка: 500".into()));
+        assert!(app.status_error);
+        app.set_status("Играет: Ошибка 404");
+        assert!(!app.status_error);
+        let url = "https://music.yandex.ru/track/1";
+        app.on_msg(Msg::Copied { url: url.into(), by_tool: false });
+        assert_eq!(app.status, format!("Ссылка передана терминалу (OSC 52): {url}"));
+        app.on_msg(Msg::Copied { url: url.into(), by_tool: true });
+        assert_eq!(app.status, format!("Ссылка скопирована: {url}"));
+        assert!(!app.status_error);
     }
 
     /// Pasted text goes into the open field; on the main screen only a Yandex Music link is taken.
