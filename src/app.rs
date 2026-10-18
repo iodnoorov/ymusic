@@ -18,8 +18,8 @@ pub enum Msg {
     Stations(Vec<Station>),
     /// Page `page` of the search for `query`: (tracks, total found).
     Search { query: String, page: usize, result: Result<(Vec<Track>, usize), String> },
-    Playlists(Result<Vec<Playlist>, String>),
-    PlaylistOpened { key: String, result: Result<Vec<Track>, String> },
+    Playlists { req: u64, result: Result<Vec<Playlist>, String> },
+    PlaylistOpened { key: String, req: u64, result: Result<Vec<Track>, String> },
     /// Result of renaming a playlist or changing its tracks: status text on success.
     PlaylistEdited { key: String, result: Result<String, String> },
     /// Tracks loaded in the background to be played as a list named `name`.
@@ -34,6 +34,8 @@ pub enum Msg {
     /// Result of switching «Меньше ИИ-музыки» to `on`.
     LessAiSet { on: bool, result: Result<(), String> },
     Status(String),
+    /// A Yandex Music link found in the clipboard for «Играть по ссылке».
+    ClipboardLink(String),
 }
 
 impl From<PlayerEvent> for Msg {
@@ -86,6 +88,8 @@ pub struct OpenPlaylist {
     pub pl: Playlist,
     pub tracks: Vec<Track>,
     pub loading: bool,
+    /// Number of the latest track request: replies to older ones are dropped.
+    pub req: u64,
 }
 
 /// Pop-up dialogs; while one is shown it receives all keys.
@@ -173,6 +177,8 @@ pub struct App {
     pub liked_ids: HashSet<String>,
     pub liked: Vec<Track>,
     pub liked_loading: bool,
+    /// Likes changed while «Мне нравится» is loading: applied again over the server's answer.
+    liked_pending: Vec<(Track, bool)>,
     pub liked_state: TableState,
 
     pub stations: Vec<StationRow>,
@@ -193,6 +199,8 @@ pub struct App {
 
     pub playlists: Vec<Playlist>,
     pub playlists_loading: bool,
+    /// Number of the latest playlists request: an older reply (e.g. from `R` before an edit) is dropped.
+    playlists_req: u64,
     pub playlists_state: TableState,
     /// Key of the playlist the queue was started from.
     pub playing_playlist: Option<String>,
@@ -264,7 +272,8 @@ impl App {
             loading_track: false,
             liked_ids: HashSet::new(),
             liked: Vec::new(),
-            liked_loading: true,
+            liked_loading: false,
+            liked_pending: Vec::new(),
             liked_state: TableState::default(),
             stations: Vec::new(),
             stations_state: ListState::default(),
@@ -279,6 +288,7 @@ impl App {
             search_state: TableState::default(),
             playlists: Vec::new(),
             playlists_loading: true,
+            playlists_req: 0,
             playlists_state: TableState::default(),
             playing_playlist: None,
             open_playlist: None,
@@ -389,7 +399,11 @@ impl App {
 
     // ------------------------------------------------------------ loading
 
+    /// A load already under way is not repeated (holding `R` would start one per key repeat).
     fn load_liked(&mut self) {
+        if self.liked_loading {
+            return;
+        }
         self.liked_loading = true;
         let tx = self.tx.clone();
         self.spawn(move |api| {
@@ -404,7 +418,9 @@ impl App {
 
     fn load_playlists(&mut self) {
         self.playlists_loading = true;
-        self.spawn(|api| Some(Msg::Playlists(api.playlists().map_err(|e| format!("{e:#}")))));
+        self.playlists_req += 1;
+        let req = self.playlists_req;
+        self.spawn(move |api| Some(Msg::Playlists { req, result: api.playlists().map_err(|e| format!("{e:#}")) }));
     }
 
     fn load_account_settings(&self) {
@@ -708,6 +724,9 @@ impl App {
         if let Some(s) = self.liked_state.selected() {
             self.liked_state.select(if n == 0 { None } else { Some(s.min(n - 1)) });
         }
+        if self.liked_loading {
+            self.liked_pending.push((track.clone(), like));
+        }
     }
 
     fn dislike_current(&mut self) {
@@ -776,12 +795,23 @@ impl App {
             }
             Msg::LikedIds(ids) => {
                 self.liked_ids = ids.iter().map(|i| i.split(':').next().unwrap_or(i).to_string()).collect();
+                for (t, like) in &self.liked_pending {
+                    if *like {
+                        self.liked_ids.insert(t.id.clone());
+                    } else {
+                        self.liked_ids.remove(&t.id);
+                    }
+                }
             }
             Msg::Liked(r) => {
                 self.liked_loading = false;
+                let pending = std::mem::take(&mut self.liked_pending);
                 match r {
                     Ok(list) => {
                         self.liked = list;
+                        for (t, like) in &pending {
+                            self.apply_like(t, *like);
+                        }
                         if !self.liked.is_empty() && self.liked_state.selected().is_none() {
                             self.liked_state.select(Some(0));
                         }
@@ -835,9 +865,10 @@ impl App {
                     Err(e) => self.set_status(format!("Ошибка поиска: {e}")),
                 }
             }
-            Msg::Playlists(r) => {
+            Msg::Playlists { req, .. } if req != self.playlists_req => {}
+            Msg::Playlists { result, .. } => {
                 self.playlists_loading = false;
-                match r {
+                match result {
                     Ok(list) => {
                         self.playlists = list;
                         if let Some(open) = &mut self.open_playlist {
@@ -854,8 +885,10 @@ impl App {
                     Err(e) => self.set_status(format!("Не удалось загрузить плейлисты: {e}")),
                 }
             }
-            Msg::PlaylistOpened { key, result } => {
-                let Some(open) = self.open_playlist.as_mut().filter(|o| o.pl.key() == key) else { return };
+            Msg::PlaylistOpened { key, req, result } => {
+                let Some(open) = self.open_playlist.as_mut().filter(|o| o.pl.key() == key && o.req == req) else {
+                    return;
+                };
                 open.loading = false;
                 match result {
                     Ok(tracks) => {
@@ -943,6 +976,14 @@ impl App {
                 self.set_status(format!("Ошибка лайка: {err}"));
             }
             Msg::Status(s) => self.set_status(s),
+            // Only into an empty field: what the user has typed or pasted meanwhile stays.
+            Msg::ClipboardLink(link) => {
+                if let Some(Modal::OpenLink { input }) = &mut self.modal {
+                    if input.is_empty() {
+                        *input = link;
+                    }
+                }
+            }
             Msg::LessAi(r) => match r {
                 Ok(on) => self.less_ai = Some(on),
                 Err(e) => self.set_status(format!("Не удалось загрузить настройки аккаунта: {e}")),
@@ -1325,7 +1366,7 @@ impl App {
 
     fn open_selected_playlist(&mut self) {
         let Some(pl) = self.selected_playlist().cloned() else { return };
-        self.open_playlist = Some(OpenPlaylist { pl, tracks: Vec::new(), loading: true });
+        self.open_playlist = Some(OpenPlaylist { pl, tracks: Vec::new(), loading: true, req: 0 });
         self.open_state = TableState::default();
         self.reload_open_playlist();
     }
@@ -1333,10 +1374,11 @@ impl App {
     fn reload_open_playlist(&mut self) {
         let Some(open) = &mut self.open_playlist else { return };
         open.loading = true;
-        let pl = open.pl.clone();
+        open.req += 1;
+        let (pl, req) = (open.pl.clone(), open.req);
         self.spawn(move |api| {
             let result = api.playlist_tracks(&pl).map_err(|e| format!("{e:#}"));
-            Some(Msg::PlaylistOpened { key: pl.key(), result })
+            Some(Msg::PlaylistOpened { key: pl.key(), req, result })
         });
     }
 
@@ -1571,13 +1613,16 @@ impl App {
         self.set_status(format!("Ссылка скопирована: {url}"));
     }
 
-    /// Asks for a link; a Yandex Music link from the clipboard is filled in.
+    /// Asks for a link; a Yandex Music link from the clipboard is filled in once read
+    /// (clipboard tools may take a while, so the window opens at once).
     fn ask_link(&mut self) {
-        let input = crate::clipboard::paste()
-            .map(|s| s.trim().to_string())
-            .filter(|s| crate::api::parse_link(s).is_ok())
-            .unwrap_or_default();
-        self.modal = Some(Modal::OpenLink { input });
+        self.modal = Some(Modal::OpenLink { input: String::new() });
+        self.spawn(|_| {
+            crate::clipboard::paste()
+                .map(|s| s.trim().to_string())
+                .filter(|s| crate::api::parse_link(s).is_ok())
+                .map(Msg::ClipboardLink)
+        });
     }
 
     /// Plays a track, album or playlist from a Yandex Music link; other links are not opened.
@@ -1769,7 +1814,7 @@ mod tests {
         assert_eq!(app.status, "Это не ссылка на Яндекс Музыку");
 
         // `x` asks for confirmation; any key other than Enter cancels.
-        app.open_playlist = Some(OpenPlaylist { pl: app.playlists[0].clone(), tracks: vec![t], loading: false });
+        app.open_playlist = Some(OpenPlaylist { pl: app.playlists[0].clone(), tracks: vec![t], loading: false, req: 0 });
         app.open_state.select(Some(0));
         app.on_key(key(KeyCode::Char('x')));
         assert!(matches!(app.modal, Some(Modal::ConfirmRemove { index: 0, .. })));
@@ -1973,6 +2018,58 @@ mod tests {
         assert!(!app.search_loading);
     }
 
+    /// A like set while «Мне нравится» is loading survives the server's (older) answer;
+    /// an older playlists reply does not replace a newer one.
+    #[test]
+    fn replies_during_reload() {
+        use super::*;
+        let (mut app, _audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let ids = |app: &App| app.liked.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+
+        // Liked before the first load finished: the server's list does not have it yet.
+        app.start();
+        assert!(app.liked_loading);
+        app.toggle_like(t("5"));
+        app.on_msg(Msg::LikedIds(vec!["1:10".into(), "2:20".into()]));
+        assert!(app.liked_ids.contains("5") && app.liked_ids.contains("1"));
+        app.on_msg(Msg::Liked(Ok(vec![t("1"), t("2")])));
+        assert_eq!(ids(&app), ["5", "1", "2"]);
+        assert!(!app.liked_loading && app.liked_pending.is_empty());
+
+        // `R`, then a like is removed while the old list is still coming.
+        app.load_liked();
+        app.load_liked();
+        app.toggle_like(t("1"));
+        app.on_msg(Msg::LikedIds(vec!["5:1".into(), "1:10".into(), "2:20".into()]));
+        assert!(!app.liked_ids.contains("1"));
+        app.on_msg(Msg::Liked(Ok(vec![t("5"), t("1"), t("2")])));
+        assert_eq!(ids(&app), ["5", "2"]);
+
+        // After the load, likes apply directly.
+        app.toggle_like(t("2"));
+        assert!(app.liked_pending.is_empty());
+        assert_eq!(ids(&app), ["5"]);
+
+        let pl = |k: &str| Playlist { owner: "1".into(), kind: k.into(), title: k.into(), track_count: 0 };
+        app.load_playlists();
+        app.on_msg(Msg::Playlists { req: app.playlists_req - 1, result: Ok(vec![pl("old")]) });
+        assert!(app.playlists.is_empty() && app.playlists_loading);
+        app.on_msg(Msg::Playlists { req: app.playlists_req, result: Ok(vec![pl("new")]) });
+        assert_eq!(app.playlists[0].kind, "new");
+    }
+
     /// Pasted text goes into the open field; on the main screen only a Yandex Music link is taken.
     #[test]
     fn paste() {
@@ -1988,6 +2085,20 @@ mod tests {
         app.on_paste(&format!(" {link}\n"));
         let Some(Modal::OpenLink { input }) = &app.modal else { panic!("no link input") };
         assert_eq!(input, link);
+        app.modal = None;
+
+        // `Y` opens the window at once; the clipboard link arrives later and fills an empty field only.
+        let input = |app: &App| match &app.modal {
+            Some(Modal::OpenLink { input }) => input.clone(),
+            _ => panic!("no link input"),
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert_eq!(input(&app), "");
+        app.on_msg(Msg::ClipboardLink(link.into()));
+        assert_eq!(input(&app), link);
+        app.modal = Some(Modal::OpenLink { input: "typed".into() });
+        app.on_msg(Msg::ClipboardLink(link.into()));
+        assert_eq!(input(&app), "typed");
         app.modal = None;
 
         app.search_editing = true;

@@ -1235,7 +1235,7 @@ mod tests {
         use crate::app::{Modal, OpenPlaylist};
         let pl = app.playlists[0].clone();
         app.tab = Tab::Playlists;
-        app.open_playlist = Some(OpenPlaylist { pl: pl.clone(), tracks: app.queue.clone(), loading: false });
+        app.open_playlist = Some(OpenPlaylist { pl: pl.clone(), tracks: app.queue.clone(), loading: false, req: 0 });
         app.open_state.select(Some(2));
         let modals = [
             Some(Modal::ConfirmDelete { pl: pl.clone() }),

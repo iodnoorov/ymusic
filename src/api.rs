@@ -8,6 +8,29 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+/// Most requests of one operation run at once (a large library is loaded in parts).
+const PARALLEL: usize = 4;
+
+/// Runs `f` for each item on up to `PARALLEL` threads; results keep the order of `items`.
+/// The first error (in item order) is returned.
+fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -> Result<Vec<R>> {
+    if items.len() <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let workers = items.len().min(PARALLEL);
+    let mut done: Vec<(usize, Result<R>)> = std::thread::scope(|s| {
+        let f = &f;
+        let handles: Vec<_> = (0..workers)
+            .map(|w| {
+                s.spawn(move || items.iter().enumerate().skip(w).step_by(workers).map(|(i, it)| (i, f(it))).collect::<Vec<_>>())
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().expect("поток запроса упал")).collect()
+    });
+    done.sort_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
+}
+
 /// OAuth application of the official Yandex Music Android client.
 pub const CLIENT_ID: &str = "23cabbbdc6cd418abb4b39c32c41195d";
 
@@ -302,13 +325,13 @@ impl Api {
     // ---------------------------------------------------------------- tracks
 
     pub fn tracks(&self, ids: &[String]) -> Result<Vec<Track>> {
-        let mut out = Vec::with_capacity(ids.len());
-        for chunk in ids.chunks(200) {
+        let chunks: Vec<_> = ids.chunks(200).collect();
+        let parts = parallel(&chunks, |chunk| {
             let joined = chunk.join(",");
             let r = self.post_form("/tracks", &[("track-ids", &joined), ("with-positions", "false")])?;
-            out.extend(r.as_array().into_iter().flatten().filter_map(Track::from_json));
-        }
-        Ok(out)
+            Ok(r.as_array().into_iter().flatten().filter_map(Track::from_json).collect::<Vec<_>>())
+        })?;
+        Ok(parts.into_iter().flatten().collect())
     }
 
     /// One page of track search results and the total number of found tracks.
@@ -327,18 +350,20 @@ impl Api {
     pub fn artist_tracks(&self, artist_id: &str) -> Result<Vec<Track>> {
         const PAGE: usize = 100;
         const MAX: usize = 1000;
-        let mut out = Vec::new();
-        for page in 0.. {
-            let page = page.to_string();
-            let size = PAGE.to_string();
+        // Tracks of one page and the artist's total number of tracks.
+        let page = |n: usize| -> Result<(Vec<Track>, usize)> {
+            let (page, size) = (n.to_string(), PAGE.to_string());
             let r = self.get(&format!("/artists/{artist_id}/tracks"), &[("page", &page), ("page-size", &size)])?;
-            let tracks = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
-            out.extend(tracks.iter().filter_map(Track::from_json));
-            let total = r["pager"]["total"].as_u64().unwrap_or(0) as usize;
-            if tracks.len() < PAGE || out.len() >= total.min(MAX) {
-                break;
-            }
+            let tracks = r["tracks"].as_array().into_iter().flatten().filter_map(Track::from_json).collect();
+            Ok((tracks, r["pager"]["total"].as_u64().unwrap_or(0) as usize))
+        };
+        // The first page tells how many there are; the rest are fetched together.
+        let (mut out, total) = page(0)?;
+        if out.len() == PAGE {
+            let rest: Vec<usize> = (1..total.min(MAX).div_ceil(PAGE)).collect();
+            out.extend(parallel(&rest, |&n| page(n).map(|(t, _)| t))?.into_iter().flatten());
         }
+        out.truncate(MAX);
         Ok(out)
     }
 
@@ -809,6 +834,27 @@ mod tests {
         let tracks = Api::new(&token).artist_tracks("161243").unwrap();
         assert!(tracks.len() > 100, "{}", tracks.len());
         assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+    }
+
+    #[test]
+    fn parallel_keeps_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let items: Vec<usize> = (0..23).collect();
+        let (now, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let out = super::parallel(&items, |&i| {
+            peak.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(((i * 7) % 5) as u64));
+            now.fetch_sub(1, Ordering::SeqCst);
+            Ok(i * 10)
+        })
+        .unwrap();
+        assert_eq!(out, items.iter().map(|i| i * 10).collect::<Vec<_>>());
+        assert!(peak.load(Ordering::SeqCst) <= super::PARALLEL);
+
+        let err = super::parallel(&items, |&i| if i == 5 || i == 17 { Err(anyhow!("bad {i}")) } else { Ok(i) });
+        assert_eq!(err.unwrap_err().to_string(), "bad 5");
+        assert_eq!(super::parallel(&[] as &[usize], |&i| Ok(i)).unwrap(), Vec::<usize>::new());
+        assert_eq!(super::parallel(&[7], |&i| Ok(i)).unwrap(), [7]);
     }
 
     #[test]
