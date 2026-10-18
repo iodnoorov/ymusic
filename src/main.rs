@@ -100,10 +100,7 @@ fn main() -> Result<()> {
     // Pasted text arrives as one event instead of a stream of hotkeys.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     // Must run after entering the alternate screen and before reading events.
-    app.picker = Some(
-        ratatui_image::picker::Picker::from_query_stdio()
-            .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16))),
-    );
+    app.picker = Some(query_picker());
     let res = (|| -> Result<()> {
         // Redraw only when something changed: immediately on input/messages,
         // otherwise at 5 fps while something animates and 1 fps when idle.
@@ -155,6 +152,27 @@ fn main() -> Result<()> {
         Some(e) if res.is_ok() => Err(anyhow::anyhow!(e)),
         _ => res,
     }
+}
+
+/// Asks the terminal which image protocol it supports. ratatui-image reads the answer in its own
+/// thread, which keeps reading stdin until the final status reply arrives, swallowing key presses
+/// meanwhile; after a 1 s timeout it falls back to halfblocks but leaves that thread running.
+/// Inside tmux the query goes through passthrough, so without an attached client (or with an outer
+/// terminal that does not answer) the reply never comes. Then the status is requested directly:
+/// the nearest terminal (tmux itself) answers and the thread ends. If the thread is already gone,
+/// crossterm drops the extra reply.
+fn query_picker() -> ratatui_image::picker::Picker {
+    use std::io::Write;
+    let start = Instant::now();
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::from_fontsize((8, 16)));
+    if start.elapsed() >= Duration::from_millis(900) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[5n").and_then(|()| out.flush());
+        // Let the reply reach that thread before the event loop starts reading stdin.
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    picker
 }
 
 /// Copies the settings changed in the program into the config; true if any of them changed.
