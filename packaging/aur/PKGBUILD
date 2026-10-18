@@ -11,7 +11,7 @@ depends=('mpv' 'libgcc' 'glibc')
 makedepends=('cargo')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('7bb5532eae5e6c853ea4e14b9236b3f9a7d84ec83ef141e1bda3cdf2f041e5ee')
 
 prepare() {
   cd "$_repo-$pkgver"
