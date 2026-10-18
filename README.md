@@ -74,7 +74,7 @@ yay -S ymusic-cli-bin   # готовый статический бинарник
 Есть сборки для x86_64 и aarch64 (ARM64); сборка для aarch64 проверяется в эмуляторе (QEMU), на реальном ARM-устройстве не запускалась.
 
 ```bash
-V=1.4.1         # номер последнего релиза
+V=1.5.0         # номер последнего релиза
 A=$(uname -m)   # x86_64 или aarch64
 curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz
 curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz.sha256
