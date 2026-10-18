@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -43,12 +44,56 @@ fn fade_filter(fade: f64, duration: f64) -> String {
     format!("@fade:lavfi=[volume=volume='{expr}':eval=frame]")
 }
 
+/// Extra mpv options from `YMUSIC_MPV_ARGS` (split on whitespace) and a log file from `YMUSIC_MPV_LOG`.
+fn user_args() -> Vec<String> {
+    let mut args: Vec<String> =
+        crate::config::env_str("MPV_ARGS").unwrap_or_default().split_whitespace().map(String::from).collect();
+    if let Some(log) = crate::config::env_str("MPV_LOG").filter(|l| !l.is_empty()) {
+        args.push(format!("--log-file={log}"));
+    }
+    args
+}
+
+/// mpv gets SIGTERM when ymusic dies, even by SIGKILL: otherwise it keeps playing
+/// with nothing left to stop it.
+fn exit_with_parent(cmd: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: only async-signal-safe calls (prctl, getppid) run between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The parent died before prctl took effect.
+            if libc::getppid() != parent {
+                return Err(std::io::Error::other("ymusic уже завершился"));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Removes sockets left by earlier runs that were killed before `Drop` (their pid is gone).
+fn remove_stale_sockets(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let pid = name.to_str().and_then(|n| n.strip_prefix("ymusic-cli-")?.strip_suffix(".sock")?.parse::<u32>().ok());
+        if pid.is_some_and(|pid| !std::path::Path::new(&format!("/proc/{pid}")).exists()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 impl Player {
     pub fn spawn<M: From<PlayerEvent> + Send + 'static>(tx: Sender<M>, volume: u8) -> Result<Player> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        remove_stale_sockets(&dir);
         let sock = dir.join(format!("ymusic-cli-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
-        let child = Command::new("mpv")
+        let mut cmd = Command::new("mpv");
+        exit_with_parent(&mut cmd);
+        let child = cmd
             .args([
                 "--idle=yes",
                 "--no-video",
@@ -66,6 +111,7 @@ impl Player {
             ])
             .arg(format!("--volume={volume}"))
             .arg(format!("--input-ipc-server={}", sock.display()))
+            .args(user_args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -215,5 +261,34 @@ mod tests {
         assert_eq!(fade_filter(0.0, 200.0), "");
         assert_eq!(fade_filter(5.0, 0.0), "@fade:lavfi=[volume=volume='min(1,t/5)':eval=frame]");
         assert_eq!(fade_filter(5.0, 200.5), "@fade:lavfi=[volume=volume='min(1,min(t,200.500-t)/5)':eval=frame]");
+    }
+
+    /// mpv is stopped when the thread that started it is gone, even if `Drop` never ran
+    /// (as after SIGKILL). Needs mpv: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn mpv_exits_with_parent() {
+        use super::{Player, PlayerEvent};
+        let pid = std::thread::spawn(|| {
+            let (tx, _rx) = std::sync::mpsc::channel::<PlayerEvent>();
+            let p = Player::spawn(tx, 0).expect("mpv");
+            let pid = p.child.id();
+            let sock = p.sock.clone();
+            std::mem::forget(p);
+            let _ = std::fs::remove_file(sock);
+            pid
+        })
+        .join()
+        .unwrap();
+        // The child is never reaped here, so a finished mpv stays a zombie (state Z).
+        let gone = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map_or(true, |s| s.rsplit(')').next().is_some_and(|r| r.trim_start().starts_with('Z')))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !gone() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(gone(), "mpv {pid} is still running");
     }
 }

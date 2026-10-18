@@ -148,6 +148,8 @@ pub struct App {
     pub account: Account,
     pub tab: Tab,
     pub quit: bool,
+    /// Why the program quit on its own: printed after the terminal is restored.
+    pub exit_error: Option<String>,
     pub show_help: bool,
     pub show_about: bool,
     /// «О программе» was opened from the settings window: closing it returns there.
@@ -243,6 +245,7 @@ impl App {
             account,
             tab: Tab::Wave,
             quit: false,
+            exit_error: None,
             show_help: false,
             show_about: false,
             about_from_settings: false,
@@ -729,7 +732,10 @@ impl App {
                     self.on_track_error();
                 }
                 PlayerEvent::Died => {
-                    self.set_status("mpv завершился неожиданно");
+                    self.exit_error = Some(
+                        "mpv завершился неожиданно; подробности можно записать в лог: YMUSIC_MPV_LOG=/tmp/mpv.log ymusic"
+                            .into(),
+                    );
                     self.quit = true;
                 }
             },
@@ -970,6 +976,22 @@ impl App {
     }
 
     // ------------------------------------------------------------ keys
+
+    /// Text pasted into the terminal: it goes into the open text field as is, and a Yandex Music
+    /// link pasted on the main screen opens «Играть по ссылке» instead of acting as hotkeys.
+    pub fn on_paste(&mut self, text: &str) {
+        let text: String = text.trim().chars().filter(|c| !c.is_control()).collect();
+        match &mut self.modal {
+            Some(Modal::Rename { input, .. } | Modal::OpenLink { input }) => input.push_str(&text),
+            Some(_) => {}
+            None if self.search_editing => self.search_input.push_str(&text),
+            None if self.show_help || self.show_about => {}
+            None => match crate::api::parse_link(&text) {
+                Ok(_) => self.modal = Some(Modal::OpenLink { input: text }),
+                Err(e) => self.set_status(e),
+            },
+        }
+    }
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
@@ -1938,6 +1960,33 @@ mod tests {
         assert_eq!(app.search_total, 290);
         app.move_sel(1000);
         assert!(!app.search_loading);
+    }
+
+    /// Pasted text goes into the open field; on the main screen only a Yandex Music link is taken.
+    #[test]
+    #[ignore]
+    fn paste() {
+        use super::*;
+        use crate::api::Account;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let player = Player::spawn(tx.clone(), 0).expect("mpv");
+        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
+        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let link = "https://music.yandex.ru/album/9/track/123";
+
+        // Not a hotkey stream: `q` in the text does not quit.
+        app.on_paste("https://example.com/q");
+        assert!(!app.quit && app.modal.is_none());
+        assert_eq!(app.status, "Это не ссылка на Яндекс Музыку");
+
+        app.on_paste(&format!(" {link}\n"));
+        let Some(Modal::OpenLink { input }) = &app.modal else { panic!("no link input") };
+        assert_eq!(input, link);
+        app.modal = None;
+
+        app.search_editing = true;
+        app.on_paste("рок\tq");
+        assert_eq!(app.search_input, "рокq");
     }
 
     /// Replies to an older play request do not replace what the user started later.

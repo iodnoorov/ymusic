@@ -10,8 +10,10 @@ mod ui;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use config::Config;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
-use std::sync::mpsc;
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use ratatui::crossterm::execute;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -88,7 +90,15 @@ fn main() -> Result<()> {
         app.start_station_id(api::MY_WAVE);
     }
 
+    // SIGTERM ends the loop like `q`: mpv is stopped, settings saved. SIGHUP keeps its default
+    // action: with the terminal gone crossterm spins on EOF and the loop would never see a flag;
+    // mpv still stops (it dies with us) and settings are already saved by then.
+    let stop = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop))?;
+
     let mut terminal = ratatui::init();
+    // Pasted text arrives as one event instead of a stream of hotkeys.
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     // Must run after entering the alternate screen and before reading events.
     app.picker = Some(
         ratatui_image::picker::Picker::from_query_stdio()
@@ -99,7 +109,8 @@ fn main() -> Result<()> {
         // otherwise at 5 fps while something animates and 1 fps when idle.
         let mut dirty = true;
         let mut last_draw = Instant::now();
-        while !app.quit {
+        let mut last_input = Instant::now();
+        while !app.quit && !stop.load(Ordering::Relaxed) {
             let frame = Duration::from_millis(if app.is_animating() { 200 } else { 1000 });
             if dirty || last_draw.elapsed() >= frame {
                 terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -109,10 +120,17 @@ fn main() -> Result<()> {
             if event::poll(Duration::from_millis(50))? {
                 match event::read()? {
                     Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
+                    Event::Paste(s) => app.on_paste(&s),
                     Event::Resize(..) => app.on_resize(),
                     _ => continue,
                 }
                 dirty = true;
+                last_input = Instant::now();
+            }
+            // Changed settings are saved once the keys are left alone for a moment, so they
+            // survive a crash or kill; not on every volume step.
+            if last_input.elapsed() > Duration::from_secs(2) && sync_settings(&mut cfg, &app, icons) {
+                let _ = cfg.save();
             }
             while let Ok(m) = rx.try_recv() {
                 // Playback position is shown by the regular animation frames.
@@ -122,15 +140,10 @@ fn main() -> Result<()> {
         }
         Ok(())
     })();
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 
-    cfg.volume = app.save_volume();
-    cfg.eq = eq::PRESETS[app.eq].id.to_string();
-    cfg.quality = api::QUALITIES[app.quality].id.to_string();
-    cfg.crossfade = app.crossfade;
-    if app.icons != icons {
-        cfg.icons = app.icons;
-    }
+    sync_settings(&mut cfg, &app, icons);
     if app.logout {
         cfg.token = None;
     }
@@ -138,7 +151,30 @@ fn main() -> Result<()> {
     if app.logout && res.is_ok() {
         println!("Вы вышли из аккаунта. Войти снова: ymusic login");
     }
-    res
+    match app.exit_error.take() {
+        Some(e) if res.is_ok() => Err(anyhow::anyhow!(e)),
+        _ => res,
+    }
+}
+
+/// Copies the settings changed in the program into the config; true if any of them changed.
+/// `icons`: the value this run started with (`--no-icons` is not saved unless switched by hand).
+fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
+    let volume = app.save_volume();
+    let eq = eq::PRESETS[app.eq].id;
+    let quality = api::QUALITIES[app.quality].id;
+    let icons = if app.icons != icons { app.icons } else { cfg.icons };
+    let changed = cfg.volume != volume
+        || cfg.eq != eq
+        || cfg.quality != quality
+        || cfg.crossfade != app.crossfade
+        || cfg.icons != icons;
+    cfg.volume = volume;
+    cfg.eq = eq.to_string();
+    cfg.quality = quality.to_string();
+    cfg.crossfade = app.crossfade;
+    cfg.icons = icons;
+    changed
 }
 
 fn token(cfg: &mut Config) -> Result<String> {

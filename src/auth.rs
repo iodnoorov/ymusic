@@ -12,6 +12,7 @@ use std::io::{BufRead, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
@@ -191,6 +192,36 @@ impl Drop for Session {
     }
 }
 
+/// Ctrl+C during browser login: the wait loops stop and `Session` closes the browser and
+/// removes the profile (the default SIGINT action would exit without running `Drop`).
+static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+fn check_cancel() -> Result<()> {
+    if CANCELLED.load(Ordering::Relaxed) {
+        bail!("вход отменён");
+    }
+    Ok(())
+}
+
+/// A fresh private (0700) directory for the browser profile: it holds the Yandex session cookies.
+/// The name is not predictable, and an existing path (or symlink) is never reused.
+fn create_profile_dir() -> Result<PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::os::unix::fs::DirBuilderExt;
+    let mut last = None;
+    for _ in 0..16 {
+        // RandomState is seeded from the OS random source: a cheap unpredictable suffix.
+        let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        let dir = std::env::temp_dir().join(format!("ymusic-login-{}-{random:016x}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e).context("не удалось создать временный профиль браузера"),
+        }
+    }
+    Err(last.map_or_else(|| anyhow!("не удалось создать временный профиль браузера"), anyhow::Error::from))
+}
+
 fn free_port() -> Result<u16> {
     Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
@@ -200,15 +231,16 @@ pub fn browser_login() -> Result<String> {
         anyhow!("не найден поддерживаемый браузер (Firefox/Zen/LibreWolf или Chromium/Chrome/Brave/Яндекс Браузер); укажите его в YMUSIC_BROWSER")
     })?;
     let port = free_port()?;
-    let profile = std::env::temp_dir().join(format!("ymusic-login-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&profile);
-    std::fs::create_dir_all(&profile)?;
+    let profile = create_profile_dir()?;
     let headless = crate::config::env("BROWSER_HEADLESS").is_some();
 
     let mut cmd = Command::new(&browser.bin);
     match browser.kind {
         Kind::Firefox => {
-            std::fs::write(profile.join("user.js"), FIREFOX_PREFS)?;
+            if let Err(e) = std::fs::write(profile.join("user.js"), FIREFOX_PREFS) {
+                let _ = std::fs::remove_dir_all(&profile);
+                return Err(e.into());
+            }
             cmd.arg("--profile").arg(&profile).args(["--no-remote", "--new-instance"]);
             cmd.arg("--remote-debugging-port").arg(port.to_string());
             if headless {
@@ -229,19 +261,28 @@ pub fn browser_login() -> Result<String> {
     let name = Path::new(&browser.bin).file_name().unwrap_or_default().to_string_lossy().into_owned();
     println!("\n  Открываю окно браузера ({name})… Войдите в аккаунт Яндекса.");
     println!("  После входа окно закроется само. Ctrl+C — отмена.");
-    let child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("не удалось запустить {}", browser.bin))?;
+    let child = match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&profile);
+            return Err(e).with_context(|| format!("не удалось запустить {}", browser.bin));
+        }
+    };
     let mut session = Session { child, profile };
+    CANCELLED.store(false, Ordering::Relaxed);
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    let sigint = unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGINT, || CANCELLED.store(true, Ordering::Relaxed))
+    }?;
     let deadline = Instant::now() + LOGIN_TIMEOUT;
     let url = auth_url();
-    match browser.kind {
+    let token = match browser.kind {
         Kind::Firefox => bidi_capture(port, &url, &mut session.child, deadline),
         Kind::Chromium => cdp_capture(port, &url, &mut session.child, deadline),
-    }
+    };
+    signal_hook::low_level::unregister(sigint);
+    // Ctrl+C reaches the browser too, so it may close first: report the cancel, not the closed window.
+    token.map_err(|e| if CANCELLED.load(Ordering::Relaxed) { anyhow!("вход отменён") } else { e })
 }
 
 const FIREFOX_PREFS: &str = r#"
@@ -265,6 +306,7 @@ fn ws_connect(url: &str, child: &mut Child, deadline: Instant) -> Result<Ws> {
                 return Ok(ws);
             }
             Err(e) => {
+                check_cancel()?;
                 if child.try_wait()?.is_some() {
                     bail!("браузер завершился при запуске");
                 }
@@ -304,6 +346,7 @@ fn wait_token(
 ) -> Result<String> {
     let mut last = Instant::now();
     loop {
+        check_cancel()?;
         if Instant::now() > deadline {
             bail!("время ожидания входа истекло");
         }
@@ -381,6 +424,7 @@ fn cdp_capture(port: u16, url: &str, child: &mut Child, deadline: Instant) -> Re
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build();
     let start = Instant::now();
     let ws_url = loop {
+        check_cancel()?;
         if child.try_wait()?.is_some() {
             bail!("браузер завершился при запуске");
         }
@@ -426,5 +470,14 @@ mod tests {
         assert_eq!(classify("google-chrome-stable"), Some(Kind::Chromium));
         assert_eq!(classify("yandex-browser"), Some(Kind::Chromium));
         assert_eq!(classify("flatpak"), None);
+    }
+
+    #[test]
+    fn profile_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (super::create_profile_dir().unwrap(), super::create_profile_dir().unwrap());
+        assert_ne!(a, b);
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        let _ = (std::fs::remove_dir(a), std::fs::remove_dir(b));
     }
 }
