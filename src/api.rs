@@ -246,9 +246,8 @@ impl Api {
     }
 
     fn req(&self, method: &str, path: &str) -> ureq::Request {
-        let url = if path.starts_with("http") { path.to_string() } else { format!("{BASE}{path}") };
         self.agent
-            .request(method, &url)
+            .request(method, &format!("{BASE}{path}"))
             .set("Authorization", &format!("OAuth {}", self.token))
             .set("X-Yandex-Music-Client", "YandexMusicAndroid/24023621")
             .set("Accept-Language", "ru")
@@ -439,7 +438,9 @@ impl Api {
     pub fn add_to_playlist(&self, pl: &Playlist, track: &Track) -> Result<()> {
         let r = self.get(&Self::playlist_path(pl), &[])?;
         let revision = r["revision"].as_u64().context("нет ревизии плейлиста")?;
-        let at = r["tracks"].as_array().map_or(0, Vec::len);
+        // Large playlists may come without the full `tracks` list: then `trackCount` tells the end.
+        let listed = r["tracks"].as_array().map_or(0, Vec::len);
+        let at = listed.max(r["trackCount"].as_u64().unwrap_or(0) as usize);
         let mut t = json!({"id": track.id});
         if let Some(a) = &track.album_id {
             t["albumId"] = json!(a);

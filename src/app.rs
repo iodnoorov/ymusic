@@ -23,8 +23,8 @@ pub enum Msg {
     /// Result of renaming a playlist or changing its tracks: status text on success.
     PlaylistEdited { key: String, result: Result<String, String> },
     /// Tracks loaded in the background to be played as a list named `name`.
-    ListLoaded { name: String, shuffle: bool, playlist: Option<String>, result: Result<Vec<Track>, String> },
-    WaveStarted { station: String, name: String, result: Result<WaveBatch, String> },
+    ListLoaded { intent: u64, name: String, shuffle: bool, playlist: Option<String>, result: Result<Vec<Track>, String> },
+    WaveStarted { intent: u64, station: String, name: String, result: Result<WaveBatch, String> },
     WaveMore(Result<WaveBatch, String>),
     LikeFailed { track: Track, like: bool, err: String },
     Cover { url: String, result: Result<image::DynamicImage, String> },
@@ -130,6 +130,9 @@ impl Setting {
     }
 }
 
+/// Loudest volume, % (mpv's default `volume-max`); kept between runs as is.
+const MAX_VOLUME: f64 = 130.0;
+
 /// Fade lengths offered in the settings window, seconds (0 — off).
 pub const CROSSFADE_STEPS: [u8; 6] = [0, 3, 5, 8, 12, 15];
 
@@ -158,6 +161,8 @@ pub struct App {
     pub wave: Option<Wave>,
     pub queue_state: TableState,
     gen: u64,
+    /// Bumped whenever the user starts something to play: replies to an older request are dropped.
+    intent: u64,
     errors_in_row: u32,
     pub loading_track: bool,
 
@@ -248,6 +253,7 @@ impl App {
             wave: None,
             queue_state: TableState::default(),
             gen: 0,
+            intent: 0,
             errors_in_row: 0,
             loading_track: false,
             liked_ids: HashSet::new(),
@@ -557,6 +563,7 @@ impl App {
         if tracks.is_empty() {
             return;
         }
+        self.new_intent();
         self.report_end(End::Skip);
         self.queue = tracks;
         self.search_queue = None;
@@ -570,7 +577,14 @@ impl App {
         self.set_status(format!("Играет: {name}"));
     }
 
+    /// The user started something new to play; returns its number for the async reply.
+    fn new_intent(&mut self) -> u64 {
+        self.intent += 1;
+        self.intent
+    }
+
     fn start_wave(&mut self, station: Station) {
+        let intent = self.new_intent();
         let name = station.name.clone();
         self.set_status(format!("Запуск: {name}…"));
         let settings = station.settings;
@@ -582,7 +596,7 @@ impl App {
                 let _ = api.wave_settings(mood, div);
             }
             let result = api.wave_start(&id).map_err(|e| format!("{e:#}"));
-            Some(Msg::WaveStarted { station: id, name, result })
+            Some(Msg::WaveStarted { intent, station: id, name, result })
         });
     }
 
@@ -834,7 +848,8 @@ impl App {
                 }
                 Err(e) => self.set_status(format!("Ошибка: {e}")),
             },
-            Msg::ListLoaded { name, shuffle, playlist, result } => match result {
+            Msg::ListLoaded { intent, .. } | Msg::WaveStarted { intent, .. } if intent != self.intent => {}
+            Msg::ListLoaded { name, shuffle, playlist, result, .. } => match result {
                 Ok(list) if list.is_empty() => self.set_status(format!("{name}: нет треков")),
                 Ok(mut list) => {
                     let name = if shuffle {
@@ -849,7 +864,7 @@ impl App {
                 }
                 Err(e) => self.set_status(format!("{name}: не удалось загрузить треки: {e}")),
             },
-            Msg::WaveStarted { station, name, result } => match result {
+            Msg::WaveStarted { station, name, result, .. } => match result {
                 Ok(b) => {
                     self.report_end(End::Skip);
                     let from = station.replace(':', "-");
@@ -1117,7 +1132,7 @@ impl App {
                 self.search_input.pop();
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.search_input.clear(),
-            KeyCode::Char(c) => self.search_input.push(c),
+            KeyCode::Char(c) if is_typed(&key) => self.search_input.push(c),
             _ => {}
         }
     }
@@ -1190,7 +1205,7 @@ impl App {
     }
 
     fn change_volume(&mut self, d: f64) {
-        self.volume = (self.volume + d).clamp(0.0, 130.0);
+        self.volume = (self.volume + d).clamp(0.0, MAX_VOLUME);
         self.player.set_volume(self.volume);
     }
 
@@ -1462,7 +1477,7 @@ impl App {
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.modal = Some(Modal::Rename { pl, input: String::new() });
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::Rename { pl, input });
                 }
@@ -1478,7 +1493,7 @@ impl App {
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.modal = Some(Modal::OpenLink { input: String::new() });
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::OpenLink { input });
                 }
@@ -1493,9 +1508,10 @@ impl App {
             return;
         };
         self.set_status(format!("Загрузка плейлиста «{}»…", pl.title));
+        let intent = self.new_intent();
         self.spawn(move |api| {
             let result = api.playlist_tracks(&pl).map_err(|e| format!("{e:#}"));
-            Some(Msg::ListLoaded { name: format!("Плейлист: {}", pl.title), shuffle, playlist: Some(pl.key()), result })
+            Some(Msg::ListLoaded { intent, name: format!("Плейлист: {}", pl.title), shuffle, playlist: Some(pl.key()), result })
         });
     }
 
@@ -1526,6 +1542,7 @@ impl App {
             Err(e) => return self.set_status(e),
         };
         self.set_status("Загрузка по ссылке…");
+        let intent = self.new_intent();
         self.spawn(move |api| {
             let titled = |kind: &str, r: anyhow::Result<(String, Vec<Track>)>| match r {
                 Ok((title, tracks)) => {
@@ -1539,7 +1556,7 @@ impl App {
                 Link::Album(id) => titled("Альбом", api.album_tracks(id)),
                 Link::Playlist { .. } | Link::PlaylistUuid(_) => titled("Плейлист", api.linked_playlist(&link)),
             };
-            Some(Msg::ListLoaded { name, shuffle: false, playlist: None, result })
+            Some(Msg::ListLoaded { intent, name, shuffle: false, playlist: None, result })
         });
     }
 
@@ -1554,9 +1571,10 @@ impl App {
             return;
         };
         self.set_status(format!("Загрузка треков: {name}…"));
+        let intent = self.new_intent();
         self.spawn(move |api| {
             let result = api.artist_tracks(&id).map_err(|e| format!("{e:#}"));
-            Some(Msg::ListLoaded { name: format!("Исполнитель: {name}"), shuffle: false, playlist: None, result })
+            Some(Msg::ListLoaded { intent, name: format!("Исполнитель: {name}"), shuffle: false, playlist: None, result })
         });
     }
 
@@ -1572,13 +1590,14 @@ impl App {
         };
         let fallback = t.album.clone();
         self.set_status(format!("Загрузка альбома: {fallback}…"));
+        let intent = self.new_intent();
         self.spawn(move |api| {
             let result = api.album_tracks(&id).map_err(|e| format!("{e:#}"));
             let name = match &result {
                 Ok((title, _)) if !title.is_empty() => format!("Альбом: {title}"),
                 _ => format!("Альбом: {fallback}"),
             };
-            Some(Msg::ListLoaded { name, shuffle: false, playlist: None, result: result.map(|(_, t)| t) })
+            Some(Msg::ListLoaded { intent, name, shuffle: false, playlist: None, result: result.map(|(_, t)| t) })
         });
     }
 
@@ -1596,7 +1615,7 @@ impl App {
     }
 
     pub fn save_volume(&self) -> u8 {
-        self.volume.clamp(0.0, 100.0) as u8
+        self.volume.clamp(0.0, MAX_VOLUME) as u8
     }
 }
 
@@ -1608,6 +1627,11 @@ fn shuffle_tracks(list: &mut [Track]) {
         seed ^= seed << 17;
         list.swap(i, (seed % (i as u64 + 1)) as usize);
     }
+}
+
+/// A key that types its character into a text field (not a Ctrl/Alt shortcut).
+fn is_typed(key: &KeyEvent) -> bool {
+    !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 /// Maps Russian (ЙЦУКЕН) layout characters to their QWERTY keys so hotkeys work on either layout.
@@ -1682,6 +1706,9 @@ mod tests {
         for c in ['д', 'а'] {
             app.on_key(key(KeyCode::Char(c)));
         }
+        // Ctrl/Alt shortcuts do not type their letter.
+        app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
         let Some(Modal::Rename { input, .. }) = &app.modal else { panic!("no rename") };
         assert_eq!(input, "P1да");
         app.on_key(key(KeyCode::Esc));
@@ -1911,5 +1938,51 @@ mod tests {
         assert_eq!(app.search_total, 290);
         app.move_sel(1000);
         assert!(!app.search_loading);
+    }
+
+    /// Replies to an older play request do not replace what the user started later.
+    #[test]
+    #[ignore]
+    fn stale_play_replies() {
+        use super::*;
+        use crate::api::Account;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let player = Player::spawn(tx.clone(), 0).expect("mpv");
+        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
+        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let list = |intent, name: &str, tracks| Msg::ListLoaded {
+            intent,
+            name: name.into(),
+            shuffle: false,
+            playlist: None,
+            result: Ok(tracks),
+        };
+
+        // `w`, then `A` before the wave replied: the late wave is dropped.
+        let wave = app.new_intent();
+        let album = app.new_intent();
+        let batch = WaveBatch { session_id: None, batch_id: "b".into(), tracks: vec![t("w")] };
+        app.on_msg(Msg::WaveStarted { intent: wave, station: MY_WAVE.into(), name: "Моя волна".into(), result: Ok(batch) });
+        assert!(app.wave.is_none());
+        app.on_msg(list(album, "Альбом", vec![t("a")]));
+        assert!(app.source == Source::List("Альбом".into()));
+
+        // A list started by hand drops a link that was still loading.
+        let link = app.new_intent();
+        app.play_list("Мне нравится", vec![t("c")], 0);
+        app.on_msg(list(link, "Трек по ссылке", vec![t("d")]));
+        assert_eq!(app.queue[0].id, "c");
     }
 }
