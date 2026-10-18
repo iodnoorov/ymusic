@@ -1,6 +1,6 @@
 [package]
 name = "ymusic-cli"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Terminal client for Yandex Music: My Wave, likes, stations"
