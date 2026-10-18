@@ -8,7 +8,7 @@ use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::mpsc::Sender;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub enum Msg {
     Player(PlayerEvent),
@@ -138,6 +138,9 @@ impl Setting {
 
 /// Loudest volume, % (mpv's default `volume-max`); kept between runs as is.
 const MAX_VOLUME: f64 = 130.0;
+/// A track normally starts within a few seconds. A bit longer than mpv's own network timeout
+/// (10 s), so that a connection mpv can detect as dead fails there first.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Fade lengths offered in the settings window, seconds (0 — off).
 pub const CROSSFADE_STEPS: [u8; 6] = [0, 3, 5, 8, 12, 15];
@@ -246,8 +249,10 @@ pub struct App {
     /// Next track already resolved and appended to mpv's playlist: (queue index, track id).
     preload: Option<(usize, String)>,
     preload_pending: bool,
-    /// Current track was started from the preloaded entry (its URL may have expired on error).
-    from_preload: bool,
+    /// mpv is loading the current track: if it has not started playing by then, it is restarted.
+    load_deadline: Option<Instant>,
+    /// The current track has already been restarted with a fresh link (after an error or a stall).
+    retried: bool,
 }
 
 impl App {
@@ -318,7 +323,8 @@ impl App {
             covers_loading: HashSet::new(),
             preload: None,
             preload_pending: false,
-            from_preload: false,
+            load_deadline: None,
+            retried: false,
         };
         app.set_stations(default_stations());
         if !app.account.has_plus {
@@ -524,7 +530,8 @@ impl App {
         self.loading_track = true;
         self.preload = None;
         self.preload_pending = false;
-        self.from_preload = preloaded;
+        self.load_deadline = preloaded.then(|| Instant::now() + LOAD_TIMEOUT);
+        self.retried = false;
         self.load_cover(track.cover.clone());
         self.maybe_extend_search_queue();
         if self.source == Source::Wave {
@@ -591,9 +598,11 @@ impl App {
                 w.pending_next = true;
             }
             self.fetch_more_wave();
+            self.load_deadline = None;
             self.player.stop();
             self.set_status("Загрузка следующих треков волны…");
         } else {
+            self.load_deadline = None;
             self.player.stop();
             self.pos = None;
             self.set_status("Очередь закончилась");
@@ -763,6 +772,7 @@ impl App {
                     self.time_pos = t;
                     if self.loading_track && t > 0.0 {
                         self.loading_track = false;
+                        self.load_deadline = None;
                         self.errors_in_row = 0;
                         self.schedule_preload();
                     }
@@ -797,7 +807,10 @@ impl App {
                     return;
                 }
                 match result {
-                    Ok(url) => self.player.load(&url),
+                    Ok(url) => {
+                        self.player.load(&url);
+                        self.load_deadline = Some(Instant::now() + LOAD_TIMEOUT);
+                    }
                     Err(e) => {
                         self.set_error(format!("Не удалось получить трек: {e}"));
                         self.on_track_error();
@@ -1042,13 +1055,33 @@ impl App {
         }
     }
 
+    /// Treats a track that has been loading for too long as failed (so it is restarted with a
+    /// fresh link once): a server that sends the headers and then stalls makes mpv reconnect
+    /// forever without an error, and switching away and back used to be the only cure.
+    pub fn tick(&mut self) {
+        let Some(deadline) = self.load_deadline else { return };
+        if self.paused {
+            // mpv does not start a paused track: count from the moment it is resumed.
+            self.load_deadline = Some(Instant::now() + LOAD_TIMEOUT);
+            return;
+        }
+        if Instant::now() < deadline {
+            return;
+        }
+        if self.retried {
+            self.set_error("Трек не загрузился: сервер не отвечает");
+        }
+        self.on_track_error();
+    }
+
     fn on_track_error(&mut self) {
-        // A preloaded link could have expired (e.g. after a long pause): retry with a fresh one.
-        if std::mem::take(&mut self.from_preload) {
-            if let Some(p) = self.pos {
-                self.play_index(p);
-                return;
-            }
+        self.load_deadline = None;
+        // The link could have expired (a preloaded one after a long pause) or the connection
+        // stalled: retry once with a fresh one.
+        if let Some(p) = self.pos.filter(|_| !self.retried) {
+            self.play_index(p);
+            self.retried = true;
+            return;
         }
         self.loading_track = false;
         self.errors_in_row += 1;
@@ -1956,7 +1989,7 @@ mod tests {
         // End of track: mpv moves on by itself, state follows without a new URL request.
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.pos, Some(1));
-        assert!(app.from_preload && app.preload.is_none());
+        assert!(!app.retried && app.preload.is_none());
         assert!(audio.take().is_empty());
 
         // Manual skip uses the preloaded entry too.
@@ -1969,7 +2002,59 @@ mod tests {
         // Error on a preloaded track retries the same track with a fresh URL.
         app.on_track_error();
         assert_eq!(app.pos, Some(2));
-        assert!(!app.from_preload);
+        assert!(app.retried);
+    }
+
+    #[test]
+    fn stalled_load() {
+        use super::*;
+        let (mut app, audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue = vec![t("a"), t("b")];
+        app.source = Source::List("test".into());
+        app.begin_track(0, false);
+        let past = || Some(Instant::now() - Duration::from_secs(1));
+        app.on_msg(Msg::Url { gen: app.gen, result: Ok("http://x/a".into()) });
+        assert_eq!(audio.take(), ["load http://x/a"]);
+
+        // Still loading while paused: the timer restarts instead of firing.
+        app.load_deadline = past();
+        app.paused = true;
+        app.tick();
+        assert!(app.load_deadline.is_some_and(|d| d > Instant::now()));
+        app.paused = false;
+
+        // First stall: the same track is requested again (fresh link).
+        let gen = app.gen;
+        app.load_deadline = past();
+        app.tick();
+        assert_eq!((app.pos, app.gen, app.retried), (Some(0), gen + 1, true));
+        assert!(!app.status_error);
+        assert!(app.load_deadline.is_none());
+
+        // Second stall: an error, then the next track.
+        app.on_msg(Msg::Url { gen: app.gen, result: Ok("http://x/a2".into()) });
+        app.load_deadline = past();
+        app.tick();
+        assert_eq!(app.pos, Some(1));
+        assert!(app.status_error);
+        assert!(!app.retried && app.load_deadline.is_none());
+
+        // Once playback starts, the watchdog is off.
+        app.on_msg(Msg::Url { gen: app.gen, result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
+        assert!(app.load_deadline.is_none());
     }
 
     #[test]

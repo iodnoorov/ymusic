@@ -127,6 +127,8 @@ impl Player {
                 // A whole track fits; the default (150 MiB) is far more than music needs.
                 "--demuxer-max-bytes=24MiB",
                 "--demuxer-max-back-bytes=8MiB",
+                // A stalled connection is dropped (and reopened) after 10 s of silence instead of 60.
+                "--network-timeout=10",
             ])
             .arg(format!("--volume={volume}"))
             .arg(format!("--input-ipc-server={}", sock.display()))

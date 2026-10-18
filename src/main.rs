@@ -136,6 +136,7 @@ fn main() -> Result<()> {
                 dirty |= !matches!(m, app::Msg::Player(player::PlayerEvent::TimePos(_)));
                 app.on_msg(m);
             }
+            app.tick();
         }
         Ok(())
     })();
