@@ -1,7 +1,7 @@
 //! Application state and logic.
 
 use crate::api::{default_stations, iso_now, Account, Api, Link, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
-use crate::player::{Player, PlayerEvent};
+use crate::player::{Audio, PlayerEvent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -144,7 +144,9 @@ pub enum StationRow {
 pub struct App {
     pub api: Api,
     tx: Sender<Msg>,
-    player: Player,
+    player: Box<dyn Audio>,
+    /// Tests: background jobs (network requests) are not run.
+    offline: bool,
     pub account: Account,
     pub tab: Tab,
     pub quit: bool,
@@ -237,11 +239,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(api: Api, account: Account, tx: Sender<Msg>, player: Player, volume: u8) -> App {
+    pub fn new(api: Api, account: Account, tx: Sender<Msg>, player: Box<dyn Audio>, volume: u8) -> App {
         let mut app = App {
             api,
             tx,
             player,
+            offline: false,
             account,
             tab: Tab::Wave,
             quit: false,
@@ -303,14 +306,31 @@ impl App {
             from_preload: false,
         };
         app.set_stations(default_stations());
-        app.load_liked();
-        app.load_stations();
-        app.load_playlists();
-        app.load_account_settings();
         if !app.account.has_plus {
             app.set_status("Внимание: без подписки Плюс доступны только 30-секундные фрагменты");
         }
         app
+    }
+
+    /// Starts the initial loads: likes, stations, playlists, account settings.
+    pub fn start(&mut self) {
+        self.load_liked();
+        self.load_stations();
+        self.load_playlists();
+        self.load_account_settings();
+    }
+
+    /// An app for tests: playback commands go to a recorder, no requests are made.
+    #[cfg(test)]
+    pub fn for_test() -> (App, crate::player::FakeAudio) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let audio = crate::player::FakeAudio::default();
+        let acc = Account { uid: "1".into(), login: "tester".into(), name: "Tester".into(), has_plus: true };
+        let mut api = Api::new("x");
+        api.uid = "1".into();
+        let mut app = App::new(api, acc, tx, Box::new(audio.clone()), 50);
+        app.offline = true;
+        (app, audio)
     }
 
     // ------------------------------------------------------------ helpers
@@ -339,6 +359,9 @@ impl App {
     where
         F: FnOnce(Api) -> Option<Msg> + Send + 'static,
     {
+        if self.offline {
+            return;
+        }
         let api = self.api.clone();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -1675,19 +1698,12 @@ mod tests {
         assert_eq!(super::ru_to_en('x'), 'x');
     }
 
-    /// Keys inside pop-up dialogs (uses a real mpv). Run with `cargo test -- --ignored`.
+    /// Keys inside pop-up dialogs.
     #[test]
-    #[ignore]
     fn modal_keys() {
         use super::*;
-        use crate::api::Account;
         use ratatui::crossterm::event::KeyEvent;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = Player::spawn(tx.clone(), 0).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut api = Api::new("x");
-        api.uid = "1".into();
-        let mut app = App::new(api, acc, tx, player, 0);
+        let (mut app, _audio) = App::for_test();
         let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
         let pl = |k: &str, owner: &str| Playlist { owner: owner.into(), kind: k.into(), title: format!("P{k}"), track_count: 0 };
         app.playlists = vec![pl("1", "1"), pl("2", "999"), pl("3", "1")];
@@ -1839,16 +1855,11 @@ mod tests {
         assert!(app.logout && app.quit);
     }
 
-    /// Preload state machine (uses a real mpv). Run with `cargo test -- --ignored`.
+    /// Preload state machine.
     #[test]
-    #[ignore]
     fn preload_flow() {
         use super::*;
-        use crate::api::Account;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = Player::spawn(tx.clone(), 0).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let (mut app, audio) = App::for_test();
         let t = |id: &str| Track {
             id: id.into(),
             album_id: None,
@@ -1865,24 +1876,29 @@ mod tests {
         app.source = Source::List("test".into());
         app.begin_track(0, false);
         app.loading_track = false;
+        audio.take();
 
         // Stale response (older generation) is ignored.
         app.on_msg(Msg::Preload { gen: app.gen - 1, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
         assert!(app.preload.is_none());
+        assert!(audio.take().is_empty());
         // Fresh response is appended.
         app.on_msg(Msg::Preload { gen: app.gen, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
         assert_eq!(app.preload, Some((1, "b".to_string())));
+        assert_eq!(audio.take(), ["append http://x/b"]);
 
         // End of track: mpv moves on by itself, state follows without a new URL request.
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.pos, Some(1));
         assert!(app.from_preload && app.preload.is_none());
+        assert!(audio.take().is_empty());
 
         // Manual skip uses the preloaded entry too.
         app.loading_track = false;
         app.on_msg(Msg::Preload { gen: app.gen, idx: 2, id: "c".into(), result: Ok("http://x/c".into()) });
         app.next(End::Skip);
         assert_eq!(app.pos, Some(2));
+        assert_eq!(audio.take(), ["append http://x/c", "next"]);
 
         // Error on a preloaded track retries the same track with a fresh URL.
         app.on_track_error();
@@ -1891,14 +1907,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn search_paging() {
         use super::*;
-        use crate::api::Account;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = Player::spawn(tx.clone(), 0).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let (mut app, _audio) = App::for_test();
         let t = |id: usize| Track {
             id: id.to_string(),
             album_id: None,
@@ -1964,14 +1975,9 @@ mod tests {
 
     /// Pasted text goes into the open field; on the main screen only a Yandex Music link is taken.
     #[test]
-    #[ignore]
     fn paste() {
         use super::*;
-        use crate::api::Account;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = Player::spawn(tx.clone(), 0).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let (mut app, _audio) = App::for_test();
         let link = "https://music.yandex.ru/album/9/track/123";
 
         // Not a hotkey stream: `q` in the text does not quit.
@@ -1991,14 +1997,9 @@ mod tests {
 
     /// Replies to an older play request do not replace what the user started later.
     #[test]
-    #[ignore]
     fn stale_play_replies() {
         use super::*;
-        use crate::api::Account;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = Player::spawn(tx.clone(), 0).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 0);
+        let (mut app, _audio) = App::for_test();
         let t = |id: &str| Track {
             id: id.into(),
             album_id: None,

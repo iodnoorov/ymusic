@@ -44,6 +44,25 @@ fn fade_filter(fade: f64, duration: f64) -> String {
     format!("@fade:lavfi=[volume=volume='{expr}':eval=frame]")
 }
 
+/// Playback commands the app sends; mpv in the program, a recorder in tests.
+pub trait Audio {
+    fn load(&mut self, url: &str);
+    /// Appends a URL to the playlist: it is prefetched and played after the current one.
+    fn append(&mut self, url: &str);
+    fn playlist_next(&mut self);
+    fn toggle_pause(&mut self);
+    fn toggle_mute(&mut self);
+    fn seek(&mut self, secs: f64);
+    fn set_volume(&mut self, v: f64);
+    /// Sets the equalizer filter (empty string removes it).
+    fn set_eq_filter(&mut self, af: &str);
+    /// Sets the fade length in seconds (0 — off).
+    fn set_fade(&mut self, secs: f64);
+    /// Duration of the track that has just started: the fade-out is placed before its end.
+    fn set_track_duration(&mut self, secs: f64);
+    fn stop(&mut self);
+}
+
 /// Extra mpv options from `YMUSIC_MPV_ARGS` (split on whitespace) and a log file from `YMUSIC_MPV_LOG`.
 fn user_args() -> Vec<String> {
     let mut args: Vec<String> =
@@ -177,51 +196,55 @@ impl Player {
         let _ = writeln!(self.stream, "{}", json!({ "command": args }));
     }
 
-    pub fn load(&mut self, url: &str) {
+    fn apply_filters(&mut self) {
+        let fade = fade_filter(self.fade, self.duration);
+        let af = [fade.as_str(), self.eq.as_str()].into_iter().filter(|f| !f.is_empty()).collect::<Vec<_>>().join(",");
+        self.cmd(json!(["set_property", "af", af]));
+    }
+}
+
+impl Audio for Player {
+    fn load(&mut self, url: &str) {
         self.cmd(json!(["loadfile", url, "replace"]));
         self.cmd(json!(["set_property", "pause", false]));
     }
 
-    /// Appends a URL to mpv's playlist (it is prefetched and played after the current one).
-    pub fn append(&mut self, url: &str) {
+    fn append(&mut self, url: &str) {
         self.cmd(json!(["loadfile", url, "append"]));
     }
 
-    pub fn playlist_next(&mut self) {
+    fn playlist_next(&mut self) {
         self.cmd(json!(["playlist-next", "force"]));
         self.cmd(json!(["set_property", "pause", false]));
     }
 
-    pub fn toggle_pause(&mut self) {
+    fn toggle_pause(&mut self) {
         self.cmd(json!(["cycle", "pause"]));
     }
 
-    pub fn toggle_mute(&mut self) {
+    fn toggle_mute(&mut self) {
         self.cmd(json!(["cycle", "mute"]));
     }
 
-    pub fn seek(&mut self, secs: f64) {
+    fn seek(&mut self, secs: f64) {
         self.cmd(json!(["seek", secs, "relative"]));
     }
 
-    pub fn set_volume(&mut self, v: f64) {
+    fn set_volume(&mut self, v: f64) {
         self.cmd(json!(["set_property", "volume", v]));
     }
 
-    /// Sets the equalizer filter (empty string removes it).
-    pub fn set_eq_filter(&mut self, af: &str) {
+    fn set_eq_filter(&mut self, af: &str) {
         self.eq = af.to_string();
         self.apply_filters();
     }
 
-    /// Sets the fade length in seconds (0 — off).
-    pub fn set_fade(&mut self, secs: f64) {
+    fn set_fade(&mut self, secs: f64) {
         self.fade = secs.max(0.0);
         self.apply_filters();
     }
 
-    /// Duration of the track mpv has just started: the fade-out is placed before its end.
-    pub fn set_track_duration(&mut self, secs: f64) {
+    fn set_track_duration(&mut self, secs: f64) {
         // Changing the chain re-creates the filters, so skip insignificant duration refinements.
         if (secs - self.duration).abs() > 0.5 {
             self.duration = secs;
@@ -231,13 +254,7 @@ impl Player {
         }
     }
 
-    fn apply_filters(&mut self) {
-        let fade = fade_filter(self.fade, self.duration);
-        let af = [fade.as_str(), self.eq.as_str()].into_iter().filter(|f| !f.is_empty()).collect::<Vec<_>>().join(",");
-        self.cmd(json!(["set_property", "af", af]));
-    }
-
-    pub fn stop(&mut self) {
+    fn stop(&mut self) {
         self.cmd(json!(["stop"]));
     }
 }
@@ -249,6 +266,60 @@ impl Drop for Player {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.sock);
+    }
+}
+
+/// Records the commands instead of playing them (tests run without mpv).
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct FakeAudio(pub std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+#[cfg(test)]
+impl FakeAudio {
+    fn push(&self, cmd: String) {
+        self.0.borrow_mut().push(cmd);
+    }
+
+    /// Commands recorded so far; the log is cleared.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
+}
+
+#[cfg(test)]
+impl Audio for FakeAudio {
+    fn load(&mut self, url: &str) {
+        self.push(format!("load {url}"));
+    }
+    fn append(&mut self, url: &str) {
+        self.push(format!("append {url}"));
+    }
+    fn playlist_next(&mut self) {
+        self.push("next".into());
+    }
+    fn toggle_pause(&mut self) {
+        self.push("pause".into());
+    }
+    fn toggle_mute(&mut self) {
+        self.push("mute".into());
+    }
+    fn seek(&mut self, secs: f64) {
+        self.push(format!("seek {secs}"));
+    }
+    fn set_volume(&mut self, v: f64) {
+        self.push(format!("volume {v}"));
+    }
+    fn set_eq_filter(&mut self, af: &str) {
+        self.push(format!("eq {af}"));
+    }
+    fn set_fade(&mut self, secs: f64) {
+        self.push(format!("fade {secs}"));
+    }
+    fn set_track_duration(&mut self, secs: f64) {
+        self.push(format!("duration {secs}"));
+    }
+    fn stop(&mut self) {
+        self.push("stop".into());
     }
 }
 

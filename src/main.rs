@@ -76,7 +76,8 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
     let player = player::Player::spawn(tx.clone(), cfg.volume)?;
-    let mut app = app::App::new(api, account, tx, player, cfg.volume);
+    let mut app = app::App::new(api, account, tx, Box::new(player), cfg.volume);
+    app.start();
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value

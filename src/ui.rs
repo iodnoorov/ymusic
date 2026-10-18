@@ -1179,18 +1179,14 @@ fn draw_modal(f: &mut Frame, app: &App) {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::{Account, Api, Track};
+    use crate::api::Track;
     use crate::app::{App, Tab};
     use ratatui::{backend::TestBackend, Terminal};
 
-    /// Renders every tab with a real mpv instance. Run with `cargo test -- --ignored --nocapture`.
+    /// Renders every tab.
     #[test]
-    #[ignore]
     fn render_smoke() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = crate::player::Player::spawn(tx.clone(), 50).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "tester".into(), name: "Tester".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 50);
+        let (mut app, _audio) = App::for_test();
         let t = Track {
             id: "1".into(),
             album_id: Some("2".into()),
@@ -1342,13 +1338,9 @@ mod tests {
     /// Kitty protocol: the cover is sent to the terminal again after switching back to
     /// an earlier track and after a resize, not only placeholders for an old image id.
     #[test]
-    #[ignore]
     fn cover_retransmit() {
         use ratatui_image::picker::{Picker, ProtocolType};
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = crate::player::Player::spawn(tx.clone(), 50).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 50);
+        let (mut app, _audio) = App::for_test();
         let mut picker = Picker::from_fontsize((10, 20));
         picker.set_protocol_type(ProtocolType::Kitty);
         app.picker = Some(picker);
@@ -1390,10 +1382,7 @@ mod tests {
     #[ignore]
     fn cover_render() {
         use ratatui_image::picker::{Picker, ProtocolType};
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let player = crate::player::Player::spawn(tx.clone(), 50).expect("mpv");
-        let acc = Account { uid: "1".into(), login: "t".into(), name: "T".into(), has_plus: true };
-        let mut app = App::new(Api::new("x"), acc, tx, player, 50);
+        let (mut app, _audio) = App::for_test();
         let url = crate::api::cover_url("avatars.yandex.net/get-music-misc/34161/rotor-genre-pop-icon/%%");
         let img = app.api.fetch_image(&url).unwrap();
         for proto in [ProtocolType::Sixel, ProtocolType::Halfblocks, ProtocolType::Kitty] {
