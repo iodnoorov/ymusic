@@ -560,16 +560,16 @@ impl Api {
     /// filtered out by the server.
     pub fn liked(&self) -> Result<(Vec<String>, Option<Vec<Track>>)> {
         if self.web {
-            // The website reads «Мне нравится» as the user's playlist 3, with full track objects.
+            // The website reads «Мне нравится» as the user's playlist 3. Only ids are asked for: with
+            // track objects a large library is several megabytes in one answer, and the server drops
+            // a slow reader (seen on a Raspberry Pi). Pages are no way out: they repeat some tracks.
             let r = self.get(
                 &format!("/users/{}/playlists/3", self.uid),
-                &[("trackMetaType", "music"), ("resumeStream", "false")],
+                &[("trackMetaType", "music"), ("resumeStream", "false"), ("richTracks", "false")],
             )?;
-            let items = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
-            let ids = items.iter().filter_map(item_full_id).collect();
+            let ids: Vec<String> = r["tracks"].as_array().into_iter().flatten().filter_map(item_full_id).collect();
             // Tracks removed from the catalog stay in the list there; the mobile API leaves them out.
-            let tracks =
-                items.iter().filter_map(|t| Track::from_json(&t["track"])).filter(|t| t.available).collect();
+            let tracks = self.tracks(&ids)?.into_iter().filter(|t| t.available).collect();
             return Ok((ids, Some(tracks)));
         }
         let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[("trackMetaType", "music")])?;
