@@ -17,7 +17,7 @@ pub enum Msg {
     Liked(Result<Vec<Track>, String>),
     Stations(Vec<Station>),
     /// Page `page` of the search for `query`: (tracks, total found).
-    Search { query: String, page: usize, result: Result<(Vec<Track>, usize), String> },
+    Search { query: String, page: usize, result: Result<(Vec<Track>, Option<usize>), String> },
     Playlists { req: u64, result: Result<Vec<Playlist>, String> },
     PlaylistOpened { key: String, req: u64, result: Result<Vec<Track>, String> },
     /// Result of renaming a playlist or changing its tracks: status text on success.
@@ -123,6 +123,7 @@ pub enum Setting {
     Crossfade,
     FinishTrack,
     LessAi,
+    Api,
     Covers,
     Icons,
     About,
@@ -130,12 +131,13 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 9] = [
+    pub const ALL: [Setting; 10] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
         Setting::FinishTrack,
         Setting::LessAi,
+        Setting::Api,
         Setting::Covers,
         Setting::Icons,
         Setting::About,
@@ -204,10 +206,11 @@ pub struct App {
     pub search_editing: bool,
     pub search_results: Vec<Track>,
     pub search_loading: bool,
-    /// Last submitted query, pages loaded so far and the total number of found tracks.
+    /// Last submitted query, pages loaded so far and the total number of found tracks
+    /// (`None`: not known yet, the website API tells it only on the last page).
     search_query: String,
     search_pages: usize,
-    pub search_total: usize,
+    pub search_total: Option<usize>,
     /// The queue is played from the current search (`Some(shuffled)`): pages loaded later are
     /// appended to it, and playing close to its end loads the next page.
     search_queue: Option<bool>,
@@ -313,7 +316,7 @@ impl App {
             search_loading: false,
             search_query: String::new(),
             search_pages: 0,
-            search_total: 0,
+            search_total: None,
             search_queue: None,
             search_state: TableState::default(),
             playlists: Vec::new(),
@@ -416,7 +419,8 @@ impl App {
         if self.offline {
             return;
         }
-        let api = self.api.clone();
+        let mut api = self.api.clone();
+        api.less_ai = self.less_ai == Some(true);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             if let Some(m) = f(api) {
@@ -443,6 +447,15 @@ impl App {
 
     // ------------------------------------------------------------ loading
 
+    /// Loads all lists again (`R`, switching the API).
+    fn reload_all(&mut self) {
+        self.load_liked();
+        self.load_stations();
+        self.load_playlists();
+        self.load_account_settings();
+        self.reload_open_playlist();
+    }
+
     /// A load already under way is not repeated (holding `R` would start one per key repeat).
     fn load_liked(&mut self) {
         if self.liked_loading {
@@ -451,12 +464,16 @@ impl App {
         self.liked_loading = true;
         let tx = self.tx.clone();
         self.spawn(move |api| {
-            let ids = match api.liked_ids() {
-                Ok(ids) => ids,
+            let (ids, tracks) = match api.liked() {
+                Ok(r) => r,
                 Err(e) => return Some(Msg::Liked(Err(format!("{e:#}")))),
             };
             let _ = tx.send(Msg::LikedIds(ids.clone()));
-            Some(Msg::Liked(api.tracks(&ids).map_err(|e| format!("{e:#}"))))
+            let tracks = match tracks {
+                Some(t) => Ok(t),
+                None => api.tracks(&ids),
+            };
+            Some(Msg::Liked(tracks.map_err(|e| format!("{e:#}"))))
         });
     }
 
@@ -726,14 +743,9 @@ impl App {
         let name = station.name.clone();
         self.set_status(format!("Запуск: {name}…"));
         let settings = station.settings;
-        let is_my_wave = station.id == MY_WAVE;
         let id = station.id.clone();
         self.spawn(move |api| {
-            if is_my_wave {
-                let (mood, div) = settings.unwrap_or(("all", "default"));
-                let _ = api.wave_settings(mood, div);
-            }
-            let result = api.wave_start(&id).map_err(|e| format!("{e:#}"));
+            let result = api.wave_start(&id, settings).map_err(|e| format!("{e:#}"));
             Some(Msg::WaveStarted { intent, station: id, name, result })
         });
     }
@@ -950,7 +962,7 @@ impl App {
                         let new: Vec<Track> = list.into_iter().filter(|t| !seen.contains(t.id.as_str())).collect();
                         if new.is_empty() && page > 0 {
                             // Nothing new: stop asking for more pages.
-                            self.search_total = self.search_results.len();
+                            self.search_total = Some(self.search_results.len());
                         }
                         if let Some(shuffled) = self.search_queue {
                             let queued: HashSet<&str> = self.queue.iter().map(|t| t.id.as_str()).collect();
@@ -1267,11 +1279,7 @@ impl App {
             KeyCode::Esc | KeyCode::Backspace if self.tab == Tab::Playlists => self.open_playlist = None,
             KeyCode::Char('s') => self.shuffle_play(),
             KeyCode::Char('R') => {
-                self.load_liked();
-                self.load_stations();
-                self.load_playlists();
-                self.load_account_settings();
-                self.reload_open_playlist();
+                self.reload_all();
                 self.set_status("Обновление…");
             }
             KeyCode::Left => self.player.seek(-10.0),
@@ -1314,7 +1322,7 @@ impl App {
 
     /// The current search has pages that are not loaded yet and none is loading now.
     fn can_load_more_search(&self) -> bool {
-        !self.search_loading && self.search_pages > 0 && self.search_results.len() < self.search_total
+        !self.search_loading && self.search_pages > 0 && self.search_total.is_none_or(|t| self.search_results.len() < t)
     }
 
     /// Loads the next search page when the queue played from the search is close to its end.
@@ -1351,7 +1359,7 @@ impl App {
                     self.search_queue = None;
                     self.search_query = q;
                     self.search_pages = 0;
-                    self.search_total = 0;
+                    self.search_total = None;
                     self.load_search_page();
                 }
             }
@@ -1404,6 +1412,7 @@ impl App {
                 None => "…".to_string(),
             },
             Setting::FinishTrack => if self.finish_track { "вкл" } else { "выкл" }.to_string(),
+            Setting::Api => if self.api.web { "сайт" } else { "мобильный" }.to_string(),
             Setting::Covers => if self.show_covers { "вкл" } else { "выкл" }.to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::About | Setting::Logout => return None,
@@ -1440,6 +1449,11 @@ impl App {
                 None => self.set_status("Настройки аккаунта ещё загружаются"),
             },
             Setting::FinishTrack => self.finish_track = !self.finish_track,
+            Setting::Api => {
+                self.api.web = !self.api.web;
+                self.reload_all();
+                self.set_status(format!("API: {} · списки обновляются…", if self.api.web { "сайт" } else { "мобильный" }));
+            }
             Setting::Covers => self.set_show_covers(!self.show_covers),
             Setting::Icons => self.set_icons(!self.icons),
             Setting::About | Setting::Logout => {}
@@ -2031,6 +2045,15 @@ mod tests {
         app.on_msg(Msg::LessAiSet { on: true, result: Ok(()) });
         assert_eq!(app.less_ai, Some(true));
 
+        // API: switched at once, both ways.
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.setting_value(Setting::Api).as_deref(), Some("мобильный"));
+        app.on_key(key(KeyCode::Right));
+        assert!(app.api.web);
+        assert_eq!(app.setting_value(Setting::Api).as_deref(), Some("сайт"));
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.api.web);
+
         // Covers off: the shown one is dropped and new ones are not downloaded.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
@@ -2056,14 +2079,14 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 7 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 8 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 8 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 9 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
@@ -2276,8 +2299,8 @@ mod tests {
         app.tab = Tab::Search;
         app.search_query = "q".into();
         app.search_loading = true;
-        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(0..100), 250)) });
-        assert_eq!((app.search_results.len(), app.search_total, app.search_loading), (100, 250, false));
+        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(0..100), Some(250))) });
+        assert_eq!((app.search_results.len(), app.search_total, app.search_loading), (100, Some(250), false));
 
         // Far from the end: nothing more is requested.
         app.move_sel(10);
@@ -2287,29 +2310,29 @@ mod tests {
         assert!(app.search_loading);
 
         // Replies to another query or page are ignored.
-        app.on_msg(Msg::Search { query: "old".into(), page: 1, result: Ok((page(500..600), 900)) });
-        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(500..600), 900)) });
+        app.on_msg(Msg::Search { query: "old".into(), page: 1, result: Ok((page(500..600), Some(900))) });
+        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(500..600), Some(900))) });
         assert_eq!(app.search_results.len(), 100);
 
         // Overlapping tracks are not duplicated; selection stays in place.
-        app.on_msg(Msg::Search { query: "q".into(), page: 1, result: Ok((page(90..190), 250)) });
+        app.on_msg(Msg::Search { query: "q".into(), page: 1, result: Ok((page(90..190), Some(250))) });
         assert_eq!(app.search_results.len(), 190);
         assert_eq!(app.search_state.selected(), Some(85));
 
         // Playing from the search: later pages go to the queue, playing near its end loads more.
-        app.search_total = 400;
+        app.search_total = Some(400);
         app.search_state.select(Some(0));
         app.activate();
         assert_eq!((app.queue.len(), app.pos, app.search_loading), (190, Some(0), false));
         app.begin_track(175, false);
         assert!(app.search_loading);
-        app.on_msg(Msg::Search { query: "q".into(), page: 2, result: Ok((page(180..290), 400)) });
+        app.on_msg(Msg::Search { query: "q".into(), page: 2, result: Ok((page(180..290), Some(400))) });
         assert_eq!((app.search_results.len(), app.queue.len()), (290, 290));
         assert_eq!(app.queue[289].id, "289");
         // A new search does not touch the playing queue.
         app.search_input = "new".into();
         app.on_search_key(KeyEvent::from(KeyCode::Enter));
-        app.on_msg(Msg::Search { query: "new".into(), page: 0, result: Ok((page(1000..1100), 900)) });
+        app.on_msg(Msg::Search { query: "new".into(), page: 0, result: Ok((page(1000..1100), Some(900))) });
         assert_eq!(app.queue.len(), 290);
         app.search_query = "q".into();
         app.search_pages = 3;
@@ -2317,8 +2340,20 @@ mod tests {
 
         // A page without new tracks ends the paging.
         app.search_loading = true;
-        app.on_msg(Msg::Search { query: "q".into(), page: 3, result: Ok((page(0..100), 400)) });
-        assert_eq!(app.search_total, 290);
+        app.on_msg(Msg::Search { query: "q".into(), page: 3, result: Ok((page(0..100), Some(400))) });
+        assert_eq!(app.search_total, Some(290));
+        app.move_sel(1000);
+        assert!(!app.search_loading);
+
+        // The website API does not count the results: pages are loaded until the last one.
+        app.search_input = "web".into();
+        app.on_search_key(KeyEvent::from(KeyCode::Enter));
+        app.on_msg(Msg::Search { query: "web".into(), page: 0, result: Ok((page(0..100), None)) });
+        assert_eq!(app.search_total, None);
+        app.move_sel(1000);
+        assert!(app.search_loading);
+        app.on_msg(Msg::Search { query: "web".into(), page: 1, result: Ok((page(100..130), Some(130))) });
+        assert_eq!((app.search_results.len(), app.search_total), (130, Some(130)));
         app.move_sel(1000);
         assert!(!app.search_loading);
     }

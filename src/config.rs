@@ -27,6 +27,9 @@ pub struct Config {
     /// A new list starts after the current track instead of cutting it off.
     #[serde(default)]
     pub finish_track: bool,
+    /// Requests go to the API of the music.yandex.ru website instead of the mobile one.
+    #[serde(default)]
+    pub web_api: bool,
 }
 
 /// Longest allowed fade-in/fade-out, seconds.
@@ -51,6 +54,7 @@ impl Default for Config {
             quality: String::new(),
             crossfade: 0,
             finish_track: false,
+            web_api: false,
         }
     }
 }

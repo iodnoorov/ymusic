@@ -64,6 +64,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Whoami) => {
             let mut api = api::Api::new(&token(&mut cfg)?);
+            api.web = cfg.web_api;
             let a = api.account_status()?;
             println!("{} ({}) uid={} Плюс: {}", a.name, a.login, a.uid, if a.has_plus { "да" } else { "нет" });
             return Ok(());
@@ -73,6 +74,7 @@ fn main() -> Result<()> {
 
     let token = token(&mut cfg)?;
     let mut api = api::Api::new(&token);
+    api.web = cfg.web_api;
     let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
@@ -219,6 +221,7 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
         || cfg.crossfade != app.crossfade
         || cfg.covers != app.show_covers
         || cfg.finish_track != app.finish_track
+        || cfg.web_api != app.api.web
         || cfg.icons != icons;
     cfg.volume = volume;
     cfg.eq = eq.to_string();
@@ -226,6 +229,7 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
     cfg.crossfade = app.crossfade;
     cfg.covers = app.show_covers;
     cfg.finish_track = app.finish_track;
+    cfg.web_api = app.api.web;
     cfg.icons = icons;
     changed
 }

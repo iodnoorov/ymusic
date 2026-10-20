@@ -616,11 +616,16 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         input,
     );
     let shown = app.search_results.len();
+    // Without a known total (the website API) «+» tells that more pages follow.
+    let of = match app.search_total {
+        Some(total) if total > shown => format!(" из {total}"),
+        Some(_) => String::new(),
+        None => "+".to_string(),
+    };
     let title = match (app.search_loading, shown) {
         (true, 0) => format!("Результаты · {}", spinner(app.tick)),
-        (true, _) => format!("Результаты · {shown} из {} {}", app.search_total, spinner(app.tick)),
-        (false, _) if app.search_total > shown => format!("Результаты · {shown} из {}", app.search_total),
-        (false, _) => format!("Результаты · {shown}"),
+        (true, _) => format!("Результаты · {shown}{of} {}", spinner(app.tick)),
+        (false, _) => format!("Результаты · {shown}{of}"),
     };
     let current = app.current().map(|c| c.id.clone());
     let playing = current.and_then(|id| app.search_results.iter().position(|t| t.id == id));
@@ -1026,6 +1031,7 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Crossfade => "Плавные переходы",
         Setting::FinishTrack => "Доигрывать трек",
         Setting::LessAi => "Меньше ИИ-музыки",
+        Setting::Api => "API",
         Setting::Covers => "Обложка трека",
         Setting::Icons => "Иконки Nerd Font",
         Setting::About => "О программе",
@@ -1041,6 +1047,7 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Crossfade => "Затухание в конце трека и нарастание в начале".into(),
         Setting::FinishTrack => "Новый список начнётся после текущего трека".into(),
         Setting::LessAi => "Реже ИИ-треки в рекомендациях · настройка аккаунта".into(),
+        Setting::Api => "Запасной вариант — API сайта music.yandex.ru".into(),
         Setting::Covers => "Обложка альбома в панели «Сейчас играет»".into(),
         Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
         Setting::About => "Версия и ссылки на проект".into(),

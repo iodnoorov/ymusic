@@ -34,11 +34,16 @@ fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -
 /// OAuth application of the official Yandex Music Android client.
 pub const CLIENT_ID: &str = "23cabbbdc6cd418abb4b39c32c41195d";
 
+/// API of the mobile apps.
 const BASE: &str = "https://api.music.yandex.net";
+/// API of the music.yandex.ru website: the same server data, its own client id and some methods of its own.
+const WEB_BASE: &str = "https://api.music.yandex.ru";
 /// Tracks per search request (the API returns 20 by default and accepts up to 300).
 pub const SEARCH_PAGE: usize = 100;
 const MD5_SALT: &str = "XGRlBW9FXlekgbPrRHuSiA";
 const FILE_INFO_KEY: &str = "p93jhgh689SBReK6ghtw62";
+/// `get-file-info` signing key of the website (`player.secretKey.web` in its JS bundle).
+const WEB_FILE_INFO_KEY: &str = "7tvSmFbyf5hJnIHhCimDDD";
 pub const MY_WAVE: &str = "user:onyourwave";
 
 pub struct Quality {
@@ -186,6 +191,15 @@ fn id_str(v: &Value) -> Option<String> {
     }
 }
 
+/// Full id (`track:album`, or just `track` without an album) of a list item `{id, albumId}`.
+fn item_full_id(t: &Value) -> Option<String> {
+    let id = id_str(&t["id"])?;
+    Some(match id_str(&t["albumId"]) {
+        Some(a) => format!("{id}:{a}"),
+        None => id,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct Station {
     pub id: String,
@@ -232,6 +246,10 @@ pub struct Api {
     agent: ureq::Agent,
     token: String,
     pub uid: String,
+    /// Requests go to the website API (`WEB_BASE`) instead of the mobile one.
+    pub web: bool,
+    /// «Меньше ИИ-музыки» is on: the website asks for wave sessions with fewer AI tracks.
+    pub less_ai: bool,
 }
 
 fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
@@ -246,6 +264,9 @@ fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
                         .as_str()
                         .or(v["error"]["name"].as_str())
                         .or(v["error"].as_str())
+                        // The website API: `{name, message}` without a wrapper.
+                        .or(v["message"].as_str())
+                        .or(v["name"].as_str())
                         .map(String::from)
                 })
                 .unwrap_or_else(|| body.chars().take(200).collect());
@@ -265,40 +286,79 @@ impl Api {
             .timeout(Duration::from_secs(30))
             .user_agent("Yandex-Music-API")
             .build();
-        Api { agent, token: token.to_string(), uid: String::new() }
+        Api { agent, token: token.to_string(), uid: String::new(), web: false, less_ai: false }
     }
 
-    fn req(&self, method: &str, path: &str) -> ureq::Request {
-        self.agent
-            .request(method, &format!("{BASE}{path}"))
+    fn req(&self, method: &str, path: &str, query: &[(&str, &str)]) -> ureq::Request {
+        let mut r = self
+            .agent
+            .request(method, &format!("{}{path}", if self.web { WEB_BASE } else { BASE }))
             .set("Authorization", &format!("OAuth {}", self.token))
-            .set("X-Yandex-Music-Client", "YandexMusicAndroid/24023621")
-            .set("Accept-Language", "ru")
+            .set("Accept-Language", "ru");
+        if self.web {
+            r = r
+                .set("X-Yandex-Music-Client", "YandexMusicWebNext/1.0.0")
+                .set("X-Yandex-Music-Without-Invocation-Info", "1")
+                .set("Origin", "https://music.yandex.ru");
+            if !self.uid.is_empty() {
+                r = r.set("X-Yandex-Music-Multi-Auth-User-Id", &self.uid);
+            }
+        } else {
+            r = r.set("X-Yandex-Music-Client", "YandexMusicAndroid/24023621");
+        }
+        for (k, v) in query {
+            r = r.query(k, v);
+        }
+        r
+    }
+
+    /// The answer itself: the mobile API wraps it in `{invocationInfo, result}`, the website API
+    /// (asked with `X-Yandex-Music-Without-Invocation-Info`) does not.
+    fn result(&self, r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
+        let mut v = handle(r)?;
+        Ok(if self.web { v } else { v["result"].take() })
     }
 
     fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        let mut r = self.req("GET", path);
-        for (k, v) in query {
-            r = r.query(k, v);
-        }
-        Ok(handle(r.call())?["result"].take())
+        self.result(self.req("GET", path, query).call())
     }
 
     fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<Value> {
-        Ok(handle(self.req("POST", path).send_form(form))?["result"].take())
+        self.result(self.req("POST", path, &[]).send_form(form))
+    }
+
+    /// POST with the parameters in the query and no body, as the website sends most changes.
+    fn post_query(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
+        self.result(self.req("POST", path, query).call())
+    }
+
+    /// A change: the website sends its parameters in the query, the mobile apps as a form.
+    fn post_change(&self, path: &str, params: &[(&str, &str)]) -> Result<Value> {
+        if self.web {
+            self.post_query(path, params)
+        } else {
+            self.post_form(path, params)
+        }
     }
 
     fn post_json(&self, path: &str, query: &[(&str, &str)], body: Value) -> Result<Value> {
-        let mut r = self.req("POST", path);
-        for (k, v) in query {
-            r = r.query(k, v);
-        }
-        Ok(handle(r.send_json(body))?["result"].take())
+        self.result(self.req("POST", path, query).send_json(body))
     }
 
     // ---------------------------------------------------------------- account
 
     pub fn account_status(&mut self) -> Result<Account> {
+        if self.web {
+            let r = self.get("/account/about", &[])?;
+            let uid = id_str(&r["uid"]).ok_or_else(|| anyhow!("не удалось получить uid аккаунта (токен недействителен?)"))?;
+            self.uid = uid.clone();
+            return Ok(Account {
+                uid,
+                login: r["login"].as_str().unwrap_or("").to_string(),
+                name: r["publicName"].as_str().unwrap_or("").to_string(),
+                has_plus: r["hasPlus"].as_bool().unwrap_or(false),
+            });
+        }
         let r = self.get("/account/status", &[])?;
         let acc = &r["account"];
         let uid = id_str(&acc["uid"]).ok_or_else(|| anyhow!("не удалось получить uid аккаунта (токен недействителен?)"))?;
@@ -318,7 +378,7 @@ impl Api {
     }
 
     pub fn set_ai_reduction(&self, on: bool) -> Result<()> {
-        self.post_form("/account/settings", &[("aiContentReductionEnabled", if on { "true" } else { "false" })])?;
+        self.post_change("/account/settings", &[("aiContentReductionEnabled", if on { "true" } else { "false" })])?;
         Ok(())
     }
 
@@ -328,22 +388,38 @@ impl Api {
         let chunks: Vec<_> = ids.chunks(200).collect();
         let parts = parallel(&chunks, |chunk| {
             let joined = chunk.join(",");
-            let r = self.post_form("/tracks", &[("track-ids", &joined), ("with-positions", "false")])?;
+            let r = if self.web {
+                self.post_form("/tracks", &[("trackIds", &joined), ("removeDuplicates", "false")])?
+            } else {
+                self.post_form("/tracks", &[("track-ids", &joined), ("with-positions", "false")])?
+            };
             Ok(r.as_array().into_iter().flatten().filter_map(Track::from_json).collect::<Vec<_>>())
         })?;
         Ok(parts.into_iter().flatten().collect())
     }
 
-    /// One page of track search results and the total number of found tracks.
-    pub fn search(&self, text: &str, page: usize) -> Result<(Vec<Track>, usize)> {
-        let page = page.to_string();
+    /// One page of track search results and the total number of found tracks. The website API
+    /// does not count them: `None` there means more pages follow, the last page gives the total.
+    pub fn search(&self, text: &str, page: usize) -> Result<(Vec<Track>, Option<usize>)> {
+        let (n, page) = (page, page.to_string());
         let size = SEARCH_PAGE.to_string();
+        if self.web {
+            let r = self.get(
+                "/search/instant/mixed",
+                &[("text", text), ("type", "track"), ("page", &page), ("pageSize", &size), ("nocorrect", "false")],
+            )?;
+            let tracks: Vec<Track> =
+                r["results"].as_array().into_iter().flatten().filter_map(|it| Track::from_json(&it["track"])).collect();
+            let last = r["lastPage"].as_bool().unwrap_or(true) || tracks.is_empty();
+            let total = last.then(|| n * SEARCH_PAGE + tracks.len());
+            return Ok((tracks, total));
+        }
         let r = self.get(
             "/search",
             &[("text", text), ("type", "track"), ("page", &page), ("page-size", &size), ("nocorrect", "false")],
         )?;
         let tracks = r["tracks"]["results"].as_array().into_iter().flatten().filter_map(Track::from_json).collect();
-        Ok((tracks, r["tracks"]["total"].as_u64().unwrap_or(0) as usize))
+        Ok((tracks, Some(r["tracks"]["total"].as_u64().unwrap_or(0) as usize)))
     }
 
     /// Tracks of an artist, most popular first.
@@ -353,7 +429,8 @@ impl Api {
         // Tracks of one page and the artist's total number of tracks.
         let page = |n: usize| -> Result<(Vec<Track>, usize)> {
             let (page, size) = (n.to_string(), PAGE.to_string());
-            let r = self.get(&format!("/artists/{artist_id}/tracks"), &[("page", &page), ("page-size", &size)])?;
+            let size_key = if self.web { "pageSize" } else { "page-size" };
+            let r = self.get(&format!("/artists/{artist_id}/tracks"), &[("page", &page), (size_key, &size)])?;
             let tracks = r["tracks"].as_array().into_iter().flatten().filter_map(Track::from_json).collect();
             Ok((tracks, r["pager"]["total"].as_u64().unwrap_or(0) as usize))
         };
@@ -428,26 +505,17 @@ impl Api {
             return Ok((title, tracks));
         }
         // Large playlists may come without track objects: resolve them by id.
-        let ids: Vec<String> = items
-            .iter()
-            .filter_map(|t| {
-                let id = id_str(&t["id"])?;
-                Some(match id_str(&t["albumId"]) {
-                    Some(a) => format!("{id}:{a}"),
-                    None => id,
-                })
-            })
-            .collect();
+        let ids: Vec<String> = items.iter().filter_map(item_full_id).collect();
         Ok((title, self.tracks(&ids)?))
     }
 
     pub fn rename_playlist(&self, pl: &Playlist, title: &str) -> Result<()> {
-        self.post_form(&format!("{}/name", Self::playlist_path(pl)), &[("value", title)])?;
+        self.post_change(&format!("{}/name", Self::playlist_path(pl)), &[("value", title)])?;
         Ok(())
     }
 
     pub fn delete_playlist(&self, pl: &Playlist) -> Result<()> {
-        self.post_form(&format!("{}/delete", Self::playlist_path(pl)), &[])?;
+        self.post_change(&format!("{}/delete", Self::playlist_path(pl)), &[])?;
         Ok(())
     }
 
@@ -487,33 +555,45 @@ impl Api {
 
     // ---------------------------------------------------------------- likes
 
-    /// Full ids (`track:album`) of liked music tracks, newest first. Liked podcast episodes and
-    /// audiobook chapters share the same list and are filtered out by the server.
-    pub fn liked_ids(&self) -> Result<Vec<String>> {
+    /// Full ids (`track:album`) of liked music tracks, newest first, and, from the website API, the
+    /// tracks themselves. Liked podcast episodes and audiobook chapters share the same list and are
+    /// filtered out by the server.
+    pub fn liked(&self) -> Result<(Vec<String>, Option<Vec<Track>>)> {
+        if self.web {
+            // The website reads «Мне нравится» as the user's playlist 3, with full track objects.
+            let r = self.get(
+                &format!("/users/{}/playlists/3", self.uid),
+                &[("trackMetaType", "music"), ("resumeStream", "false")],
+            )?;
+            let items = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let ids = items.iter().filter_map(item_full_id).collect();
+            // Tracks removed from the catalog stay in the list there; the mobile API leaves them out.
+            let tracks =
+                items.iter().filter_map(|t| Track::from_json(&t["track"])).filter(|t| t.available).collect();
+            return Ok((ids, Some(tracks)));
+        }
         let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[("trackMetaType", "music")])?;
-        Ok(r["library"]["tracks"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|t| {
-                let id = id_str(&t["id"])?;
-                Some(match id_str(&t["albumId"]) {
-                    Some(a) => format!("{id}:{a}"),
-                    None => id,
-                })
-            })
-            .collect())
+        Ok((r["library"]["tracks"].as_array().into_iter().flatten().filter_map(item_full_id).collect(), None))
     }
 
     pub fn set_like(&self, track: &Track, like: bool) -> Result<()> {
-        let action = if like { "add-multiple" } else { "remove" };
-        self.post_form(&format!("/users/{}/likes/tracks/{action}", self.uid), &[("track-ids", &track.full_id())])?;
-        Ok(())
+        self.set_mark("likes", track, like)
     }
 
     pub fn set_dislike(&self, track: &Track, dislike: bool) -> Result<()> {
-        let action = if dislike { "add-multiple" } else { "remove" };
-        self.post_form(&format!("/users/{}/dislikes/tracks/{action}", self.uid), &[("track-ids", &track.full_id())])?;
+        self.set_mark("dislikes", track, dislike)
+    }
+
+    /// Puts or removes a like (`kind` = `likes`) or a dislike (`dislikes`).
+    fn set_mark(&self, kind: &str, track: &Track, on: bool) -> Result<()> {
+        let id = track.full_id();
+        let base = format!("/users/{}/{kind}/tracks", self.uid);
+        match (self.web, on) {
+            (true, true) => self.post_query(&format!("{base}/add"), &[("track-id", &id)])?,
+            (true, false) => self.post_query(&format!("{base}/{id}/remove"), &[])?,
+            (false, true) => self.post_form(&format!("{base}/add-multiple"), &[("track-ids", &id)])?,
+            (false, false) => self.post_form(&format!("{base}/remove"), &[("track-ids", &id)])?,
+        };
         Ok(())
     }
 
@@ -538,14 +618,24 @@ impl Api {
             .collect())
     }
 
-    /// Changes My Wave settings (mood / character).
-    pub fn wave_settings(&self, mood: &str, diversity: &str) -> Result<()> {
+    /// Changes My Wave settings (mood / character) in the account.
+    fn wave_settings(&self, mood: &str, diversity: &str) -> Result<()> {
         self.post_json(
             &format!("/rotor/station/{MY_WAVE}/settings3"),
             &[],
             json!({"moodEnergy": mood, "diversity": diversity, "language": "any", "type": "rotor"}),
         )?;
         Ok(())
+    }
+
+    /// POST to a wave session; the website marks it when «Меньше ИИ-музыки» is on.
+    fn rotor_req(&self, path: &str) -> ureq::Request {
+        let r = self.req("POST", path, &[]);
+        if self.web && self.less_ai {
+            r.set("X-Yandex-Music-AI-Content-Rate", "reduced")
+        } else {
+            r
+        }
     }
 
     fn parse_batch(r: &Value, session: Option<String>) -> WaveBatch {
@@ -563,13 +653,26 @@ impl Api {
         WaveBatch { session_id: session, batch_id, tracks }
     }
 
-    pub fn wave_start(&self, station: &str) -> Result<WaveBatch> {
+    /// Starts a station. My Wave takes its settings (mood, character; `None` — the defaults): the
+    /// mobile API keeps them in the account, the website passes them as seeds of the session.
+    pub fn wave_start(&self, station: &str, settings: Option<(&str, &str)>) -> Result<WaveBatch> {
+        let mut seeds = vec![station.to_string()];
+        if station == MY_WAVE {
+            let (mood, diversity) = settings.unwrap_or(("all", "default"));
+            if !self.web {
+                let _ = self.wave_settings(mood, diversity);
+            } else {
+                if mood != "all" {
+                    seeds.push(format!("settingMoodEnergy:{mood}"));
+                }
+                if diversity != "default" {
+                    seeds.push(format!("settingDiversity:{diversity}"));
+                }
+            }
+        }
+        let body = json!({"seeds": seeds, "includeTracksInResponse": true, "includeWaveModel": false, "interactive": true});
         let session = self
-            .post_json(
-                "/rotor/session/new",
-                &[],
-                json!({"seeds": [station], "includeTracksInResponse": true, "includeWaveModel": false, "interactive": true}),
-            )
+            .result(self.rotor_req("/rotor/session/new").send_json(body))
             .and_then(|r| {
                 let id = r["radioSessionId"].as_str().ok_or_else(|| anyhow!("нет radioSessionId"))?.to_string();
                 let b = Self::parse_batch(&r, Some(id));
@@ -587,7 +690,7 @@ impl Api {
     pub fn wave_more(&self, station: &str, session: Option<&str>, queue: &[String]) -> Result<WaveBatch> {
         match session {
             Some(id) => {
-                let r = self.post_json(&format!("/rotor/session/{id}/tracks"), &[], json!({"queue": queue}))?;
+                let r = self.result(self.rotor_req(&format!("/rotor/session/{id}/tracks")).send_json(json!({"queue": queue})))?;
                 Ok(Self::parse_batch(&r, Some(id.to_string())))
             }
             None => self.station_tracks(station, queue.last().map(String::as_str)),
@@ -607,7 +710,9 @@ impl Api {
     pub fn wave_feedback(&self, station: &str, session: Option<&str>, batch: &str, event: Value) -> Result<()> {
         match session {
             Some(id) => {
-                self.post_json(&format!("/rotor/session/{id}/feedback"), &[], json!({"event": event, "batchId": batch}))?;
+                // The website's path ends with a slash.
+                let slash = if self.web { "/" } else { "" };
+                self.post_json(&format!("/rotor/session/{id}/feedback{slash}"), &[], json!({"event": event, "batchId": batch}))?;
             }
             None => {
                 let ty = event["type"].as_str().unwrap_or("");
@@ -666,7 +771,8 @@ impl Api {
         let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
         // Low quality exists only in mp4 containers: without `*-mp4` codecs the server falls back to 192 kbit/s.
         let (codecs, transports) = ("flac,flac-mp4,aac,he-aac,mp3,aac-mp4,he-aac-mp4", "raw");
-        let mut mac = Hmac::<Sha256>::new_from_slice(FILE_INFO_KEY.as_bytes())?;
+        let key = if self.web { WEB_FILE_INFO_KEY } else { FILE_INFO_KEY };
+        let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())?;
         mac.update(format!("{ts}{id}{quality}{}{transports}", codecs.replace(',', "")).as_bytes());
         let sign = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         let sign = sign.trim_end_matches('=');
@@ -832,14 +938,92 @@ mod tests {
         crate::config::env_str("TOKEN").or_else(|| crate::config::Config::load().token).expect("token")
     }
 
+    /// Signed-in clients of both APIs for network tests: mobile, then website.
+    fn apis() -> [Api; 2] {
+        let token = test_token();
+        [false, true].map(|web| {
+            let mut api = Api::new(&token);
+            api.web = web;
+            api.account_status().unwrap();
+            api
+        })
+    }
+
     /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn artist_tracks() {
+        for api in apis() {
+            let tracks = api.artist_tracks("161243").unwrap();
+            assert!(tracks.len() > 100, "web={}: {}", api.web, tracks.len());
+            assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+        }
+    }
+
+    /// Network test: needs a token (see `test_token`). Both APIs know the same account.
+    #[test]
+    #[ignore]
+    fn accounts() {
+        let [mobile, web] = apis();
         let token = test_token();
-        let tracks = Api::new(&token).artist_tracks("161243").unwrap();
-        assert!(tracks.len() > 100, "{}", tracks.len());
-        assert!(tracks.iter().all(|t| t.main_artist.is_some()));
+        let (mut m, mut w) = (Api::new(&token), Api::new(&token));
+        w.web = true;
+        let (a, b) = (m.account_status().unwrap(), w.account_status().unwrap());
+        assert_eq!((a.uid, a.login, a.has_plus), (b.uid, b.login, b.has_plus));
+        assert_eq!(mobile.uid, web.uid);
+    }
+
+    /// Network test: needs a token (see `test_token`). Only reads the likes.
+    #[test]
+    #[ignore]
+    fn liked() {
+        for api in apis() {
+            let (ids, tracks) = api.liked().unwrap();
+            assert!(!ids.is_empty());
+            let tracks = tracks.map_or_else(|| api.tracks(&ids), Ok).unwrap();
+            assert!(tracks.len() * 10 > ids.len() * 8, "web={}: {} of {}", api.web, tracks.len(), ids.len());
+        }
+    }
+
+    /// Network test: WRITES to the account — likes and dislikes a track, then takes both back.
+    /// Run explicitly: `cargo test like_edit -- --ignored`.
+    #[test]
+    #[ignore]
+    fn like_edit() {
+        let ids = |api: &Api, kind: &str| -> Vec<String> {
+            let r = api.get(&format!("/users/{}/{kind}/tracks", api.uid), &[]).unwrap();
+            r["library"]["tracks"].as_array().unwrap().iter().filter_map(|t| id_str(&t["id"])).collect()
+        };
+        for api in apis() {
+            // A catalog track that is neither liked nor disliked.
+            let t = Track::from_json(&json!({"id": "39089632", "albums": [{"id": 60058}]})).unwrap();
+            assert!(!ids(&api, "likes").contains(&t.id) && !ids(&api, "dislikes").contains(&t.id), "{} отмечен", t.id);
+            api.set_like(&t, true).unwrap();
+            let liked = ids(&api, "likes").contains(&t.id);
+            api.set_like(&t, false).unwrap();
+            assert!(liked && !ids(&api, "likes").contains(&t.id), "web={}", api.web);
+            api.set_dislike(&t, true).unwrap();
+            let disliked = ids(&api, "dislikes").contains(&t.id);
+            api.set_dislike(&t, false).unwrap();
+            assert!(disliked && !ids(&api, "dislikes").contains(&t.id), "web={}", api.web);
+        }
+    }
+
+    /// Network test: needs a token (see `test_token`). Starts wave sessions (no feedback is sent).
+    #[test]
+    #[ignore]
+    fn waves() {
+        for api in apis() {
+            let b = api.wave_start(MY_WAVE, Some(("calm", "favorite"))).unwrap();
+            assert!(b.session_id.is_some() && !b.tracks.is_empty(), "web={}", api.web);
+            let queue: Vec<String> = b.tracks.iter().map(Track::full_id).collect();
+            let more = api.wave_more(MY_WAVE, b.session_id.as_deref(), &queue).unwrap();
+            assert!(!more.tracks.is_empty(), "web={}", api.web);
+            assert!(!api.wave_start("genre:rock", None).unwrap().tracks.is_empty());
+            assert!(api.stations().unwrap().len() > 10);
+        }
+        // Back to the default settings of My Wave in the account (the mobile API keeps them there).
+        apis()[0].wave_settings("all", "default").unwrap();
     }
 
     #[test]
@@ -893,11 +1077,16 @@ mod tests {
     #[test]
     #[ignore]
     fn linked_playlists() {
-        let mut api = Api::new(&test_token());
-        let acc = api.account_status().unwrap();
-        let r = api.get(&format!("/users/{}/playlists/list", acc.uid), &[]).unwrap();
+        for api in apis() {
+            linked_playlists_with(&api);
+        }
+    }
+
+    fn linked_playlists_with(api: &Api) {
+        let r = api.get(&format!("/users/{}/playlists/list", api.uid), &[]).unwrap();
         let p = r.as_array().unwrap().iter().find(|p| p["trackCount"].as_u64() > Some(0)).expect("non-empty playlist");
-        let by_login = Link::Playlist { owner: acc.login.clone(), kind: id_str(&p["kind"]).unwrap() };
+        let login = r[0]["owner"]["login"].as_str().unwrap().to_string();
+        let by_login = Link::Playlist { owner: login, kind: id_str(&p["kind"]).unwrap() };
         let by_uuid = Link::PlaylistUuid(p["playlistUuid"].as_str().unwrap().into());
         let (t1, a) = api.linked_playlist(&by_login).unwrap();
         let (t2, b) = api.linked_playlist(&by_uuid).unwrap();
@@ -911,43 +1100,50 @@ mod tests {
     #[test]
     #[ignore]
     fn album_tracks() {
-        let (title, tracks) = Api::new(&test_token()).album_tracks("3782599").unwrap();
-        assert!(!title.is_empty());
-        assert!(tracks.len() > 1, "{}", tracks.len());
-        assert!(tracks.iter().all(|t| t.album_id.as_deref() == Some("3782599")));
+        for api in apis() {
+            let (title, tracks) = api.album_tracks("3782599").unwrap();
+            assert!(!title.is_empty());
+            assert!(tracks.len() > 1, "{}", tracks.len());
+            assert!(tracks.iter().all(|t| t.album_id.as_deref() == Some("3782599")));
+        }
     }
 
     /// Network test: needs a token (see `test_token`). Only reads the setting.
     #[test]
     #[ignore]
     fn ai_reduction() {
-        Api::new(&test_token()).ai_reduction().unwrap();
+        let [mobile, web] = apis();
+        assert_eq!(mobile.ai_reduction().unwrap(), web.ai_reduction().unwrap());
     }
 
     /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn search_pages() {
-        let api = Api::new(&test_token());
-        let (first, total) = api.search("сплин", 0).unwrap();
-        assert_eq!(first.len(), SEARCH_PAGE);
-        assert!(total > 2 * SEARCH_PAGE, "{total}");
-        let (second, _) = api.search("сплин", 1).unwrap();
-        assert!(!second.is_empty());
-        assert_ne!(first[0].id, second[0].id);
+        for api in apis() {
+            let (first, total) = api.search("сплин", 0).unwrap();
+            assert_eq!(first.len(), SEARCH_PAGE);
+            // The website API does not count the results.
+            assert!(if api.web { total.is_none() } else { total > Some(2 * SEARCH_PAGE) }, "{total:?}");
+            let (second, _) = api.search("сплин", 1).unwrap();
+            assert!(!second.is_empty());
+            assert_ne!(first[0].id, second[0].id);
+        }
+        // The last page tells the total.
+        let (tracks, total) = apis()[1].search("сплин", 50).unwrap();
+        assert_eq!(total, Some(50 * SEARCH_PAGE + tracks.len()));
     }
 
     /// Network test: needs a token (see `test_token`). Run with `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn playlists() {
-        let token = test_token();
-        let mut api = Api::new(&token);
-        api.account_status().unwrap();
-        let lists = api.playlists().unwrap();
-        assert!(!lists.is_empty());
-        let pl = lists.iter().find(|p| p.track_count > 0).expect("non-empty playlist");
-        assert_eq!(api.playlist_tracks(pl).unwrap().len() as u64, pl.track_count);
+        for api in apis() {
+            let lists = api.playlists().unwrap();
+            assert!(!lists.is_empty());
+            let pl = lists.iter().find(|p| p.track_count > 0).expect("non-empty playlist");
+            assert_eq!(api.playlist_tracks(pl).unwrap().len() as u64, pl.track_count);
+        }
     }
 
     /// Network test: WRITES to the account — creates a temporary private playlist, edits it and deletes it.
@@ -955,9 +1151,15 @@ mod tests {
     #[test]
     #[ignore]
     fn playlist_edit() {
-        let mut api = Api::new(&test_token());
-        api.account_status().unwrap();
-        let r = api.post_form(&format!("/users/{}/playlists/create", api.uid), &[("title", "ymusic-test"), ("visibility", "private")]);
+        for api in apis() {
+            playlist_edit_with(&api);
+        }
+    }
+
+    fn playlist_edit_with(api: &Api) {
+        let path = format!("/users/{}/playlists/create", api.uid);
+        let form = [("title", "ymusic-test"), ("visibility", "private")];
+        let r = api.post_change(&path, &form);
         let kind = id_str(&r.unwrap()["kind"]).expect("kind");
         let pl = Playlist { owner: api.uid.clone(), kind, title: "ymusic-test".into(), track_count: 0 };
         // Delete the playlist whatever happens below.
@@ -969,7 +1171,7 @@ mod tests {
                 }
             }
         }
-        let _cleanup = Cleanup(&api, pl.clone());
+        let _cleanup = Cleanup(api, pl.clone());
 
         api.rename_playlist(&pl, "ymusic-test 2").unwrap();
         assert!(api.playlists().unwrap().iter().any(|p| p.key() == pl.key() && p.title == "ymusic-test 2"));
@@ -979,13 +1181,13 @@ mod tests {
         api.add_to_playlist(&pl, &catalog).unwrap();
         api.add_to_playlist(&pl, &ugc).unwrap();
         let ids = |api: &Api| api.playlist_tracks(&pl).unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>();
-        assert_eq!(ids(&api), ["39089632", "bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
+        assert_eq!(ids(api), ["39089632", "bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
 
         // A stale view (wrong track at the position) is refused and nothing changes.
         assert!(api.remove_from_playlist(&pl, 0, &ugc.id).is_err());
-        assert_eq!(ids(&api).len(), 2);
+        assert_eq!(ids(api).len(), 2);
         api.remove_from_playlist(&pl, 0, &catalog.id).unwrap();
-        assert_eq!(ids(&api), ["bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
+        assert_eq!(ids(api), ["bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
 
         api.delete_playlist(&pl).unwrap();
         assert!(!api.playlists().unwrap().iter().any(|p| p.key() == pl.key()));
@@ -995,7 +1197,12 @@ mod tests {
     #[test]
     #[ignore]
     fn qualities() {
-        let api = Api::new(&test_token());
+        for api in apis() {
+            qualities_with(&api);
+        }
+    }
+
+    fn qualities_with(api: &Api) {
         let lq = api.file_info("39089632", "lq").unwrap();
         let nq = api.file_info("39089632", "nq").unwrap();
         let best = api.file_info("39089632", "lossless").unwrap();
