@@ -1,6 +1,9 @@
 //! Application state and logic.
 
-use crate::api::{default_stations, iso_now, my_wave, Account, Api, Link, Playlist, Station, Track, WaveBatch, MY_WAVE, QUALITIES};
+use crate::api::{
+    default_stations, iso_now, my_wave, random_uuid, Account, Api, Link, PlayContext, PlayReport, Playlist, Station, Track,
+    WaveBatch, MY_WAVE, QUALITIES,
+};
 use crate::player::{Audio, PlayerEvent};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
@@ -23,7 +26,14 @@ pub enum Msg {
     /// Result of renaming a playlist or changing its tracks: status text on success.
     PlaylistEdited { key: String, result: Result<String, String> },
     /// Tracks loaded in the background to be played as a list named `name`.
-    ListLoaded { intent: u64, name: String, shuffle: bool, playlist: Option<String>, result: Result<Vec<Track>, String> },
+    ListLoaded {
+        intent: u64,
+        name: String,
+        context: PlayContext,
+        shuffle: bool,
+        playlist: Option<String>,
+        result: Result<Vec<Track>, String>,
+    },
     WaveStarted { intent: u64, station: String, name: String, result: Result<WaveBatch, String> },
     WaveMore(Result<WaveBatch, String>),
     LikeFailed { track: Track, like: bool, err: String },
@@ -89,8 +99,25 @@ struct Carried {
 enum End {
     Eof,
     Skip,
+    /// Back to the previous track.
+    Back,
+    Dislike,
+    /// Another track or list was chosen.
+    Other,
     Silent,
 }
+
+/// Playback of the current track, reported to the listening history (see `Api::send_play`).
+struct Play {
+    report: PlayReport,
+    /// Last position seen: played time grows by the steps between positions, jumps are seeks.
+    last_pos: f64,
+    /// The report after 30 seconds of listening has been sent.
+    partial_sent: bool,
+}
+
+/// Seconds of listening after which a track is reported as listened, as the website does.
+const PARTIAL_PLAY_SECS: f64 = 30.1;
 
 /// Playlist opened in the «Плейлисты» tab.
 pub struct OpenPlaylist {
@@ -277,6 +304,12 @@ pub struct App {
     stopped: bool,
     /// Set while the first track of the queue is one carried over from the previous list.
     carried: Option<Carried>,
+    /// Where the queue (a list, not the wave) comes from, for the listening history.
+    context: PlayContext,
+    play: Option<Play>,
+    /// Tests: reports that would have been sent.
+    #[cfg(test)]
+    plays_sent: Vec<PlayReport>,
 }
 
 impl App {
@@ -354,6 +387,10 @@ impl App {
             retried: false,
             stopped: false,
             carried: None,
+            context: PlayContext::default(),
+            play: None,
+            #[cfg(test)]
+            plays_sent: Vec::new(),
         };
         app.set_stations(default_stations());
         if !app.account.has_plus {
@@ -527,6 +564,14 @@ impl App {
     // ------------------------------------------------------------ playback
 
     fn report_end(&mut self, end: End) {
+        let reason = match end {
+            End::Eof => "finish",
+            End::Skip | End::Silent => "skip",
+            End::Back => "back_skip",
+            End::Dislike => "dislike",
+            End::Other => "other_track",
+        };
+        self.end_play(Some(reason));
         let wave = match &self.carried {
             Some(c) if self.pos == Some(0) => c.wave.as_ref(),
             _ if self.source == Source::Wave => self.wave.as_ref(),
@@ -536,11 +581,96 @@ impl App {
         let ev = match end {
             End::Eof => json!({"type": "trackFinished", "timestamp": iso_now(), "trackId": t.full_id(),
                 "totalPlayedSeconds": self.duration.max(self.time_pos)}),
-            End::Skip => json!({"type": "skip", "timestamp": iso_now(), "trackId": t.full_id(),
-                "totalPlayedSeconds": self.time_pos}),
+            End::Skip | End::Back | End::Dislike | End::Other => json!({"type": "skip", "timestamp": iso_now(),
+                "trackId": t.full_id(), "totalPlayedSeconds": self.time_pos}),
             End::Silent => return,
         };
         self.feedback(w, ev, t.batch.clone());
+    }
+
+    // ------------------------------------------------------------ listening history
+
+    /// A new playback of `track` begins: reported with nothing played yet.
+    fn start_play(&mut self, track: &Track) {
+        let (context, radio) = match (&self.source, &self.wave) {
+            (Source::Wave, Some(w)) => (
+                PlayContext::new("radio", w.station.clone()),
+                Some((w.session.clone().unwrap_or_default(), track.batch.clone().unwrap_or_else(|| w.batch.clone()))),
+            ),
+            _ => (self.context.clone(), None),
+        };
+        let report = PlayReport {
+            play_id: random_uuid(),
+            track: track.clone(),
+            context,
+            radio,
+            started: iso_now(),
+            played: 0.0,
+            end_position: 0.0,
+            seek: false,
+            pause: false,
+            reason: None,
+        };
+        self.send_play(report.clone());
+        self.play = Some(Play { report, last_pos: 0.0, partial_sent: false });
+    }
+
+    /// The position moved to `t`: counts the time played; sends a report once 30 s are played.
+    fn track_play(&mut self, t: f64) {
+        let paused = self.paused;
+        let Some(play) = &mut self.play else { return };
+        let step = t - play.last_pos;
+        if (0.0..3.0).contains(&step) {
+            if !paused {
+                play.report.played += step;
+            }
+        } else {
+            play.report.seek = true;
+        }
+        play.last_pos = t;
+        play.report.end_position = t;
+        if !play.partial_sent && play.report.played >= PARTIAL_PLAY_SECS {
+            play.partial_sent = true;
+            let report = PlayReport { reason: Some("in_progress"), ..play.report.clone() };
+            self.send_play(report);
+        }
+    }
+
+    /// Playback was paused: reported as it is now.
+    fn pause_play(&mut self) {
+        let Some(play) = &mut self.play else { return };
+        play.report.pause = true;
+        let report = PlayReport { reason: None, ..play.report.clone() };
+        self.send_play(report);
+    }
+
+    /// The playback of the current track is over (`reason`: why), or the program quits (`None`).
+    fn end_play(&mut self, reason: Option<&'static str>) -> Option<PlayReport> {
+        let play = self.play.take()?;
+        let report = PlayReport { reason, ..play.report };
+        if reason.is_some() {
+            self.send_play(report.clone());
+        }
+        Some(report)
+    }
+
+    /// Report for the moment the program quits; sent by the caller, which waits for it.
+    pub fn quit_play(&mut self) -> Option<PlayReport> {
+        let mut report = self.end_play(None)?;
+        report.pause = true;
+        Some(report)
+    }
+
+    fn send_play(&mut self, report: PlayReport) {
+        #[cfg(test)]
+        if self.offline {
+            self.plays_sent.push(report);
+            return;
+        }
+        self.spawn(move |api| {
+            let _ = api.send_play(&report);
+            None
+        });
     }
 
     fn wave_feedback(&self, ev: Value, batch: Option<String>) {
@@ -585,6 +715,11 @@ impl App {
         self.stopped = false;
         self.load_cover(track.cover.clone());
         self.maybe_extend_search_queue();
+        // A restart of the same track (after an error) goes on with its playback.
+        if self.play.as_ref().is_none_or(|p| p.report.track.id != track.id) {
+            self.end_play(Some("skip"));
+            self.start_play(&track);
+        }
         // A track carried over from another list is not part of this wave.
         let carried = idx == 0 && self.carried.is_some();
         if self.source == Source::Wave && !carried {
@@ -671,13 +806,13 @@ impl App {
         }
         if let Some(p) = self.pos {
             if let Some(i) = (0..p).rev().find(|&i| self.queue[i].available) {
-                self.report_end(End::Skip);
+                self.report_end(End::Back);
                 self.play_index(i);
             }
         }
     }
 
-    fn play_list(&mut self, name: &str, tracks: Vec<Track>, start: usize) {
+    fn play_list(&mut self, name: &str, context: PlayContext, tracks: Vec<Track>, start: usize) {
         if tracks.is_empty() {
             return;
         }
@@ -685,10 +820,12 @@ impl App {
         let start = (start..tracks.len()).find(|&i| tracks[i].available).unwrap_or(start);
         if self.finishing_track() {
             self.queue_after_current(tracks.into_iter().skip(start).collect(), Source::List(name.to_string()), None);
+            self.context = context;
             self.set_status(format!("После этого трека: {name}"));
             return;
         }
-        self.report_end(End::Skip);
+        self.report_end(End::Other);
+        self.context = context;
         self.queue = tracks;
         self.search_queue = None;
         self.preload = None;
@@ -848,7 +985,7 @@ impl App {
         self.set_status(format!("✗ Не нравится: {} — больше не попадётся", track.title));
         let t = track.clone();
         self.spawn(move |api| api.set_dislike(&t, true).err().map(|e| Msg::Error(format!("Ошибка дизлайка: {e:#}"))));
-        self.next(End::Skip);
+        self.next(End::Dislike);
     }
 
     // ------------------------------------------------------------ messages
@@ -858,6 +995,9 @@ impl App {
             Msg::Player(ev) => match ev {
                 PlayerEvent::TimePos(t) => {
                     self.time_pos = t;
+                    if !self.loading_track || t > 0.0 {
+                        self.track_play(t);
+                    }
                     if self.loading_track && t > 0.0 {
                         self.loading_track = false;
                         self.load_deadline = None;
@@ -869,7 +1009,12 @@ impl App {
                     self.duration = d;
                     self.player.set_track_duration(d);
                 }
-                PlayerEvent::Pause(p) => self.paused = p,
+                PlayerEvent::Pause(p) => {
+                    if p && !self.paused && !self.loading_track {
+                        self.pause_play();
+                    }
+                    self.paused = p;
+                }
                 PlayerEvent::Volume(v) => self.volume = v,
                 PlayerEvent::Mute(m) => self.muted = m,
                 PlayerEvent::Eof => {
@@ -1024,7 +1169,7 @@ impl App {
                 Err(e) => self.set_error(format!("Ошибка: {e}")),
             },
             Msg::ListLoaded { intent, .. } | Msg::WaveStarted { intent, .. } if intent != self.intent => {}
-            Msg::ListLoaded { name, shuffle, playlist, result, .. } => match result {
+            Msg::ListLoaded { name, context, shuffle, playlist, result, .. } => match result {
                 Ok(list) if list.is_empty() => self.set_status(format!("{name}: нет треков")),
                 Ok(mut list) => {
                     let name = if shuffle {
@@ -1033,7 +1178,7 @@ impl App {
                     } else {
                         name
                     };
-                    self.play_list(&name, list, 0);
+                    self.play_list(&name, context, list, 0);
                     self.playing_playlist = playlist;
                     self.tab = Tab::Wave;
                 }
@@ -1054,7 +1199,7 @@ impl App {
                     if finishing {
                         self.queue_after_current(b.tracks, Source::Wave, Some(wave));
                     } else {
-                        self.report_end(End::Skip);
+                        self.report_end(End::Other);
                         self.wave = Some(wave);
                         self.source = Source::Wave;
                         self.queue = b.tracks;
@@ -1335,7 +1480,7 @@ impl App {
 
     /// Plays the loaded search results; later pages are appended to the queue.
     fn play_search(&mut self, name: &str, tracks: Vec<Track>, start: usize, shuffled: bool) {
-        self.play_list(name, tracks, start);
+        self.play_list(name, PlayContext::new("search", self.search_query.clone()), tracks, start);
         self.search_queue = Some(shuffled);
         self.maybe_extend_search_queue();
     }
@@ -1504,7 +1649,7 @@ impl App {
         match self.tab {
             Tab::Wave => {
                 if let Some(i) = self.queue_state.selected().filter(|&i| i < self.queue.len()) {
-                    self.report_end(End::Skip);
+                    self.report_end(End::Other);
                     self.play_index(i);
                 }
             }
@@ -1515,7 +1660,7 @@ impl App {
             }
             Tab::Liked => {
                 if let Some(i) = self.liked_state.selected() {
-                    self.play_list("Мне нравится", self.liked.clone(), i);
+                    self.play_list("Мне нравится", self.liked_context(), self.liked.clone(), i);
                 }
             }
             Tab::Search => {
@@ -1559,12 +1704,13 @@ impl App {
         if tracks.is_empty() {
             return;
         }
+        let context = PlayContext::new("playlist", key.clone());
         if shuffle {
             shuffle_tracks(&mut tracks);
-            self.play_list(&format!("{name} (перемешано)"), tracks, 0);
+            self.play_list(&format!("{name} (перемешано)"), context, tracks, 0);
         } else {
             let start = self.open_state.selected().unwrap_or(0);
-            self.play_list(&name, tracks, start);
+            self.play_list(&name, context, tracks, start);
         }
         self.playing_playlist = Some(key);
     }
@@ -1768,7 +1914,8 @@ impl App {
         let intent = self.new_intent();
         self.spawn(move |api| {
             let result = api.playlist_tracks(&pl).map_err(|e| format!("{e:#}"));
-            Some(Msg::ListLoaded { intent, name: format!("Плейлист: {}", pl.title), shuffle, playlist: Some(pl.key()), result })
+            let (name, context) = (format!("Плейлист: {}", pl.title), PlayContext::new("playlist", pl.key()));
+            Some(Msg::ListLoaded { intent, name, context, shuffle, playlist: Some(pl.key()), result })
         });
     }
 
@@ -1817,7 +1964,15 @@ impl App {
                 Link::Album(id) => titled("Альбом", api.album_tracks(id)),
                 Link::Playlist { .. } | Link::PlaylistUuid(_) => titled("Плейлист", api.linked_playlist(&link)),
             };
-            Some(Msg::ListLoaded { intent, name, shuffle: false, playlist: None, result })
+            let context = match &link {
+                Link::Album(id) => PlayContext::new("album", id.clone()),
+                // A login is not a uid: the history needs `uid:kind`.
+                Link::Playlist { owner, kind } if owner.bytes().all(|b| b.is_ascii_digit()) => {
+                    PlayContext::new("playlist", format!("{owner}:{kind}"))
+                }
+                _ => PlayContext::new("various", ""),
+            };
+            Some(Msg::ListLoaded { intent, name, context, shuffle: false, playlist: None, result })
         });
     }
 
@@ -1835,7 +1990,8 @@ impl App {
         let intent = self.new_intent();
         self.spawn(move |api| {
             let result = api.artist_tracks(&id).map_err(|e| format!("{e:#}"));
-            Some(Msg::ListLoaded { intent, name: format!("Исполнитель: {name}"), shuffle: false, playlist: None, result })
+            let context = PlayContext::new("artist", id);
+            Some(Msg::ListLoaded { intent, name: format!("Исполнитель: {name}"), context, shuffle: false, playlist: None, result })
         });
     }
 
@@ -1858,7 +2014,8 @@ impl App {
                 Ok((title, _)) if !title.is_empty() => format!("Альбом: {title}"),
                 _ => format!("Альбом: {fallback}"),
             };
-            Some(Msg::ListLoaded { intent, name, shuffle: false, playlist: None, result: result.map(|(_, t)| t) })
+            let context = PlayContext::new("album", id);
+            Some(Msg::ListLoaded { intent, name, context, shuffle: false, playlist: None, result: result.map(|(_, t)| t) })
         });
     }
 
@@ -1871,8 +2028,13 @@ impl App {
         if self.tab == Tab::Search {
             self.play_search(name, list, 0, true);
         } else {
-            self.play_list(name, list, 0);
+            self.play_list(name, self.liked_context(), list, 0);
         }
+    }
+
+    /// «Мне нравится» is the user's playlist 3.
+    fn liked_context(&self) -> PlayContext {
+        PlayContext::new("playlist", format!("{}:3", self.account.uid))
     }
 
     pub fn save_volume(&self) -> u8 {
@@ -2136,7 +2298,7 @@ mod tests {
         // The playing track stays and comes first; the new list starts from the chosen track,
         // without a second copy of the playing one; mpv drops the preloaded old next track.
         let gen = app.gen;
-        app.play_list("Новый", vec![t("x"), t("y"), t("a"), t("z")], 1);
+        app.play_list("Новый", PlayContext::default(), vec![t("x"), t("y"), t("a"), t("z")], 1);
         assert_eq!(ids(&app), ["a", "y", "z"]);
         assert_eq!((app.pos, app.source_name()), (Some(0), "Новый".to_string()));
         assert!(app.wave.is_none() && app.preload.is_none());
@@ -2146,7 +2308,7 @@ mod tests {
         assert!(app.carried.as_ref().is_some_and(|c| c.wave.is_some()), "its end is reported to the old wave");
 
         // Another list before the track ends replaces the waiting one; the track keeps its wave.
-        app.play_list("Ещё", vec![t("p"), t("q")], 0);
+        app.play_list("Ещё", PlayContext::default(), vec![t("p"), t("q")], 0);
         assert_eq!(ids(&app), ["a", "p", "q"]);
         assert!(app.carried.as_ref().is_some_and(|c| c.wave.is_some()));
 
@@ -2157,7 +2319,7 @@ mod tests {
 
         // Paused: switched at once.
         app.paused = true;
-        app.play_list("Сразу", vec![t("m"), t("n")], 1);
+        app.play_list("Сразу", PlayContext::default(), vec![t("m"), t("n")], 1);
         assert_eq!((ids(&app), app.pos), (vec!["m".to_string(), "n".to_string()], Some(1)));
         assert!(app.carried.is_none());
         app.paused = false;
@@ -2165,14 +2327,14 @@ mod tests {
 
         // Off: switched at once.
         app.finish_track = false;
-        app.play_list("Выкл", vec![t("k")], 0);
+        app.play_list("Выкл", PlayContext::default(), vec![t("k")], 0);
         assert_eq!((ids(&app), app.pos), (vec!["k".to_string()], Some(0)));
 
         // Nothing plays after the queue ran out: switched at once.
         app.finish_track = true;
         app.loading_track = false;
         app.next(End::Eof);
-        app.play_list("Снова", vec![t("u"), t("v")], 0);
+        app.play_list("Снова", PlayContext::default(), vec![t("u"), t("v")], 0);
         assert_eq!((ids(&app), app.pos), (vec!["u".to_string(), "v".to_string()], Some(0)));
     }
 
@@ -2277,6 +2439,78 @@ mod tests {
         app.on_msg(Msg::Url { gen: app.gen, result: Ok("http://x/b".into()) });
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
         assert!(app.load_deadline.is_none());
+    }
+
+    #[test]
+    fn play_reports() {
+        use super::*;
+        let (mut app, _audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.to_string(),
+            album_id: Some("9".into()),
+            title: id.to_string(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 200_000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let pos = |app: &mut App, t: f64| app.on_msg(Msg::Player(PlayerEvent::TimePos(t)));
+        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a"), t("b"), t("c")], 0);
+        let start = app.plays_sent.last().unwrap().clone();
+        assert_eq!((start.track.id.as_str(), start.reason, start.played), ("a", None, 0.0));
+        assert_eq!(start.context, PlayContext::new("album", "9"));
+
+        // 30 seconds of listening are reported once, with the same play id.
+        for i in 1..=70 {
+            pos(&mut app, f64::from(i) * 0.5);
+        }
+        assert_eq!(app.plays_sent.len(), 2);
+        let partial = &app.plays_sent[1];
+        assert_eq!((partial.play_id.as_str(), partial.reason), (start.play_id.as_str(), Some("in_progress")));
+        assert!((30.1..31.0).contains(&partial.played), "{}", partial.played);
+
+        // A seek does not count as listening; a pause is reported.
+        pos(&mut app, 150.0);
+        app.on_msg(Msg::Player(PlayerEvent::Pause(true)));
+        pos(&mut app, 150.0);
+        app.on_msg(Msg::Player(PlayerEvent::Pause(false)));
+        let paused = app.plays_sent.last().unwrap();
+        assert_eq!((paused.reason, paused.pause, paused.seek), (None, true, true));
+        assert_eq!(app.plays_sent.len(), 3);
+
+        // `n`: the end of «a» (skip) and the start of «b».
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        let end = &app.plays_sent[3];
+        assert_eq!((end.track.id.as_str(), end.reason, end.end_position), ("a", Some("skip"), 150.0));
+        assert!((34.0..36.0).contains(&end.played), "{}", end.played);
+        let b = app.plays_sent[4].clone();
+        assert_eq!((b.track.id.as_str(), b.reason), ("b", None));
+        assert_ne!(b.play_id, start.play_id);
+
+        // A restart of the same track after an error goes on with its playback.
+        pos(&mut app, 1.0);
+        app.on_track_error();
+        assert_eq!(app.plays_sent.len(), 5);
+
+        // The end of the file, then back to the previous track.
+        app.on_msg(Msg::Player(PlayerEvent::Eof));
+        assert_eq!(app.plays_sent[5].reason, Some("finish"));
+        assert_eq!(app.plays_sent[6].track.id, "c");
+        pos(&mut app, 1.0);
+        app.on_key(KeyEvent::from(KeyCode::Char('b')));
+        assert_eq!((app.plays_sent[7].track.id.as_str(), app.plays_sent[7].reason), ("c", Some("back_skip")));
+
+        // Another list ends the track as `other_track`; quitting gives the last report to send.
+        app.play_list("Мне нравится", app.liked_context(), vec![t("x")], 0);
+        let other = &app.plays_sent[9];
+        assert_eq!((other.track.id.as_str(), other.reason), ("b", Some("other_track")));
+        assert_eq!(app.plays_sent[10].context, PlayContext::new("playlist", "1:3"));
+        let quit = app.quit_play().unwrap();
+        assert_eq!((quit.track.id.as_str(), quit.reason, quit.pause), ("x", None, true));
+        assert!(app.quit_play().is_none());
     }
 
     #[test]
@@ -2483,6 +2717,7 @@ mod tests {
         let list = |intent, name: &str, tracks| Msg::ListLoaded {
             intent,
             name: name.into(),
+            context: PlayContext::default(),
             shuffle: false,
             playlist: None,
             result: Ok(tracks),
@@ -2499,7 +2734,7 @@ mod tests {
 
         // A list started by hand drops a link that was still loading.
         let link = app.new_intent();
-        app.play_list("Мне нравится", vec![t("c")], 0);
+        app.play_list("Мне нравится", PlayContext::default(), vec![t("c")], 0);
         app.on_msg(list(link, "Трек по ссылке", vec![t("d")]));
         assert_eq!(app.queue[0].id, "c");
     }

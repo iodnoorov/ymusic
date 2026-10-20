@@ -725,6 +725,47 @@ impl Api {
         Ok(())
     }
 
+    // ---------------------------------------------------------------- listening history
+
+    /// Reports how a track is being listened to (`/plays`): the server keeps it in the listening
+    /// history and counts it for recommendations. Both APIs take the same report.
+    pub fn send_play(&self, p: &PlayReport) -> Result<()> {
+        let now = iso_now();
+        let mut play = json!({
+            "playId": p.play_id,
+            "from": format!("{}-ymusic-{}-default", if self.web { "web" } else { "mobile" }, p.context.kind),
+            "trackId": p.track.id,
+            "totalPlayedSeconds": round3(p.played),
+            "endPositionSeconds": round3(p.end_position),
+            "trackLengthSeconds": round3(p.track.duration_ms as f64 / 1000.0),
+            "timestamp": now,
+            "startTimestamp": p.started,
+            "context": p.context.kind,
+            "contextItem": p.context.item,
+            "fromCache": false,
+            "isRestored": false,
+            "seek": p.seek,
+            "pause": p.pause,
+            "maxPlayerStage": "play",
+            "isRepeated": false,
+        });
+        if let Some(a) = &p.track.album_id {
+            play["albumId"] = json!(a);
+        }
+        if p.context.kind == "playlist" {
+            play["playlistId"] = json!(p.context.item);
+        }
+        if let Some(reason) = p.reason {
+            play["changeReason"] = json!(reason);
+        }
+        if let Some((session, batch)) = &p.radio {
+            play["radioSessionId"] = json!(session);
+            play["batchId"] = json!(batch);
+        }
+        self.post_json("/plays", &[("clientNow", &now)], json!({"plays": [play]}))?;
+        Ok(())
+    }
+
     // ---------------------------------------------------------------- streaming
 
     /// Downloads and decodes an image (album cover).
@@ -882,6 +923,71 @@ pub fn default_stations() -> Vec<Station> {
 }
 
 /// Current time as ISO-8601 in UTC (for rotor feedback).
+/// Seconds as the website sends them: at most three decimals.
+fn round3(s: f64) -> f64 {
+    (s * 1000.0).round() / 1000.0
+}
+
+/// Where the playing list comes from, as the listening history names it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlayContext {
+    /// `radio`, `playlist`, `album`, `artist`, `search` or `various` (anything else).
+    pub kind: &'static str,
+    /// Station, `owner:kind` of a playlist, album or artist id, search text.
+    pub item: String,
+}
+
+impl PlayContext {
+    pub fn new(kind: &'static str, item: impl Into<String>) -> PlayContext {
+        PlayContext { kind, item: item.into() }
+    }
+}
+
+/// One report of a track's playback (see `Api::send_play`).
+#[derive(Clone, Debug)]
+pub struct PlayReport {
+    /// Same for all reports about one playback of the track.
+    pub play_id: String,
+    pub track: Track,
+    pub context: PlayContext,
+    /// Wave session and batch the track came from.
+    pub radio: Option<(String, String)>,
+    /// When the playback started (ISO-8601).
+    pub started: String,
+    /// Seconds actually played (not counting seeks) and the position now.
+    pub played: f64,
+    pub end_position: f64,
+    /// The track was sought / paused at some point.
+    pub seek: bool,
+    pub pause: bool,
+    /// Why it ended: `finish`, `skip`, `back_skip`, `dislike`, `other_track`; `in_progress` for a
+    /// report while it plays; `None` for the start and for a pause.
+    pub reason: Option<&'static str>,
+}
+
+/// A random id in the UUID v4 format.
+pub fn random_uuid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    let mut x = nanos ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(std::process::id());
+    let mut next = || {
+        // splitmix64
+        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = x;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&next().to_be_bytes());
+    bytes[8..].copy_from_slice(&next().to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0F) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3F) | 0x80; // RFC 4122 variant
+    let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
 pub fn iso_now() -> String {
     let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs() as i64;
@@ -1211,6 +1317,39 @@ mod tests {
         assert!(api.track_url("39089632:60058", "lq").unwrap().starts_with("https://"));
         // Uploaded (UGC) tracks resolve too.
         assert!(api.track_url("bfc384d6-bd20-47e0-89d7-7a8657a2236a", "lq").unwrap().starts_with("https://"));
+    }
+
+    /// Network test: WRITES to the listening history — reports the start of a track from both APIs.
+    /// Run explicitly: `cargo test send_plays -- --ignored`.
+    #[test]
+    #[ignore]
+    fn send_plays() {
+        for api in apis() {
+            let track = api.tracks(&["39089632:60058".to_string()]).unwrap().remove(0);
+            let report = PlayReport {
+                play_id: random_uuid(),
+                track,
+                context: PlayContext::new("album", "60058"),
+                radio: None,
+                started: iso_now(),
+                played: 0.0,
+                end_position: 0.0,
+                seek: false,
+                pause: false,
+                reason: None,
+            };
+            api.send_play(&report).unwrap();
+        }
+    }
+
+    #[test]
+    fn uuids() {
+        let (a, b) = (random_uuid(), random_uuid());
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_eq!(&a[14..15], "4");
+        assert!("89ab".contains(&a[19..20]), "{a}");
+        assert_eq!(a.matches('-').count(), 4);
     }
 
     /// Network test: downloads and decodes a real image from Yandex CDN.

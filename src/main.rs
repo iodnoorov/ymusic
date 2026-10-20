@@ -153,6 +153,17 @@ fn main() -> Result<()> {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 
+    // The listening history learns where the track stopped; a slow network does not hold the exit long.
+    if let Some(report) = app.quit_play() {
+        let (done_tx, done_rx) = mpsc::channel();
+        let api = app.api.clone();
+        std::thread::spawn(move || {
+            let _ = api.send_play(&report);
+            let _ = done_tx.send(());
+        });
+        let _ = done_rx.recv_timeout(Duration::from_secs(2));
+    }
+
     sync_settings(&mut cfg, &app, icons);
     if app.logout {
         cfg.token = None;
