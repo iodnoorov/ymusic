@@ -83,7 +83,8 @@ fn main() -> Result<()> {
     app.start();
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);
-    app.show_covers = cfg.covers;
+    let art = app::Art::from_id(&cfg.art).unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None });
+    app.set_art(art);
     app.finish_track = cfg.finish_track;
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
@@ -120,7 +121,11 @@ fn main() -> Result<()> {
                 terminal.clear()?;
                 dirty = true;
             }
-            let frame = Duration::from_millis(if app.is_animating() { 200 } else { 1000 });
+            let frame = Duration::from_millis(match () {
+                _ if app.spectrum_moving() => 80,
+                _ if app.is_animating() => 200,
+                _ => 1000,
+            });
             if dirty || last_draw.elapsed() >= frame {
                 terminal.draw(|f| ui::draw(f, &mut app))?;
                 last_draw = Instant::now();
@@ -230,7 +235,7 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
         || cfg.eq != eq
         || cfg.quality != quality
         || cfg.crossfade != app.crossfade
-        || cfg.covers != app.show_covers
+        || cfg.art != app.art.id()
         || cfg.finish_track != app.finish_track
         || cfg.web_api != app.api.web
         || cfg.icons != icons;
@@ -238,7 +243,7 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
     cfg.eq = eq.to_string();
     cfg.quality = quality.to_string();
     cfg.crossfade = app.crossfade;
-    cfg.covers = app.show_covers;
+    cfg.art = app.art.id().to_string();
     cfg.finish_track = app.finish_track;
     cfg.web_api = app.api.web;
     cfg.icons = icons;

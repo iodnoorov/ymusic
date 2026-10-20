@@ -1,7 +1,7 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Modal, Setting, Source, StationRow, Tab};
+use crate::app::{App, Art, Modal, Setting, Source, StationRow, Tab};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -312,7 +312,20 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let info = if app.show_covers { draw_now_cover(f, app, inner) } else { inner };
+    let info = match app.art {
+        Art::None => inner,
+        art => {
+            let (art_area, info) = art_layout(app, inner);
+            if art_area.height >= 3 {
+                if art == Art::Spectrum {
+                    draw_spectrum(f.buffer_mut(), art_area, &app.spectrum);
+                } else {
+                    draw_now_cover(f, app, art_area);
+                }
+            }
+            info
+        }
+    };
     let Some(t) = app.current() else { return };
 
     let mut lines = vec![
@@ -340,9 +353,10 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }), info);
 }
 
-/// Draws the cover at the top of «Сейчас играет»; returns the area left for the track info.
-fn draw_now_cover(f: &mut Frame, app: &mut App, inner: Rect) -> Rect {
-    // Square cover: cell aspect ratio comes from the terminal font size.
+/// Square at the top of «Сейчас играет» for the cover or the spectrum, and the area left for the
+/// track info below it.
+fn art_layout(app: &App, inner: Rect) -> (Rect, Rect) {
+    // Square: cell aspect ratio comes from the terminal font size.
     let (fw, fh) = app.picker.as_ref().map_or((1, 2), |p| p.font_size());
     let ratio = f64::from(fh.max(1)) / f64::from(fw.max(1));
     let mut cover_h = (inner.height * 45 / 100).min(inner.height.saturating_sub(9));
@@ -354,19 +368,61 @@ fn draw_now_cover(f: &mut Frame, app: &mut App, inner: Rect) -> Rect {
     let [_, cover_area, info] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(cover_h), Constraint::Min(0)]).areas(inner);
     let [cover_area] = Layout::horizontal([Constraint::Length(cover_w)]).flex(Flex::Center).areas(cover_area);
-    if cover_h >= 3 {
-        if let Some(proto) = app.current_cover() {
-            f.render_stateful_widget(
-                StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))),
-                cover_area,
-                proto,
-            );
-        } else if let Some(t) = app.current() {
-            // Placeholder while the cover is loading (or when there is none).
-            draw_cover(f.buffer_mut(), cover_area, t.album_id.as_deref().unwrap_or(&t.id));
+    (cover_area, info)
+}
+
+fn draw_now_cover(f: &mut Frame, app: &mut App, area: Rect) {
+    if let Some(proto) = app.current_cover() {
+        f.render_stateful_widget(StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))), area, proto);
+    } else if let Some(t) = app.current() {
+        // Placeholder while the cover is loading (or when there is none).
+        draw_cover(f.buffer_mut(), area, t.album_id.as_deref().unwrap_or(&t.id));
+    }
+}
+
+/// Spectrum bars (`levels`: 0..1, low to high frequencies) across `area`, with gaps between
+/// them when there is room; heights in eighths of a cell, colored from the accent to the heart.
+fn draw_spectrum(buf: &mut Buffer, area: Rect, levels: &[f32]) {
+    const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    let n = levels.len() as u16;
+    if n == 0 || area.width == 0 {
+        return;
+    }
+    // Column → bar: bars are as wide as fits, a one-column gap after each if they are 2+ wide.
+    let bar_w = (area.width / n).max(1);
+    let gap = u16::from(bar_w >= 2);
+    let used = n.min(area.width) * bar_w;
+    let left = area.x + (area.width.saturating_sub(used)) / 2;
+    let mix = |t: f32| {
+        let (a, b) = (rgb(ACCENT), rgb(HEART));
+        let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
+        Color::Rgb(m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
+    };
+    let h = area.height;
+    for (i, &level) in levels.iter().enumerate().take(usize::from(area.width)) {
+        let eighths = (level.clamp(0.0, 1.0) * f32::from(h) * 8.0).round() as u16;
+        let x0 = left + i as u16 * bar_w;
+        for row in 0..h {
+            // Row 0 is the bottom one.
+            let filled = eighths.saturating_sub(row * 8).min(8);
+            if filled == 0 {
+                continue;
+            }
+            let color = mix(f32::from(row) / f32::from(h.max(2) - 1));
+            for x in x0..x0 + bar_w - gap {
+                if let Some(cell) = buf.cell_mut((x, area.y + h - 1 - row)) {
+                    cell.set_symbol(EIGHTHS[usize::from(filled)]).set_fg(color);
+                }
+            }
         }
     }
-    info
+}
+
+fn rgb(c: Color) -> (u8, u8, u8) {
+    match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (255, 255, 255),
+    }
 }
 
 // ---------------------------------------------------------------- track tables
@@ -1032,7 +1088,7 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::FinishTrack => "Доигрывать трек",
         Setting::LessAi => "Меньше ИИ-музыки",
         Setting::Api => "API",
-        Setting::Covers => "Обложка трека",
+        Setting::Art => "Картинка",
         Setting::Icons => "Иконки Nerd Font",
         Setting::About => "О программе",
         Setting::Logout => "Выйти из аккаунта",
@@ -1048,7 +1104,7 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::FinishTrack => "Новый список начнётся после текущего трека".into(),
         Setting::LessAi => "Реже ИИ-треки в рекомендациях · настройка аккаунта".into(),
         Setting::Api => "Запасной вариант — API сайта music.yandex.ru".into(),
-        Setting::Covers => "Обложка альбома в панели «Сейчас играет»".into(),
+        Setting::Art => "Над треком в «Сейчас играет»: обложка альбома или спектр".into(),
         Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
         Setting::About => "Версия и ссылки на проект".into(),
         Setting::Logout => "Токен будет удалён, программа закроется".into(),
@@ -1197,6 +1253,24 @@ fn draw_modal(f: &mut Frame, app: &App) {
 mod tests {
     use crate::api::Track;
     use crate::app::{App, Tab};
+
+    #[test]
+    fn spectrum_drawing() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        // 4 bars in 8 columns: 1 column each plus a gap; 3 rows (24 eighths) high.
+        let area = Rect::new(0, 0, 8, 3);
+        let mut buf = Buffer::empty(area);
+        super::draw_spectrum(&mut buf, area, &[1.0, 0.5, 0.0, 1.0 / 24.0]);
+        let rows: Vec<String> =
+            (0..3).map(|y| (0..8).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        assert_eq!(rows, ["█       ", "█ ▄     ", "█ █   ▁ "]);
+        // Narrower than the number of bars: one column each, no gaps, extra bars dropped.
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        super::draw_spectrum(&mut buf, area, &[1.0, 1.0, 1.0]);
+        assert_eq!((buf[(0, 0)].symbol(), buf[(1, 0)].symbol()), ("█", "█"));
+    }
     use ratatui::{backend::TestBackend, Terminal};
 
     /// Renders every tab.

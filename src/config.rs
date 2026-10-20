@@ -12,8 +12,11 @@ pub struct Config {
     /// Nerd Font icons (false — plain Unicode symbols).
     #[serde(default = "default_true")]
     pub icons: bool,
-    /// Album cover of the playing track.
-    #[serde(default = "default_true")]
+    /// What «Сейчас играет» shows above the track: `cover`, `spectrum` or `none` (see `app::Art`).
+    #[serde(default)]
+    pub art: String,
+    /// Older configs: `false` — no cover; read once into `art` and not written back.
+    #[serde(default = "default_true", skip_serializing)]
     pub covers: bool,
     /// Equalizer preset id (see `eq::PRESETS`).
     #[serde(default)]
@@ -49,6 +52,7 @@ impl Default for Config {
             token: None,
             volume: default_volume(),
             icons: true,
+            art: String::new(),
             covers: true,
             eq: String::new(),
             quality: String::new(),

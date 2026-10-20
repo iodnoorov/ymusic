@@ -151,7 +151,7 @@ pub enum Setting {
     FinishTrack,
     LessAi,
     Api,
-    Covers,
+    Art,
     Icons,
     About,
     Logout,
@@ -165,7 +165,7 @@ impl Setting {
         Setting::FinishTrack,
         Setting::LessAi,
         Setting::Api,
-        Setting::Covers,
+        Setting::Art,
         Setting::Icons,
         Setting::About,
         Setting::Logout,
@@ -175,6 +175,52 @@ impl Setting {
         Setting::ALL.iter().position(|s| *s == self).unwrap_or(0)
     }
 }
+
+/// What «Сейчас играет» shows above the track.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Art {
+    Cover,
+    Spectrum,
+    None,
+}
+
+impl Art {
+    pub const ALL: [Art; 3] = [Art::Cover, Art::Spectrum, Art::None];
+
+    /// Stored in the config.
+    pub fn id(self) -> &'static str {
+        match self {
+            Art::Cover => "cover",
+            Art::Spectrum => "spectrum",
+            Art::None => "none",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Art> {
+        Art::ALL.into_iter().find(|a| a.id() == id)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Art::Cover => "обложка",
+            Art::Spectrum => "спектр",
+            Art::None => "ничего",
+        }
+    }
+}
+
+/// How often the spectrum is asked for while a track plays.
+const SPECTRUM_PERIOD: Duration = Duration::from_millis(80);
+/// Band levels shown as empty and as full, dB (see `player::spectrum_levels`). Measured on several
+/// tracks of different genres: a typical level is in the middle of a bar, loud parts reach its top.
+const SPECTRUM_FLOOR: f32 = -90.0;
+const SPECTRUM_CEIL: f32 = -66.0;
+/// Music gets quieter towards high frequencies (about 1.5–2 dB per octave above 500 Hz in the same
+/// measurements): bands above it are raised, so all bars move alike.
+const SPECTRUM_TILT_FROM: f64 = 500.0;
+const SPECTRUM_TILT_DB: f64 = 1.5;
+/// A bar falls at most this much per query (it rises at once).
+const SPECTRUM_FALL: f32 = 0.08;
 
 /// Loudest volume, % (mpv's default `volume-max`); kept between runs as is.
 const MAX_VOLUME: f64 = 130.0;
@@ -263,8 +309,11 @@ pub struct App {
     pub finish_track: bool,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
-    /// Album cover in «Сейчас играет» (false — not even downloaded).
-    pub show_covers: bool,
+    /// What «Сейчас играет» shows above the track; covers are downloaded only for `Art::Cover`.
+    pub art: Art,
+    /// Spectrum bars, 0..1 per band, low to high.
+    pub spectrum: Vec<f32>,
+    spectrum_asked: Instant,
     /// The terminal keeps a drawn image until it is deleted: set when the cover is hidden.
     pub clear_images: bool,
     /// «Меньше ИИ-музыки» from the account settings; `None` until loaded.
@@ -365,7 +414,9 @@ impl App {
             crossfade: 0,
             finish_track: false,
             icons: true,
-            show_covers: true,
+            art: Art::Cover,
+            spectrum: vec![0.0; crate::player::SPECTRUM_BANDS],
+            spectrum_asked: Instant::now(),
             clear_images: false,
             less_ai: None,
             time_pos: 0.0,
@@ -443,6 +494,45 @@ impl App {
             || self.search_loading
             || self.liked_loading
             || self.wave.as_ref().is_some_and(|w| w.fetching)
+            || self.spectrum.iter().any(|&v| v > 0.0)
+    }
+
+    /// The spectrum is shown and moves: the screen is redrawn more often.
+    pub fn spectrum_moving(&self) -> bool {
+        self.art == Art::Spectrum && self.spectrum.iter().any(|&v| v > 0.0)
+    }
+
+    /// A track is heard right now.
+    fn playing(&self) -> bool {
+        self.pos.is_some() && !self.paused && !self.loading_track && !self.stopped
+    }
+
+    /// New band levels (dBFS): bars rise at once and fall slowly.
+    fn on_spectrum(&mut self, levels: &[f32]) {
+        if !self.playing() {
+            return;
+        }
+        for (i, (bar, &db)) in self.spectrum.iter_mut().zip(levels).enumerate() {
+            let tilt = SPECTRUM_TILT_DB * (crate::player::spectrum_freq(i) / SPECTRUM_TILT_FROM).log2().max(0.0);
+            let db = db + tilt as f32;
+            let v = ((db - SPECTRUM_FLOOR) / (SPECTRUM_CEIL - SPECTRUM_FLOOR)).clamp(0.0, 1.0);
+            *bar = v.max(*bar - SPECTRUM_FALL);
+        }
+    }
+
+    /// Asks mpv for the spectrum while a track plays; otherwise the bars go down.
+    fn tick_spectrum(&mut self) {
+        if self.art != Art::Spectrum || self.spectrum_asked.elapsed() < SPECTRUM_PERIOD {
+            return;
+        }
+        self.spectrum_asked = Instant::now();
+        if self.playing() {
+            self.player.request_spectrum();
+        } else {
+            for bar in &mut self.spectrum {
+                *bar = (*bar - SPECTRUM_FALL).max(0.0);
+            }
+        }
     }
 
     pub fn visible_status(&self) -> Option<&str> {
@@ -889,7 +979,7 @@ impl App {
 
     fn load_cover(&mut self, url: Option<String>) {
         let Some(url) = url else { return };
-        if !self.show_covers
+        if self.art != Art::Cover
             || self.picker.is_none() || self.covers.iter().any(|(u, _)| *u == url) || !self.covers_loading.insert(url.clone())
         {
             return;
@@ -1016,6 +1106,7 @@ impl App {
                     self.paused = p;
                 }
                 PlayerEvent::Volume(v) => self.volume = v,
+                PlayerEvent::Spectrum(levels) => self.on_spectrum(&levels),
                 PlayerEvent::Mute(m) => self.muted = m,
                 PlayerEvent::Eof => {
                     // mpv moves to the appended (preloaded) entry on its own.
@@ -1303,6 +1394,7 @@ impl App {
     /// fresh link once): a server that sends the headers and then stalls makes mpv reconnect
     /// forever without an error, and switching away and back used to be the only cure.
     pub fn tick(&mut self) {
+        self.tick_spectrum();
         let Some(deadline) = self.load_deadline else { return };
         if self.paused {
             // mpv does not start a paused track: count from the moment it is resumed.
@@ -1534,12 +1626,19 @@ impl App {
         crate::ui::set_nerd_icons(nerd);
     }
 
-    pub fn set_show_covers(&mut self, on: bool) {
-        self.show_covers = on;
-        if on {
+    pub fn set_art(&mut self, art: Art) {
+        let was = self.art;
+        self.art = art;
+        // The analysis filter costs a little CPU: it runs only while the spectrum is shown.
+        self.player.set_spectrum(art == Art::Spectrum);
+        if art != Art::Spectrum {
+            self.spectrum.iter_mut().for_each(|v| *v = 0.0);
+        }
+        if art == Art::Cover {
             let cover = self.current().and_then(|t| t.cover.clone());
             self.load_cover(cover);
-        } else {
+        } else if was == Art::Cover {
+            // The terminal keeps a drawn image until it is deleted.
             self.shown_cover = None;
             self.clear_images = true;
         }
@@ -1558,7 +1657,7 @@ impl App {
             },
             Setting::FinishTrack => if self.finish_track { "вкл" } else { "выкл" }.to_string(),
             Setting::Api => if self.api.web { "сайт" } else { "мобильный" }.to_string(),
-            Setting::Covers => if self.show_covers { "вкл" } else { "выкл" }.to_string(),
+            Setting::Art => self.art.name().to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::About | Setting::Logout => return None,
         })
@@ -1599,7 +1698,10 @@ impl App {
                 self.reload_all();
                 self.set_status(format!("API: {} · списки обновляются…", if self.api.web { "сайт" } else { "мобильный" }));
             }
-            Setting::Covers => self.set_show_covers(!self.show_covers),
+            Setting::Art => {
+                let i = Art::ALL.iter().position(|a| *a == self.art).unwrap_or(0);
+                self.set_art(Art::ALL[cycle(i, Art::ALL.len())]);
+            }
             Setting::Icons => self.set_icons(!self.icons),
             Setting::About | Setting::Logout => {}
         }
@@ -2081,7 +2183,7 @@ mod tests {
     fn modal_keys() {
         use super::*;
         use ratatui::crossterm::event::KeyEvent;
-        let (mut app, _audio) = App::for_test();
+        let (mut app, audio) = App::for_test();
         let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
         let pl = |k: &str, owner: &str| Playlist { owner: owner.into(), kind: k.into(), title: format!("P{k}"), track_count: 0 };
         app.playlists = vec![pl("1", "1"), pl("2", "999"), pl("3", "1")];
@@ -2216,17 +2318,25 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(!app.api.web);
 
-        // Covers off: the shown one is dropped and new ones are not downloaded.
+        // Cover → spectrum → nothing → cover: the shown cover is dropped and new ones are not
+        // downloaded; the analysis filter runs only for the spectrum.
         app.on_key(key(KeyCode::Char('j')));
+        audio.take();
         app.on_key(key(KeyCode::Right));
-        assert!(!app.show_covers && app.clear_images);
+        assert!(app.art == Art::Spectrum && app.clear_images);
+        assert_eq!(audio.take(), ["spectrum true"]);
         app.picker = Some(Picker::from_fontsize((8, 16)));
         app.load_cover(Some("http://x/cover".into()));
         assert!(app.covers_loading.is_empty());
-        app.on_key(key(KeyCode::Left));
-        assert!(app.show_covers);
+        app.on_key(key(KeyCode::Right));
+        assert_eq!((app.art, audio.take()), (Art::None, vec!["spectrum false".to_string()]));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.art, Art::Cover);
         app.load_cover(Some("http://x/cover".into()));
         assert!(app.covers_loading.contains("http://x/cover"));
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.art, Art::None);
+        app.on_key(key(KeyCode::Right));
         app.picker = None;
 
         app.on_key(key(KeyCode::Char('j')));
@@ -2439,6 +2549,47 @@ mod tests {
         app.on_msg(Msg::Url { gen: app.gen, result: Ok("http://x/b".into()) });
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
         assert!(app.load_deadline.is_none());
+    }
+
+    #[test]
+    fn spectrum_bars() {
+        use super::*;
+        let (mut app, audio) = App::for_test();
+        app.set_art(Art::Spectrum);
+        let n = crate::player::SPECTRUM_BANDS;
+        // Nothing plays: nothing is asked for and levels are ignored.
+        app.spectrum_asked -= SPECTRUM_PERIOD;
+        audio.take();
+        app.tick();
+        app.on_msg(Msg::Player(PlayerEvent::Spectrum(vec![0.0; n])));
+        assert!(!app.spectrum_moving() && !audio.take().contains(&"spectrum?".to_string()));
+
+        app.queue = vec![Track::from_json(&json!({"id": 1})).unwrap()];
+        app.pos = Some(0);
+        app.spectrum_asked -= SPECTRUM_PERIOD;
+        app.tick();
+        assert!(audio.take().contains(&"spectrum?".to_string()));
+        // Bars rise at once, fall slowly; the floor and the ceiling clamp them.
+        let mut levels = vec![SPECTRUM_FLOOR - 10.0; n];
+        levels[0] = SPECTRUM_CEIL + 5.0;
+        levels[1] = (SPECTRUM_FLOOR + SPECTRUM_CEIL) / 2.0;
+        app.on_msg(Msg::Player(PlayerEvent::Spectrum(levels.clone())));
+        assert_eq!((app.spectrum[0], app.spectrum[1], app.spectrum[2]), (1.0, 0.5, 0.0));
+        levels[0] = SPECTRUM_FLOOR;
+        app.on_msg(Msg::Player(PlayerEvent::Spectrum(levels)));
+        assert!((app.spectrum[0] - (1.0 - SPECTRUM_FALL)).abs() < 1e-6);
+        assert!(app.spectrum_moving());
+        // Paused: the bars go down on their own.
+        app.paused = true;
+        for _ in 0..20 {
+            app.spectrum_asked -= SPECTRUM_PERIOD;
+            app.tick();
+        }
+        assert!(!app.spectrum_moving());
+        // Another mode clears them.
+        app.spectrum[3] = 0.7;
+        app.set_art(Art::None);
+        assert!(app.spectrum.iter().all(|&v| v == 0.0));
     }
 
     #[test]

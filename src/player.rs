@@ -20,6 +20,70 @@ pub enum PlayerEvent {
     Eof,
     Error(String),
     Died,
+    /// Levels of the spectrum bands (`SPECTRUM_BANDS`), dB, low to high.
+    Spectrum(Vec<f32>),
+}
+
+/// Bands of the spectrum visualizer: log-spaced from `SPECTRUM_LOW` to `SPECTRUM_HIGH` Hz.
+pub const SPECTRUM_BANDS: usize = 16;
+const SPECTRUM_LOW: f64 = 40.0;
+const SPECTRUM_HIGH: f64 = 16000.0;
+/// `request_id` of the spectrum queries: their answers are told apart from other replies.
+const SPECTRUM_REQUEST: u64 = 7;
+
+/// Analysis filter of the spectrum visualizer. The sound passes unchanged; a mono copy is split
+/// into band-pass filtered channels, merged with the sound into one stream, `aspectralstats`
+/// measures the mean spectral magnitude of every channel, and `pan` keeps only the sound. mpv
+/// shows the measurements in `af-metadata/viz`: band `i` is channel `i + 3`. `amerge` drops the
+/// metadata of its inputs, so the measuring has to follow it (`pan` keeps it); `aspectralstats`
+/// with one measure costs less than half of `astats`, which matters on a Raspberry Pi.
+/// Width of a band in octaves (bands touch each other).
+fn spectrum_step() -> f64 {
+    (SPECTRUM_HIGH / SPECTRUM_LOW).log2() / (SPECTRUM_BANDS - 1) as f64
+}
+
+/// Center frequency of band `i`, Hz.
+pub fn spectrum_freq(i: usize) -> f64 {
+    SPECTRUM_LOW * 2f64.powf(spectrum_step() * i as f64)
+}
+
+fn spectrum_filter() -> String {
+    let step = spectrum_step();
+    let split: String = (0..SPECTRUM_BANDS).map(|i| format!("[x{i}]")).collect();
+    let bands: String = (0..SPECTRUM_BANDS)
+        .map(|i| {
+            let f = spectrum_freq(i);
+            format!("[x{i}]bandpass=f={f:.0}:width_type=o:w={step:.3}[b{i}];")
+        })
+        .collect();
+    let merged: String = (0..SPECTRUM_BANDS).map(|i| format!("[b{i}]")).collect();
+    format!(
+        "@viz:lavfi=[[in]aformat=channel_layouts=stereo,asplit=2[m][x];[x]pan=mono|c0=0.5*c0+0.5*c1,asplit={n}{split};\
+         {bands}[m]{merged}amerge=inputs={inputs},\
+         aspectralstats=win_size=1024:overlap=0:measure=mean,pan=stereo|c0=c0|c1=c1[out]]",
+        n = SPECTRUM_BANDS,
+        inputs = SPECTRUM_BANDS + 1,
+    )
+}
+
+/// Band levels (dB of the mean spectral magnitude) from the value of `af-metadata/viz`; silence and
+/// missing bands are -150 dB.
+fn spectrum_levels(meta: &Value) -> Option<Vec<f32>> {
+    let meta = meta.as_object()?;
+    if meta.is_empty() {
+        return None;
+    }
+    Some(
+        (0..SPECTRUM_BANDS)
+            .map(|i| {
+                meta.get(&format!("lavfi.aspectralstats.{}.mean", i + 3))
+                    .and_then(Value::as_str)
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|&v| v > 0.0)
+                    .map_or(-150.0, |v| (20.0 * v.log10()).max(-150.0))
+            })
+            .collect(),
+    )
 }
 
 pub struct Player {
@@ -28,6 +92,8 @@ pub struct Player {
     sock: PathBuf,
     /// Equalizer part of the `af` chain.
     eq: String,
+    /// The spectrum analysis filter is in the chain.
+    spectrum: bool,
     /// Fade length in seconds (0 — off) and the current track's duration it is computed for.
     fade: f64,
     duration: f64,
@@ -62,6 +128,10 @@ pub trait Audio {
     fn set_fade(&mut self, secs: f64);
     /// Duration of the track that has just started: the fade-out is placed before its end.
     fn set_track_duration(&mut self, secs: f64);
+    /// Adds or removes the spectrum analysis filter.
+    fn set_spectrum(&mut self, on: bool);
+    /// Asks for the current band levels: they come as `PlayerEvent::Spectrum`.
+    fn request_spectrum(&mut self);
     fn stop(&mut self);
 }
 
@@ -157,6 +227,17 @@ impl Player {
             for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
                 let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+                if v["request_id"].as_u64() == Some(SPECTRUM_REQUEST) {
+                    match spectrum_levels(&v["data"]) {
+                        Some(levels) => {
+                            if tx.send(PlayerEvent::Spectrum(levels).into()).is_err() {
+                                return;
+                            }
+                        }
+                        None => continue,
+                    }
+                    continue;
+                }
                 let ev = match v["event"].as_str() {
                     Some("property-change") => match (v["name"].as_str(), &v["data"]) {
                         (Some("time-pos"), Value::Number(n)) => {
@@ -189,7 +270,7 @@ impl Player {
             let _ = tx.send(PlayerEvent::Died.into());
         });
 
-        let mut p = Player { child, stream, sock, eq: String::new(), fade: 0.0, duration: 0.0 };
+        let mut p = Player { child, stream, sock, eq: String::new(), spectrum: false, fade: 0.0, duration: 0.0 };
         for (i, prop) in ["time-pos", "duration", "pause", "volume", "mute"].iter().enumerate() {
             p.cmd(json!(["observe_property", i + 1, prop]));
         }
@@ -202,7 +283,13 @@ impl Player {
 
     fn apply_filters(&mut self) {
         let fade = fade_filter(self.fade, self.duration);
-        let af = [fade.as_str(), self.eq.as_str()].into_iter().filter(|f| !f.is_empty()).collect::<Vec<_>>().join(",");
+        // The spectrum is measured last: it shows what is heard.
+        let viz = if self.spectrum { spectrum_filter() } else { String::new() };
+        let af = [fade.as_str(), self.eq.as_str(), viz.as_str()]
+            .into_iter()
+            .filter(|f| !f.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
         self.cmd(json!(["set_property", "af", af]));
     }
 }
@@ -260,6 +347,21 @@ impl Audio for Player {
                 self.apply_filters();
             }
         }
+    }
+
+    fn set_spectrum(&mut self, on: bool) {
+        if self.spectrum != on {
+            self.spectrum = on;
+            self.apply_filters();
+        }
+    }
+
+    fn request_spectrum(&mut self) {
+        let _ = writeln!(
+            self.stream,
+            "{}",
+            json!({"command": ["get_property", "af-metadata/viz"], "request_id": SPECTRUM_REQUEST})
+        );
     }
 
     fn stop(&mut self) {
@@ -329,6 +431,12 @@ impl Audio for FakeAudio {
     fn set_track_duration(&mut self, secs: f64) {
         self.push(format!("duration {secs}"));
     }
+    fn set_spectrum(&mut self, on: bool) {
+        self.push(format!("spectrum {on}"));
+    }
+    fn request_spectrum(&mut self) {
+        self.push("spectrum?".into());
+    }
     fn stop(&mut self) {
         self.push("stop".into());
     }
@@ -336,7 +444,24 @@ impl Audio for FakeAudio {
 
 #[cfg(test)]
 mod tests {
-    use super::fade_filter;
+    use super::{fade_filter, spectrum_filter, spectrum_levels, SPECTRUM_BANDS};
+    use serde_json::json;
+
+    #[test]
+    fn spectrum() {
+        let f = spectrum_filter();
+        assert!(f.starts_with("@viz:lavfi=[[in]aformat=channel_layouts=stereo,asplit=2[m][x];"), "{f}");
+        assert!(f.contains("[x0]bandpass=f=40:width_type=o:w=0.576[b0];"), "{f}");
+        assert!(f.contains("[x15]bandpass=f=16000:"), "{f}");
+        assert!(f.contains(&format!("amerge=inputs={}", SPECTRUM_BANDS + 1)), "{f}");
+        assert!(!f.contains('\n') && !f.contains("  "), "{f}");
+        assert!(f.contains("aspectralstats=win_size=1024:overlap=0:measure=mean,pan=stereo"), "{f}");
+        let meta = json!({"lavfi.aspectralstats.1.mean": "0.5", "lavfi.aspectralstats.3.mean": "0.001", "lavfi.aspectralstats.4.mean": "0"});
+        let levels = spectrum_levels(&meta).unwrap();
+        assert_eq!(levels.len(), SPECTRUM_BANDS);
+        assert_eq!(&levels[..3], &[-60.0, -150.0, -150.0]);
+        assert_eq!(spectrum_levels(&json!({})), None);
+    }
 
     #[test]
     fn fade() {
