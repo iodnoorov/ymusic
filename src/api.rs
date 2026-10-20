@@ -487,9 +487,10 @@ impl Api {
 
     // ---------------------------------------------------------------- likes
 
-    /// Full ids (`track:album`) of liked tracks, newest first.
+    /// Full ids (`track:album`) of liked music tracks, newest first. Liked podcast episodes and
+    /// audiobook chapters share the same list and are filtered out by the server.
     pub fn liked_ids(&self) -> Result<Vec<String>> {
-        let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[])?;
+        let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[("trackMetaType", "music")])?;
         Ok(r["library"]["tracks"]
             .as_array()
             .into_iter()
