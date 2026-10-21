@@ -1008,7 +1008,6 @@ fn draw_help(f: &mut Frame) {
 }
 
 pub const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
-pub const UPSTREAM_URL: &str = "https://github.com/Rexilone/yamusic-cli";
 pub const AUR_URL: &str = "https://aur.archlinux.org/packages/ymusic-cli";
 pub const AUR_BIN_URL: &str = "https://aur.archlinux.org/packages/ymusic-cli-bin";
 
@@ -1029,8 +1028,6 @@ fn render_link(buf: &mut Buffer, x: u16, y: u16, text: &str, url: &str, style: S
 fn draw_about(f: &mut Frame) {
     let i = ic();
     let link = Style::new().fg(ACCENT).underlined();
-    // Terminals can't use a smaller font for one line, so the fork note is dimmed instead.
-    let faint = Style::new().fg(MUTED).italic();
     // One entry per row: text segments (text, style, link target); an empty entry is a blank row.
     let rows: Vec<Vec<(String, Style, Option<&str>)>> = vec![
         vec![(format!("{}  ymusic", i.logo), Style::new().fg(ACCENT).bold(), None)],
@@ -1041,9 +1038,6 @@ fn draw_about(f: &mut Frame) {
         vec![(REPO_URL.into(), link, Some(REPO_URL))],
         vec![(AUR_URL.into(), link, Some(AUR_URL))],
         vec![(AUR_BIN_URL.into(), link, Some(AUR_BIN_URL))],
-        vec![],
-        vec![],
-        vec![("Forked from: ".into(), faint, None), (UPSTREAM_URL.into(), faint.underlined(), Some(UPSTREAM_URL))],
     ];
     let row_width = |row: &[(String, Style, Option<&str>)]| row.iter().map(|(t, ..)| Span::raw(t.as_str()).width()).sum::<usize>();
     let widest = rows.iter().map(|r| row_width(r)).max().unwrap_or(0) as u16;
@@ -1407,11 +1401,10 @@ mod tests {
             "https://github.com/iodnoorov/ymusic",
             "https://aur.archlinux.org/packages/ymusic-cli ",
             "https://aur.archlinux.org/packages/ymusic-cli-bin",
-            "Forked from: https://github.com/Rexilone/yamusic-cli",
         ] {
             assert!(plain.contains(want), "{want}");
         }
-        assert!(text.contains(&format!("\x1b]8;;{}\x07", super::UPSTREAM_URL)));
+        assert!(text.contains(&format!("\x1b]8;;{}\x07", super::REPO_URL)));
         assert!(text.contains(&format!("\x1b]8;;{}\x07", super::AUR_BIN_URL)));
         app.show_about = false;
 
