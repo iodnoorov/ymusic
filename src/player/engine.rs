@@ -4,9 +4,11 @@
 //! heard rather than what is decoded.
 
 use super::decode::Decoder;
+use super::dsp::{fade_gain, Equalizer, Spectrum};
 use super::fetch::Download;
 use super::output::{Mark, Output, Ring, RATE};
-use super::{Audio, PlayerEvent};
+use super::{spectrum_freq, spectrum_step, Audio, PlayerEvent, SPECTRUM_BANDS};
+use crate::eq::Preset;
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -51,9 +53,27 @@ struct Shared {
     next: Mutex<Option<Arc<Job>>>,
     /// Gain applied to the samples (volume and mute), `f32` bits.
     gain: AtomicU32,
+    settings: Mutex<Settings>,
+}
+
+/// What the producer does to the sound besides the volume.
+#[derive(Clone, Copy, Default)]
+struct Settings {
+    eq: Option<&'static Preset>,
+    /// Fade length, seconds (0 — off).
+    fade: f64,
+    spectrum: bool,
+    /// Bumped on every change: the producer rebuilds its filters.
+    version: u64,
 }
 
 impl Shared {
+    fn change(&self, f: impl FnOnce(&mut Settings)) {
+        let mut s = self.settings.lock().unwrap();
+        f(&mut s);
+        s.version += 1;
+    }
+
     fn set_gain(&self, volume: f64, muted: bool) {
         // The same cubic curve as mpv's volume, so that the saved volume sounds the same.
         let gain = if muted { 0.0 } else { (volume / 100.0).powi(3) as f32 };
@@ -78,26 +98,34 @@ enum Cmd {
     ToggleMute,
     Seek(f64),
     Volume(f64),
+    RequestSpectrum,
     Stop,
 }
 
 pub struct NativePlayer {
+    shared: Arc<Shared>,
     cmd: Option<Sender<Cmd>>,
     control: Option<JoinHandle<()>>,
 }
 
 impl NativePlayer {
     pub fn spawn<M: From<PlayerEvent> + Send + 'static>(tx: Sender<M>, volume: u8) -> Result<NativePlayer> {
-        let shared = Arc::new(Shared { ring: Arc::new(Ring::default()), next: Mutex::new(None), gain: AtomicU32::new(0) });
+        let shared = Arc::new(Shared {
+            ring: Arc::new(Ring::default()),
+            next: Mutex::new(None),
+            gain: AtomicU32::new(0),
+            settings: Mutex::new(Settings { version: 1, ..Settings::default() }),
+        });
         shared.set_gain(f64::from(volume), false);
         let output = Output::open(shared.ring.clone())?;
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (work_tx, work_rx) = mpsc::channel();
         let s = shared.clone();
-        std::thread::spawn(move || produce(&s, &work_rx));
-        let control = std::thread::spawn(move || {
+        std::thread::Builder::new().name("player-decode".into()).spawn(move || produce(&s, &work_rx))?;
+        let s = shared.clone();
+        let control = std::thread::Builder::new().name("player-control".into()).spawn(move || {
             let mut c = Control {
-                shared,
+                shared: s,
                 output: Some(output),
                 work: work_tx,
                 live: Vec::new(),
@@ -109,8 +137,8 @@ impl NativePlayer {
                 volume: f64::from(volume),
             };
             c.run(&cmd_rx, &tx);
-        });
-        Ok(NativePlayer { cmd: Some(cmd_tx), control: Some(control) })
+        })?;
+        Ok(NativePlayer { shared, cmd: Some(cmd_tx), control: Some(control) })
     }
 
     fn send(&self, cmd: Cmd) {
@@ -155,11 +183,20 @@ impl Audio for NativePlayer {
     fn set_volume(&mut self, v: f64) {
         self.send(Cmd::Volume(v));
     }
-    fn set_eq_filter(&mut self, _af: &str) {}
-    fn set_fade(&mut self, _secs: f64) {}
+    fn set_eq(&mut self, preset: &'static Preset) {
+        self.shared.change(|s| s.eq = (!preset.is_flat()).then_some(preset));
+    }
+    fn set_fade(&mut self, secs: f64) {
+        self.shared.change(|s| s.fade = secs.max(0.0));
+    }
+    /// The producer takes the duration from the file itself.
     fn set_track_duration(&mut self, _secs: f64) {}
-    fn set_spectrum(&mut self, _on: bool) {}
-    fn request_spectrum(&mut self) {}
+    fn set_spectrum(&mut self, on: bool) {
+        self.shared.change(|s| s.spectrum = on);
+    }
+    fn request_spectrum(&mut self) {
+        self.send(Cmd::RequestSpectrum);
+    }
     fn stop(&mut self) {
         self.send(Cmd::Stop);
     }
@@ -290,6 +327,11 @@ impl Control {
                     }
                 }
             }
+            Cmd::RequestSpectrum => {
+                if let Some(levels) = self.shared.ring.spectrum(self.output()?.played()?) {
+                    events.push(PlayerEvent::Spectrum(levels));
+                }
+            }
             Cmd::Stop => self.reset()?,
         }
         Ok(())
@@ -409,6 +451,9 @@ fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
     };
     let duration = dec.duration();
     let mut resampler = Resampler::new(dec.sample_rate());
+    let mut effects = Effects::default();
+    // Position in the track at the start of the next chunk, seconds.
+    let mut pos = 0.0;
     ring.mark(Mark::Start { job: job.id, at: 0.0, duration, gapless });
     let mut buf = Vec::new();
     loop {
@@ -420,6 +465,8 @@ fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
             // Past the end the demuxer fails: the track is over.
             let Ok(at) = dec.seek(t) else { break };
             resampler.reset();
+            effects.reset();
+            pos = at;
             gen = ring.mark(Mark::Start { job: job.id, at, duration, gapless: false });
         }
         match dec.next_chunk() {
@@ -427,6 +474,9 @@ fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
                 let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
                 buf.clear();
                 resampler.process(chunk, &mut buf);
+                effects.sync(*shared.settings.lock().unwrap());
+                effects.process(&mut buf, pos, duration, |offset, levels| ring.push_spectrum(gen, offset, levels));
+                pos += (buf.len() / 2) as f64 / f64::from(RATE);
                 for s in &mut buf {
                     *s = (*s * gain).clamp(-1.0, 1.0);
                 }
@@ -442,6 +492,60 @@ fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
     }
     ring.mark(Mark::End);
     None
+}
+
+/// The processing of one track as mpv's filter chain did it: fade, equalizer with its limiter,
+/// then the spectrum measurement (before the volume, so the bars do not depend on it).
+#[derive(Default)]
+struct Effects {
+    version: u64,
+    fade: f64,
+    eq: Option<(&'static str, Equalizer)>,
+    spectrum: Option<Spectrum>,
+}
+
+impl Effects {
+    /// Follows changed settings; an unchanged equalizer keeps its state.
+    fn sync(&mut self, s: Settings) {
+        if s.version == self.version {
+            return;
+        }
+        self.version = s.version;
+        self.fade = s.fade;
+        if s.eq.map(|p| p.id) != self.eq.as_ref().map(|(id, _)| *id) {
+            self.eq = s.eq.map(|p| (p.id, Equalizer::new(p.biquads(f64::from(RATE)), f64::from(RATE))));
+        }
+        if s.spectrum != self.spectrum.is_some() {
+            self.spectrum = s.spectrum.then(|| {
+                let freqs: Vec<f64> = (0..SPECTRUM_BANDS).map(spectrum_freq).collect();
+                Spectrum::new(&freqs, spectrum_step(), f64::from(RATE))
+            });
+        }
+    }
+
+    fn reset(&mut self) {
+        if let Some(s) = &mut self.spectrum {
+            s.reset();
+        }
+    }
+
+    /// Processes a chunk starting `pos` seconds into a track of `duration`; spectrum
+    /// measurements go to `measured` with the frame they end at within the chunk.
+    fn process(&mut self, buf: &mut [f32], pos: f64, duration: Option<f64>, measured: impl FnMut(usize, Vec<f32>)) {
+        if self.fade > 0.0 {
+            for (i, frame) in buf.chunks_exact_mut(2).enumerate() {
+                let g = fade_gain(pos + i as f64 / f64::from(RATE), self.fade, duration);
+                frame[0] *= g;
+                frame[1] *= g;
+            }
+        }
+        if let Some((_, eq)) = &mut self.eq {
+            eq.process(buf);
+        }
+        if let Some(s) = &mut self.spectrum {
+            s.feed(buf, measured);
+        }
+    }
 }
 
 /// Linear resampling to the output rate, for the rare track that has another one.

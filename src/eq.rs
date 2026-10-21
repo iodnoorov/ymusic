@@ -1,4 +1,7 @@
-//! Equalizer presets, applied as an mpv audio filter (ffmpeg `equalizer` bands).
+//! Equalizer presets, applied as an mpv audio filter (ffmpeg `equalizer` bands) or as filters of
+//! the own player.
+
+use crate::player::Biquad;
 
 pub struct Preset {
     /// Stored in the config.
@@ -58,6 +61,24 @@ pub fn index(id: &str) -> usize {
 impl Preset {
     pub fn is_flat(&self) -> bool {
         self.bands.is_empty()
+    }
+
+    /// The bands as filters of the own player; none for the flat preset.
+    pub fn biquads(&self, rate: f64) -> Vec<Biquad> {
+        let last = self.bands.len().saturating_sub(1);
+        self.bands
+            .iter()
+            .enumerate()
+            .map(|(i, &(f, g))| {
+                let f = f64::from(f);
+                match self.shape {
+                    Shape::Octave => Biquad::peaking_octaves(f, 1.0, g, rate),
+                    Shape::Site if i == 0 => Biquad::shelf(false, f, 1.0, g, rate),
+                    Shape::Site if i == last => Biquad::shelf(true, f, 1.0, g, rate),
+                    Shape::Site => Biquad::peaking_q(f, 1.0, g, rate),
+                }
+            })
+            .collect()
     }
 
     /// Value for mpv's `af` property; empty for the flat preset.

@@ -1609,7 +1609,7 @@ impl App {
     pub fn set_eq(&mut self, idx: usize) {
         let idx = idx.min(crate::eq::PRESETS.len() - 1);
         self.eq = idx;
-        self.player.set_eq_filter(&crate::eq::PRESETS[idx].filter());
+        self.player.set_eq(&crate::eq::PRESETS[idx]);
     }
 
     /// Fade-in/fade-out length in seconds (0 — off).

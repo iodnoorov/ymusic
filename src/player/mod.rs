@@ -11,10 +11,12 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 mod decode;
+mod dsp;
 mod engine;
 mod fetch;
 mod output;
 
+pub use dsp::Biquad;
 pub use engine::NativePlayer;
 
 #[derive(Debug)]
@@ -46,7 +48,7 @@ const SPECTRUM_REQUEST: u64 = 7;
 /// metadata of its inputs, so the measuring has to follow it (`pan` keeps it); `aspectralstats`
 /// with one measure costs less than half of `astats`, which matters on a Raspberry Pi.
 /// Width of a band in octaves (bands touch each other).
-fn spectrum_step() -> f64 {
+pub fn spectrum_step() -> f64 {
     (SPECTRUM_HIGH / SPECTRUM_LOW).log2() / (SPECTRUM_BANDS - 1) as f64
 }
 
@@ -130,8 +132,7 @@ pub trait Audio {
     fn toggle_mute(&mut self);
     fn seek(&mut self, secs: f64);
     fn set_volume(&mut self, v: f64);
-    /// Sets the equalizer filter (empty string removes it).
-    fn set_eq_filter(&mut self, af: &str);
+    fn set_eq(&mut self, preset: &'static crate::eq::Preset);
     /// Sets the fade length in seconds (0 — off).
     fn set_fade(&mut self, secs: f64);
     /// Duration of the track that has just started: the fade-out is placed before its end.
@@ -343,8 +344,8 @@ impl Audio for Player {
         self.cmd(json!(["set_property", "volume", v]));
     }
 
-    fn set_eq_filter(&mut self, af: &str) {
-        self.eq = af.to_string();
+    fn set_eq(&mut self, preset: &'static crate::eq::Preset) {
+        self.eq = preset.filter();
         self.apply_filters();
     }
 
@@ -436,8 +437,8 @@ impl Audio for FakeAudio {
     fn set_volume(&mut self, v: f64) {
         self.push(format!("volume {v}"));
     }
-    fn set_eq_filter(&mut self, af: &str) {
-        self.push(format!("eq {af}"));
+    fn set_eq(&mut self, preset: &'static crate::eq::Preset) {
+        self.push(format!("eq {}", preset.id));
     }
     fn set_fade(&mut self, secs: f64) {
         self.push(format!("fade {secs}"));

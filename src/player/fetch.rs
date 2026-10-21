@@ -47,7 +47,13 @@ impl Download {
     fn start_with(url: &str, stall: Duration) -> Download {
         let shared = Arc::new(Shared::default());
         let (s, url) = (shared.clone(), url.to_string());
-        std::thread::spawn(move || run(&s, &url, stall));
+        // Only fails when the system is out of threads; the readers then get an error.
+        if let Err(e) = std::thread::Builder::new().name("player-download".into()).spawn({
+            let s = s.clone();
+            move || run(&s, &url, stall)
+        }) {
+            s.update(|st| st.error = Some(e.to_string()));
+        }
         Download(shared)
     }
 

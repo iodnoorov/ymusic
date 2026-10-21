@@ -39,7 +39,12 @@ struct RingState {
     /// The job being decoded and a seek requested in it.
     producing: u64,
     seek: Option<f64>,
+    /// Spectrum measurements by the frame they end at.
+    spectra: VecDeque<(u64, Vec<f32>)>,
 }
+
+/// Measurements kept for the visualizer: about the sound in the ring and on the server.
+const MAX_SPECTRA: usize = 32;
 
 /// Interleaved stereo frames on their way to the server, with marks at track boundaries.
 #[derive(Default)]
@@ -85,6 +90,7 @@ impl Ring {
         s.samples.clear();
         s.handed = s.pushed;
         s.marks.clear();
+        s.spectra.clear();
         s.seek = None;
         s.gen += 1;
         self.space.notify_all();
@@ -114,6 +120,30 @@ impl Ring {
         let mut s = self.state.lock().unwrap();
         let seek = s.seek.take();
         (s.gen, seek)
+    }
+
+    /// Stores band levels measured over the sound about to be pushed, ending `offset` frames into
+    /// it; dropped if the ring was cleared since `gen`.
+    pub fn push_spectrum(&self, gen: u64, offset: usize, levels: Vec<f32>) {
+        let mut s = self.state.lock().unwrap();
+        if s.gen != gen {
+            return;
+        }
+        let at = s.pushed + offset as u64;
+        if s.spectra.len() == MAX_SPECTRA {
+            s.spectra.pop_front();
+        }
+        s.spectra.push_back((at, levels));
+    }
+
+    /// The latest band levels playback has reached by frame `played`.
+    pub fn spectrum(&self, played: u64) -> Option<Vec<f32>> {
+        let mut s = self.state.lock().unwrap();
+        let mut last = None;
+        while s.spectra.front().is_some_and(|(at, _)| *at <= played) {
+            last = s.spectra.pop_front().map(|(_, l)| l);
+        }
+        last
     }
 
     /// Frames handed to the server so far.
