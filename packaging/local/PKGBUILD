@@ -7,7 +7,8 @@ pkgdesc="Terminal client for Yandex Music: My Wave, likes, stations (TUI)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/iodnoorov/ymusic"
 license=('MIT')
-depends=('mpv' 'libgcc' 'glibc')
+depends=('libgcc' 'glibc')
+optdepends=('pipewire-pulse: share the sound card with other programs (or pulseaudio; without them sound goes straight to ALSA)')
 makedepends=('cargo')
 options=('!lto' '!debug')
 
