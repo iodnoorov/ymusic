@@ -1872,7 +1872,6 @@ dependencies = [
  "base64",
  "clap",
  "fdk-aac",
- "futures",
  "hmac",
  "image",
  "libc",
