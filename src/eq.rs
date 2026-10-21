@@ -1,5 +1,4 @@
-//! Equalizer presets, applied as an mpv audio filter (ffmpeg `equalizer` bands) or as filters of
-//! the own player.
+//! Equalizer presets: bands of peaking and shelving filters for the player.
 
 use crate::player::Biquad;
 
@@ -80,28 +79,6 @@ impl Preset {
             })
             .collect()
     }
-
-    /// Value for mpv's `af` property; empty for the flat preset.
-    pub fn filter(&self) -> String {
-        if self.is_flat() {
-            return String::new();
-        }
-        let last = self.bands.len() - 1;
-        let bands: Vec<String> = self
-            .bands
-            .iter()
-            .enumerate()
-            .map(|(i, (f, g))| match self.shape {
-                Shape::Octave => format!("equalizer=f={f}:t=o:w=1:g={g}"),
-                // Web Audio shelves have a slope of 1 (their Q is not used).
-                Shape::Site if i == 0 => format!("lowshelf=f={f}:t=s:w=1:g={g}"),
-                Shape::Site if i == last => format!("highshelf=f={f}:t=s:w=1:g={g}"),
-                Shape::Site => format!("equalizer=f={f}:t=q:w=1:g={g}"),
-            })
-            .collect();
-        // The limiter keeps boosted bands from clipping.
-        format!("@eq:lavfi=[{},alimiter=limit=0.9]", bands.join(","))
-    }
 }
 
 #[cfg(test)]
@@ -112,14 +89,16 @@ mod tests {
     fn presets() {
         assert_eq!(index("rock"), 3);
         assert_eq!(index("unknown"), 0);
-        assert_eq!(PRESETS[0].filter(), "");
-        assert_eq!(
-            PRESETS[index("soft")].filter(),
-            "@eq:lavfi=[equalizer=f=4000:t=o:w=1:g=-3,equalizer=f=10000:t=o:w=1:g=-5,alimiter=limit=0.9]"
-        );
-        let laptop = PRESETS[index("laptop")].filter();
-        assert!(laptop.starts_with("@eq:lavfi=[lowshelf=f=60:t=s:w=1:g=2,equalizer=f=170:t=q:w=1:g=5.5,"), "{laptop}");
-        assert!(laptop.ends_with(",highshelf=f=16000:t=s:w=1:g=7,alimiter=limit=0.9]"), "{laptop}");
+        assert!(PRESETS[0].is_flat() && PRESETS[0].biquads(44100.0).is_empty());
+        // The response of a preset at a frequency, dB: the bands in a row.
+        let db = |id: &str, f: f64| -> f64 {
+            PRESETS[index(id)].biquads(44100.0).iter().map(|b| 20.0 * b.response(f, 44100.0).log10()).sum()
+        };
+        assert!((db("soft", 10000.0) + 5.0).abs() < 0.6 && db("soft", 100.0).abs() < 0.1);
+        // «Колонки ноутбука»: low shelf of +2 dB below 60 Hz, high shelf up to +7 dB.
+        assert_eq!(PRESETS[index("laptop")].biquads(44100.0).len(), 10);
+        assert!((db("laptop", 10.0) - 2.0).abs() < 0.3, "{}", db("laptop", 10.0));
+        assert!((7.0..8.0).contains(&db("laptop", 20000.0)), "{}", db("laptop", 20000.0));
         let ids: std::collections::HashSet<_> = PRESETS.iter().map(|p| p.id).collect();
         assert_eq!(ids.len(), PRESETS.len());
     }

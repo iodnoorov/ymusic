@@ -222,10 +222,10 @@ const SPECTRUM_TILT_DB: f64 = 1.5;
 /// A bar falls at most this much per query (it rises at once).
 const SPECTRUM_FALL: f32 = 0.08;
 
-/// Loudest volume, % (mpv's default `volume-max`); kept between runs as is.
+/// Loudest volume, % (as mpv allowed, on the same cubic curve); kept between runs as is.
 const MAX_VOLUME: f64 = 130.0;
-/// A track normally starts within a few seconds. A bit longer than mpv's own network timeout
-/// (10 s), so that a connection mpv can detect as dead fails there first.
+/// A track normally starts within a few seconds. A bit longer than the player's own network
+/// timeout (10 s), so that a connection it can detect as dead fails there first.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// Fade lengths offered in the settings window, seconds (0 — off).
@@ -342,10 +342,10 @@ pub struct App {
     shown_cover: Option<(String, StatefulProtocol)>,
     covers_loading: HashSet<String>,
 
-    /// Next track already resolved and appended to mpv's playlist: (queue index, track id).
+    /// Next track already resolved and appended to the player: (queue index, track id).
     preload: Option<(usize, String)>,
     preload_pending: bool,
-    /// mpv is loading the current track: if it has not started playing by then, it is restarted.
+    /// The player is loading the current track: if it has not started playing by then, it is restarted.
     load_deadline: Option<Instant>,
     /// The current track has already been restarted with a fresh link (after an error or a stall).
     retried: bool,
@@ -520,7 +520,7 @@ impl App {
         }
     }
 
-    /// Asks mpv for the spectrum while a track plays; otherwise the bars go down.
+    /// Asks the player for the spectrum while a track plays; otherwise the bars go down.
     fn tick_spectrum(&mut self) {
         if self.art != Art::Spectrum || self.spectrum_asked.elapsed() < SPECTRUM_PERIOD {
             return;
@@ -778,7 +778,7 @@ impl App {
         });
     }
 
-    /// Starts track `idx`: resolves its URL and replaces mpv's playlist.
+    /// Starts track `idx`: resolves its URL and replaces what the player plays.
     fn play_index(&mut self, idx: usize) {
         if !self.begin_track(idx, false) {
             return;
@@ -789,7 +789,7 @@ impl App {
         self.spawn(move |api| Some(Msg::Url { gen, result: api.track_url(&id, q).map_err(|e| format!("{e:#}")) }));
     }
 
-    /// Updates state for a new current track. `preloaded`: mpv already switched to it.
+    /// Updates state for a new current track. `preloaded`: the player already switched to it.
     fn begin_track(&mut self, idx: usize, preloaded: bool) -> bool {
         let Some(track) = self.queue.get(idx).cloned() else { return false };
         self.pos = Some(idx);
@@ -829,7 +829,7 @@ impl App {
         (from..self.queue.len()).find(|&i| self.queue[i].available)
     }
 
-    /// Resolves the next track's URL in advance and appends it to mpv's playlist.
+    /// Resolves the next track's URL in advance and appends it to the player.
     fn schedule_preload(&mut self) {
         if self.preload.is_some() || self.preload_pending || self.loading_track || self.pos.is_none() {
             return;
@@ -847,13 +847,13 @@ impl App {
     }
 
     /// Switches to the preloaded track if it is the next one. Returns false if there is none.
-    fn advance_preloaded(&mut self, end: End, mpv_advanced: bool) -> bool {
+    fn advance_preloaded(&mut self, end: End, player_advanced: bool) -> bool {
         let next = self.next_playable();
         match &self.preload {
             Some((idx, id)) if Some(*idx) == next && self.queue[*idx].id == *id => {
                 let idx = *idx;
                 self.report_end(end);
-                if !mpv_advanced {
+                if !player_advanced {
                     self.player.playlist_next();
                 }
                 self.begin_track(idx, true);
@@ -951,7 +951,7 @@ impl App {
         self.wave = wave;
         self.search_queue = None;
         self.playing_playlist = None;
-        // The next track of the old list may already be in mpv: replies for it are dropped too.
+        // The next track of the old list may already be in the player: replies for it are dropped too.
         self.gen += 1;
         self.preload = None;
         self.preload_pending = false;
@@ -1095,10 +1095,7 @@ impl App {
                         self.schedule_preload();
                     }
                 }
-                PlayerEvent::Duration(d) => {
-                    self.duration = d;
-                    self.player.set_track_duration(d);
-                }
+                PlayerEvent::Duration(d) => self.duration = d,
                 PlayerEvent::Pause(p) => {
                     if p && !self.paused && !self.loading_track {
                         self.pause_play();
@@ -1109,7 +1106,7 @@ impl App {
                 PlayerEvent::Spectrum(levels) => self.on_spectrum(&levels),
                 PlayerEvent::Mute(m) => self.muted = m,
                 PlayerEvent::Eof => {
-                    // mpv moves to the appended (preloaded) entry on its own.
+                    // The player moves to the appended (preloaded) track on its own.
                     if !self.advance_preloaded(End::Eof, true) {
                         self.next(End::Eof);
                     }
@@ -1388,13 +1385,13 @@ impl App {
     }
 
     /// Treats a track that has been loading for too long as failed (so it is restarted with a
-    /// fresh link once): a server that sends the headers and then stalls makes mpv reconnect
+    /// fresh link once): a server that sends the headers and then stalls makes the player reconnect
     /// forever without an error, and switching away and back used to be the only cure.
     pub fn tick(&mut self) {
         self.tick_spectrum();
         let Some(deadline) = self.load_deadline else { return };
         if self.paused {
-            // mpv does not start a paused track: count from the moment it is resumed.
+            // A paused track is not expected to start: count from the moment it is resumed.
             self.load_deadline = Some(Instant::now() + LOAD_TIMEOUT);
             return;
         }
@@ -2403,7 +2400,7 @@ mod tests {
         audio.take();
 
         // The playing track stays and comes first; the new list starts from the chosen track,
-        // without a second copy of the playing one; mpv drops the preloaded old next track.
+        // without a second copy of the playing one; the player drops the preloaded old next track.
         let gen = app.gen;
         app.play_list("Новый", PlayContext::default(), vec![t("x"), t("y"), t("a"), t("z")], 1);
         assert_eq!(ids(&app), ["a", "y", "z"]);
@@ -2477,7 +2474,7 @@ mod tests {
         assert_eq!(app.preload, Some((1, "b".to_string())));
         assert_eq!(audio.take(), ["append http://x/b"]);
 
-        // End of track: mpv moves on by itself, state follows without a new URL request.
+        // End of track: the player moves on by itself, state follows without a new URL request.
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.pos, Some(1));
         assert!(!app.retried && app.preload.is_none());

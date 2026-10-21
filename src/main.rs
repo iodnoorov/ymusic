@@ -78,13 +78,8 @@ fn main() -> Result<()> {
     let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
-    // The own player is being built to replace mpv; until then it is chosen with YMUSIC_PLAYER=native.
-    let player: Box<dyn player::Audio> = if config::env_str("PLAYER").as_deref() == Some("native") {
-        Box::new(player::NativePlayer::spawn(tx.clone(), cfg.volume)?)
-    } else {
-        Box::new(player::Player::spawn(tx.clone(), cfg.volume)?)
-    };
-    let mut app = app::App::new(api, account, tx, player, cfg.volume);
+    let player = player::Player::spawn(tx.clone(), cfg.volume)?;
+    let mut app = app::App::new(api, account, tx, Box::new(player), cfg.volume);
     app.start();
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);
@@ -102,9 +97,9 @@ fn main() -> Result<()> {
         app.start_station_id(api::MY_WAVE);
     }
 
-    // SIGTERM ends the loop like `q`: mpv is stopped, settings saved. SIGHUP keeps its default
+    // SIGTERM ends the loop like `q`: the sound stops, settings are saved. SIGHUP keeps its default
     // action: with the terminal gone crossterm spins on EOF and the loop would never see a flag;
-    // mpv still stops (it dies with us) and settings are already saved by then.
+    // the sound stops with the process and settings are already saved by then.
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop))?;
 

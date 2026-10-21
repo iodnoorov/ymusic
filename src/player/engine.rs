@@ -102,14 +102,14 @@ enum Cmd {
     Stop,
 }
 
-pub struct NativePlayer {
+pub struct Player {
     shared: Arc<Shared>,
     cmd: Option<Sender<Cmd>>,
     control: Option<JoinHandle<()>>,
 }
 
-impl NativePlayer {
-    pub fn spawn<M: From<PlayerEvent> + Send + 'static>(tx: Sender<M>, volume: u8) -> Result<NativePlayer> {
+impl Player {
+    pub fn spawn<M: From<PlayerEvent> + Send + 'static>(tx: Sender<M>, volume: u8) -> Result<Player> {
         let shared = Arc::new(Shared {
             ring: Arc::new(Ring::default()),
             next: Mutex::new(None),
@@ -138,7 +138,7 @@ impl NativePlayer {
             };
             c.run(&cmd_rx, &tx);
         })?;
-        Ok(NativePlayer { shared, cmd: Some(cmd_tx), control: Some(control) })
+        Ok(Player { shared, cmd: Some(cmd_tx), control: Some(control) })
     }
 
     fn send(&self, cmd: Cmd) {
@@ -148,7 +148,7 @@ impl NativePlayer {
     }
 }
 
-impl Drop for NativePlayer {
+impl Drop for Player {
     fn drop(&mut self) {
         // The control thread stops (and stops the producer) once its channel is closed.
         self.cmd = None;
@@ -158,7 +158,7 @@ impl Drop for NativePlayer {
     }
 }
 
-impl Audio for NativePlayer {
+impl Audio for Player {
     fn load(&mut self, url: &str) {
         self.send(Cmd::Load(url.to_string()));
     }
@@ -189,8 +189,6 @@ impl Audio for NativePlayer {
     fn set_fade(&mut self, secs: f64) {
         self.shared.change(|s| s.fade = secs.max(0.0));
     }
-    /// The producer takes the duration from the file itself.
-    fn set_track_duration(&mut self, _secs: f64) {}
     fn set_spectrum(&mut self, on: bool) {
         self.shared.change(|s| s.spectrum = on);
     }
