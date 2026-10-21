@@ -39,4 +39,7 @@ export "CARGO_TARGET_${var}_RUSTFLAGS=-L $tools"
 if [ "$arch" = aarch64 ]; then
     export "CARGO_TARGET_${var}_LINKER=rust-lld"
 fi
-exec cargo "$@" --target "$target"
+# The target goes right after the cargo command: arguments after `--` belong to the test binary.
+command=${1:?no cargo command}
+shift
+exec cargo "$command" --target "$target" "$@"
