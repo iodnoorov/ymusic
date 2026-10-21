@@ -383,9 +383,8 @@ impl Control {
                     self.cur = Some(Current { job, at, frame });
                     self.seek_to = None;
                     self.last_pos = f64::NEG_INFINITY;
-                    if let Some(d) = duration {
-                        events.push(PlayerEvent::Duration(d));
-                    }
+                    // Also tells the app that the track has started (0 — the length is unknown).
+                    events.push(PlayerEvent::Duration(duration.unwrap_or(0.0)));
                 }
                 Mark::End | Mark::Error(_) => {
                     if let Some(c) = self.cur.take() {

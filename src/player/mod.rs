@@ -14,6 +14,7 @@ pub use engine::Player;
 #[derive(Debug)]
 pub enum PlayerEvent {
     TimePos(f64),
+    /// A track has started (or was seeked in): its length, 0 if unknown.
     Duration(f64),
     Pause(bool),
     Volume(f64),

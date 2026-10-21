@@ -264,6 +264,9 @@ pub struct App {
     intent: u64,
     errors_in_row: u32,
     pub loading_track: bool,
+    /// The player has not started the current track yet: the positions it reports until then are
+    /// of the previous one, still playing while the new link is resolved.
+    awaiting_start: bool,
 
     pub liked_ids: HashSet<String>,
     pub liked: Vec<Track>,
@@ -385,6 +388,7 @@ impl App {
             intent: 0,
             errors_in_row: 0,
             loading_track: false,
+            awaiting_start: false,
             liked_ids: HashSet::new(),
             liked: Vec::new(),
             liked_loading: false,
@@ -798,6 +802,7 @@ impl App {
         self.time_pos = 0.0;
         self.duration = track.duration_ms as f64 / 1000.0;
         self.loading_track = true;
+        self.awaiting_start = true;
         self.preload = None;
         self.preload_pending = false;
         self.load_deadline = preloaded.then(|| Instant::now() + LOAD_TIMEOUT);
@@ -1083,6 +1088,7 @@ impl App {
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Player(ev) => match ev {
+                PlayerEvent::TimePos(_) if self.awaiting_start => {}
                 PlayerEvent::TimePos(t) => {
                     self.time_pos = t;
                     if !self.loading_track || t > 0.0 {
@@ -1095,7 +1101,13 @@ impl App {
                         self.schedule_preload();
                     }
                 }
-                PlayerEvent::Duration(d) => self.duration = d,
+                PlayerEvent::Duration(d) => {
+                    self.awaiting_start = false;
+                    // Unknown to the player: the length from the API stays.
+                    if d > 0.0 {
+                        self.duration = d;
+                    }
+                }
                 PlayerEvent::Pause(p) => {
                     if p && !self.paused && !self.loading_track {
                         self.pause_play();
@@ -2541,6 +2553,7 @@ mod tests {
 
         // Once playback starts, the watchdog is off.
         app.on_msg(Msg::Url { gen: app.gen, result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
         assert!(app.load_deadline.is_none());
     }
@@ -2586,6 +2599,38 @@ mod tests {
         assert!(app.spectrum.iter().all(|&v| v == 0.0));
     }
 
+    /// While the link of the next track is resolved the previous one still plays: its positions
+    /// are not the new track's, and do not count as its start.
+    #[test]
+    fn positions_of_the_previous_track_are_ignored() {
+        use super::*;
+        let (mut app, _audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: String::new(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 200_000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a"), t("b")], 0);
+        app.on_msg(Msg::Player(PlayerEvent::Duration(180.0)));
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(120.0)));
+        assert_eq!((app.time_pos, app.loading_track), (120.0, false));
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(120.5)));
+        assert_eq!((app.time_pos, app.loading_track), (0.0, true));
+        // «b» starts; its length is unknown to the player, the one from the API stays.
+        app.on_msg(Msg::Player(PlayerEvent::Duration(0.0)));
+        assert_eq!(app.duration, 200.0);
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(0.25)));
+        assert_eq!((app.time_pos, app.loading_track), (0.25, false));
+    }
+
     #[test]
     fn play_reports() {
         use super::*;
@@ -2602,7 +2647,11 @@ mod tests {
             cover: None,
             batch: None,
         };
-        let pos = |app: &mut App, t: f64| app.on_msg(Msg::Player(PlayerEvent::TimePos(t)));
+        // The player reports the start of a track (`Duration`) before its positions.
+        let pos = |app: &mut App, t: f64| {
+            app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
+            app.on_msg(Msg::Player(PlayerEvent::TimePos(t)));
+        };
         app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a"), t("b"), t("c")], 0);
         let start = app.plays_sent.last().unwrap().clone();
         assert_eq!((start.track.id.as_str(), start.reason, start.played), ("a", None, 0.0));
