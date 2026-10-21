@@ -12,7 +12,7 @@ optdepends=('pipewire-pulse: share the sound card with other programs (or pulsea
 makedepends=('cargo')
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('bf131b4176d0f698dc798b41d2c9b1870e02221a871590b51c5c527694e384a2')
 
 prepare() {
   cd "$_repo-$pkgver"
