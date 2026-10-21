@@ -33,6 +33,7 @@ symphonia = { version = "0.6.1", default-features = false, features = ["isomp4",
 symphonia-adapter-fdk-aac = "0.2"
 signal-hook = "0.3"
 ureq = { version = "2", features = ["json"] }
+zbus = { version = "6", default-features = false, features = ["default-rt", "service"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 [profile.release]

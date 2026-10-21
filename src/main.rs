@@ -4,6 +4,7 @@ mod auth;
 mod clipboard;
 mod config;
 mod eq;
+mod mpris;
 mod player;
 mod ui;
 
@@ -79,6 +80,7 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
     let player = player::Player::spawn(tx.clone(), cfg.volume)?;
+    let remote = tx.clone();
     let mut app = app::App::new(api, account, tx, Box::new(player), cfg.volume);
     app.start();
     app.set_eq(eq::index(&cfg.eq));
@@ -108,6 +110,10 @@ fn main() -> Result<()> {
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     // Must run after entering the alternate screen and before reading events.
     app.picker = Some(query_picker());
+    // Media keys and desktop player widgets; their commands come back as messages.
+    let mut mpris = mpris::Mpris::start(move |r| {
+        let _ = remote.send(app::Msg::Remote(r));
+    });
     let res = (|| -> Result<()> {
         // Redraw only when something changed: immediately on input/messages,
         // otherwise at 5 fps while something animates and 1 fps when idle.
@@ -152,6 +158,8 @@ fn main() -> Result<()> {
                 app.on_msg(m);
             }
             app.tick();
+            let (state, position) = app.mpris_state();
+            mpris.sync(state, position);
         }
         Ok(())
     })();

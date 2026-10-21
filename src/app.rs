@@ -15,6 +15,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub enum Msg {
     Player(PlayerEvent),
+    /// A command from the desktop (media keys, player widgets).
+    Remote(crate::mpris::Remote),
     Url { gen: u64, result: Result<String, String> },
     LikedIds(Vec<String>),
     Liked(Result<Vec<Track>, String>),
@@ -564,6 +566,45 @@ impl App {
         self.pos.and_then(|p| self.queue.get(p))
     }
 
+    /// What the desktop's player widgets show, and the position in the track (seconds).
+    pub fn mpris_state(&self) -> (crate::mpris::State, f64) {
+        use crate::mpris::{State, Status, TrackInfo};
+        let track = self.current().map(|t| TrackInfo {
+            id: t.id.clone(),
+            title: t.title.clone(),
+            artists: t.artists.clone(),
+            album: t.album.clone(),
+            length: if self.duration > 0.0 { self.duration } else { t.duration_ms as f64 / 1000.0 },
+            art_url: t.cover.clone(),
+            url: t.web_url(),
+        });
+        let status = match () {
+            _ if track.is_none() || self.stopped => Status::Stopped,
+            _ if self.paused => Status::Paused,
+            _ => Status::Playing,
+        };
+        let volume = if self.muted { 0.0 } else { self.volume };
+        (State { track, status, volume }, self.time_pos)
+    }
+
+    /// A command from the desktop: the same as the matching key.
+    fn on_remote(&mut self, r: crate::mpris::Remote) {
+        use crate::mpris::Remote;
+        let has_track = self.pos.is_some() && !self.stopped;
+        match r {
+            Remote::PlayPause if has_track => self.player.toggle_pause(),
+            Remote::Play if has_track && self.paused => self.player.toggle_pause(),
+            Remote::Pause if has_track && !self.paused => self.player.toggle_pause(),
+            Remote::Next => self.next(End::Skip),
+            Remote::Previous => self.prev(),
+            Remote::Seek(d) if has_track => self.player.seek(d),
+            Remote::SeekTo(t) if has_track => self.player.seek(t - self.time_pos),
+            Remote::Volume(v) => self.change_volume(v - self.volume),
+            Remote::Quit => self.quit = true,
+            _ => {}
+        }
+    }
+
     pub fn is_liked(&self, t: &Track) -> bool {
         self.liked_ids.contains(&t.id)
     }
@@ -1087,6 +1128,7 @@ impl App {
 
     pub fn on_msg(&mut self, msg: Msg) {
         match msg {
+            Msg::Remote(r) => self.on_remote(r),
             Msg::Player(ev) => match ev {
                 PlayerEvent::TimePos(_) if self.awaiting_start => {}
                 PlayerEvent::TimePos(t) => {
