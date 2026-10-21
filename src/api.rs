@@ -56,7 +56,6 @@ pub struct Quality {
 pub const QUALITIES: &[Quality] = &[
     Quality { id: "lq", name: "Экономия трафика", note: "≈64 кбит/с" },
     Quality { id: "nq", name: "Обычное качество", note: "≈192 кбит/с" },
-    Quality { id: "lossless", name: "Лучшее качество", note: "максимум, что отдаёт сервер" },
 ];
 
 /// Index of the quality with this id (normal quality if unknown).
@@ -1311,9 +1310,7 @@ mod tests {
     fn qualities_with(api: &Api) {
         let lq = api.file_info("39089632", "lq").unwrap();
         let nq = api.file_info("39089632", "nq").unwrap();
-        let best = api.file_info("39089632", "lossless").unwrap();
         assert!(lq.bitrate > 0 && lq.bitrate < nq.bitrate, "{} {}", lq.bitrate, nq.bitrate);
-        assert!(best.bitrate >= nq.bitrate || best.codec.starts_with("flac"));
         assert!(api.track_url("39089632:60058", "lq").unwrap().starts_with("https://"));
         // Uploaded (UGC) tracks resolve too.
         assert!(api.track_url("bfc384d6-bd20-47e0-89d7-7a8657a2236a", "lq").unwrap().starts_with("https://"));
