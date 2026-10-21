@@ -78,8 +78,13 @@ fn main() -> Result<()> {
     let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
-    let player = player::Player::spawn(tx.clone(), cfg.volume)?;
-    let mut app = app::App::new(api, account, tx, Box::new(player), cfg.volume);
+    // The own player is being built to replace mpv; until then it is chosen with YMUSIC_PLAYER=native.
+    let player: Box<dyn player::Audio> = if config::env_str("PLAYER").as_deref() == Some("native") {
+        Box::new(player::NativePlayer::spawn(tx.clone(), cfg.volume)?)
+    } else {
+        Box::new(player::Player::spawn(tx.clone(), cfg.volume)?)
+    };
+    let mut app = app::App::new(api, account, tx, player, cfg.volume);
     app.start();
     app.set_eq(eq::index(&cfg.eq));
     app.set_crossfade(cfg.crossfade);

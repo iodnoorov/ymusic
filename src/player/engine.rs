@@ -1,0 +1,505 @@
+//! The own player. A control thread takes commands, talks to the sound server and reports
+//! events; a producer thread downloads and decodes tracks and pushes the sound into the ring
+//! between them. Track boundaries travel through the ring as marks, so events follow what is
+//! heard rather than what is decoded.
+
+use super::decode::Decoder;
+use super::fetch::Download;
+use super::output::{Mark, Output, Ring, RATE};
+use super::{Audio, PlayerEvent};
+use anyhow::Result;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// How often the position is reported and the marks are checked.
+const TICK: Duration = Duration::from_millis(250);
+
+/// One track: its download and whether it has been abandoned.
+struct Job {
+    id: u64,
+    download: Download,
+    cancelled: AtomicBool,
+}
+
+impl Job {
+    fn new(url: &str) -> Arc<Job> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Arc::new(Job {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            download: Download::start(url),
+            cancelled: AtomicBool::new(false),
+        })
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.download.cancel();
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+}
+
+/// State of both threads.
+struct Shared {
+    ring: Arc<Ring>,
+    /// The appended track: the producer moves on to it when the current one ends.
+    next: Mutex<Option<Arc<Job>>>,
+    /// Gain applied to the samples (volume and mute), `f32` bits.
+    gain: AtomicU32,
+}
+
+impl Shared {
+    fn set_gain(&self, volume: f64, muted: bool) {
+        // The same cubic curve as mpv's volume, so that the saved volume sounds the same.
+        let gain = if muted { 0.0 } else { (volume / 100.0).powi(3) as f32 };
+        self.gain.store(gain.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Messages to the producer.
+enum Work {
+    /// Play this track now.
+    Play(Arc<Job>),
+    /// A track was appended (matters when the producer has already run out of sound).
+    Appended,
+}
+
+enum Cmd {
+    Load(String),
+    Append(String),
+    Next,
+    ClearNext,
+    TogglePause,
+    ToggleMute,
+    Seek(f64),
+    Volume(f64),
+    Stop,
+}
+
+pub struct NativePlayer {
+    cmd: Option<Sender<Cmd>>,
+    control: Option<JoinHandle<()>>,
+}
+
+impl NativePlayer {
+    pub fn spawn<M: From<PlayerEvent> + Send + 'static>(tx: Sender<M>, volume: u8) -> Result<NativePlayer> {
+        let shared = Arc::new(Shared { ring: Arc::new(Ring::default()), next: Mutex::new(None), gain: AtomicU32::new(0) });
+        shared.set_gain(f64::from(volume), false);
+        let output = Output::open(shared.ring.clone())?;
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (work_tx, work_rx) = mpsc::channel();
+        let s = shared.clone();
+        std::thread::spawn(move || produce(&s, &work_rx));
+        let control = std::thread::spawn(move || {
+            let mut c = Control {
+                shared,
+                output: Some(output),
+                work: work_tx,
+                live: Vec::new(),
+                cur: None,
+                seek_to: None,
+                last_pos: f64::NEG_INFINITY,
+                paused: false,
+                muted: false,
+                volume: f64::from(volume),
+            };
+            c.run(&cmd_rx, &tx);
+        });
+        Ok(NativePlayer { cmd: Some(cmd_tx), control: Some(control) })
+    }
+
+    fn send(&self, cmd: Cmd) {
+        if let Some(tx) = &self.cmd {
+            let _ = tx.send(cmd);
+        }
+    }
+}
+
+impl Drop for NativePlayer {
+    fn drop(&mut self) {
+        // The control thread stops (and stops the producer) once its channel is closed.
+        self.cmd = None;
+        if let Some(c) = self.control.take() {
+            let _ = c.join();
+        }
+    }
+}
+
+impl Audio for NativePlayer {
+    fn load(&mut self, url: &str) {
+        self.send(Cmd::Load(url.to_string()));
+    }
+    fn append(&mut self, url: &str) {
+        self.send(Cmd::Append(url.to_string()));
+    }
+    fn playlist_next(&mut self) {
+        self.send(Cmd::Next);
+    }
+    fn clear_next(&mut self) {
+        self.send(Cmd::ClearNext);
+    }
+    fn toggle_pause(&mut self) {
+        self.send(Cmd::TogglePause);
+    }
+    fn toggle_mute(&mut self) {
+        self.send(Cmd::ToggleMute);
+    }
+    fn seek(&mut self, secs: f64) {
+        self.send(Cmd::Seek(secs));
+    }
+    fn set_volume(&mut self, v: f64) {
+        self.send(Cmd::Volume(v));
+    }
+    fn set_eq_filter(&mut self, _af: &str) {}
+    fn set_fade(&mut self, _secs: f64) {}
+    fn set_track_duration(&mut self, _secs: f64) {}
+    fn set_spectrum(&mut self, _on: bool) {}
+    fn request_spectrum(&mut self) {}
+    fn stop(&mut self) {
+        self.send(Cmd::Stop);
+    }
+}
+
+/// The track being heard: `at` seconds into it at frame `frame` of the output stream.
+struct Current {
+    job: u64,
+    at: f64,
+    frame: u64,
+}
+
+struct Control {
+    shared: Arc<Shared>,
+    output: Option<Output>,
+    work: Sender<Work>,
+    /// Tracks that may still be playing or be played: cancelled when the playlist is replaced.
+    live: Vec<Arc<Job>>,
+    cur: Option<Current>,
+    /// Target of a seek the producer has not reached yet: the position to report meanwhile.
+    seek_to: Option<f64>,
+    last_pos: f64,
+    paused: bool,
+    muted: bool,
+    volume: f64,
+}
+
+impl Control {
+    fn run<M: From<PlayerEvent>>(&mut self, cmds: &Receiver<Cmd>, tx: &Sender<M>) {
+        let mut last_tick = Instant::now();
+        loop {
+            let mut events = Vec::new();
+            let result = match cmds.recv_timeout(TICK.saturating_sub(last_tick.elapsed())) {
+                Ok(cmd) => self.command(cmd, &mut events),
+                Err(RecvTimeoutError::Timeout) => Ok(()),
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+            let result = result.and_then(|()| {
+                if last_tick.elapsed() >= TICK {
+                    last_tick = Instant::now();
+                    self.tick(&mut events)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(e) = result {
+                // The sound server went away (or restarted): connect again once.
+                if let Some(o) = self.output.take() {
+                    o.close();
+                }
+                match Output::open(self.shared.ring.clone()).and_then(|o| o.set_paused(self.paused).map(|()| o)) {
+                    Ok(o) => self.output = Some(o),
+                    Err(e2) => {
+                        let _ = tx.send(PlayerEvent::Error(format!("{e:#}; {e2:#}")).into());
+                        let _ = tx.send(PlayerEvent::Died.into());
+                        break;
+                    }
+                }
+            }
+            for ev in events {
+                if tx.send(ev.into()).is_err() {
+                    break;
+                }
+            }
+        }
+        self.reset_quietly();
+        if let Some(o) = self.output.take() {
+            o.close();
+        }
+    }
+
+    fn output(&self) -> Result<&Output> {
+        self.output.as_ref().ok_or_else(|| anyhow::anyhow!("нет звукового вывода"))
+    }
+
+    fn command(&mut self, cmd: Cmd, events: &mut Vec<PlayerEvent>) -> Result<()> {
+        match cmd {
+            Cmd::Load(url) => {
+                self.reset()?;
+                self.start(Job::new(&url));
+                self.set_paused(false, events)?;
+            }
+            Cmd::Append(url) => {
+                let job = Job::new(&url);
+                if let Some(old) = self.shared.next.lock().unwrap().replace(job.clone()) {
+                    old.cancel();
+                }
+                self.live.push(job);
+                let _ = self.work.send(Work::Appended);
+            }
+            Cmd::Next => {
+                let next = self.shared.next.lock().unwrap().take();
+                if let Some(job) = next {
+                    self.live.retain(|j| j.id != job.id);
+                    self.reset()?;
+                    self.start(job);
+                    self.set_paused(false, events)?;
+                }
+            }
+            Cmd::ClearNext => {
+                if let Some(job) = self.shared.next.lock().unwrap().take() {
+                    job.cancel();
+                    self.live.retain(|j| j.id != job.id);
+                }
+            }
+            Cmd::TogglePause => self.set_paused(!self.paused, events)?,
+            Cmd::ToggleMute => {
+                self.muted = !self.muted;
+                self.shared.set_gain(self.volume, self.muted);
+                events.push(PlayerEvent::Mute(self.muted));
+            }
+            Cmd::Volume(v) => {
+                self.volume = v;
+                self.shared.set_gain(self.volume, self.muted);
+                events.push(PlayerEvent::Volume(v));
+            }
+            Cmd::Seek(d) => {
+                if let Some(c) = &self.cur {
+                    let pos = match self.seek_to {
+                        Some(t) => t,
+                        None => self.position(c, self.output()?.played()?),
+                    };
+                    let target = (pos + d).max(0.0);
+                    if self.shared.ring.request_seek(c.job, target) {
+                        self.output()?.flush()?;
+                        self.seek_to = Some(target);
+                        self.last_pos = f64::NEG_INFINITY;
+                    }
+                }
+            }
+            Cmd::Stop => self.reset()?,
+        }
+        Ok(())
+    }
+
+    fn set_paused(&mut self, paused: bool, events: &mut Vec<PlayerEvent>) -> Result<()> {
+        self.output()?.set_paused(paused)?;
+        self.paused = paused;
+        events.push(PlayerEvent::Pause(paused));
+        Ok(())
+    }
+
+    fn start(&mut self, job: Arc<Job>) {
+        self.live.push(job.clone());
+        let _ = self.work.send(Work::Play(job));
+    }
+
+    /// Cancels every track and drops the sound on its way.
+    fn reset(&mut self) -> Result<()> {
+        self.reset_quietly();
+        self.output()?.flush()
+    }
+
+    fn reset_quietly(&mut self) {
+        for job in self.live.drain(..) {
+            job.cancel();
+        }
+        if let Some(job) = self.shared.next.lock().unwrap().take() {
+            job.cancel();
+        }
+        self.shared.ring.clear();
+        self.cur = None;
+        self.seek_to = None;
+    }
+
+    fn position(&self, c: &Current, played: u64) -> f64 {
+        c.at + played.saturating_sub(c.frame) as f64 / f64::from(RATE)
+    }
+
+    /// Reports what playback has reached: track starts and ends, errors, the position.
+    fn tick(&mut self, events: &mut Vec<PlayerEvent>) -> Result<()> {
+        let played = self.output()?.played()?;
+        for (frame, mark) in self.shared.ring.reached(played) {
+            match mark {
+                Mark::Start { job, at, duration, gapless } => {
+                    if gapless {
+                        events.push(PlayerEvent::Eof);
+                    }
+                    // Earlier tracks are over: free their downloads.
+                    self.live.retain(|j| j.id >= job);
+                    self.cur = Some(Current { job, at, frame });
+                    self.seek_to = None;
+                    self.last_pos = f64::NEG_INFINITY;
+                    if let Some(d) = duration {
+                        events.push(PlayerEvent::Duration(d));
+                    }
+                }
+                Mark::End | Mark::Error(_) => {
+                    if let Some(c) = self.cur.take() {
+                        self.live.retain(|j| j.id > c.job);
+                    }
+                    events.push(match mark {
+                        Mark::Error(e) => PlayerEvent::Error(e),
+                        _ => PlayerEvent::Eof,
+                    });
+                }
+            }
+        }
+        if let Some(c) = &self.cur {
+            let t = self.seek_to.unwrap_or_else(|| self.position(c, played));
+            if (t - self.last_pos).abs() >= 0.25 {
+                self.last_pos = t;
+                events.push(PlayerEvent::TimePos(t));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn produce(shared: &Shared, work: &Receiver<Work>) {
+    let mut pending: Option<(Arc<Job>, bool)> = None;
+    loop {
+        let (job, gapless) = match pending.take() {
+            Some(p) => p,
+            None => match work.recv() {
+                Ok(Work::Play(job)) => (job, false),
+                Ok(Work::Appended) => match shared.next.lock().unwrap().take() {
+                    // The previous track has already ended: this one is not seamless.
+                    Some(job) => (job, false),
+                    None => continue,
+                },
+                Err(_) => return,
+            },
+        };
+        // A track loaded meanwhile replaces this one.
+        let newest = work.try_iter().filter_map(|w| if let Work::Play(j) = w { Some(j) } else { None }).last();
+        let (job, gapless) = newest.map_or((job, gapless), |j| (j, false));
+        if !job.cancelled() {
+            pending = play(shared, &job, gapless);
+        }
+    }
+}
+
+/// Decodes `job` into the ring. Returns the appended track to go on with.
+fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
+    let ring = &shared.ring;
+    ring.begin(job.id);
+    let fail = |e: anyhow::Error| {
+        if !job.cancelled() {
+            ring.mark(Mark::Error(format!("{e:#}")));
+        }
+        None
+    };
+    let mut dec = match Decoder::open(Box::new(job.download.reader())) {
+        Ok(d) => d,
+        Err(e) => return fail(e),
+    };
+    let duration = dec.duration();
+    let mut resampler = Resampler::new(dec.sample_rate());
+    ring.mark(Mark::Start { job: job.id, at: 0.0, duration, gapless });
+    let mut buf = Vec::new();
+    loop {
+        if job.cancelled() {
+            return None;
+        }
+        let (mut gen, seek) = ring.poll_seek();
+        if let Some(t) = seek {
+            // Past the end the demuxer fails: the track is over.
+            let Ok(at) = dec.seek(t) else { break };
+            resampler.reset();
+            gen = ring.mark(Mark::Start { job: job.id, at, duration, gapless: false });
+        }
+        match dec.next_chunk() {
+            Ok(Some(chunk)) => {
+                let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
+                buf.clear();
+                resampler.process(chunk, &mut buf);
+                for s in &mut buf {
+                    *s = (*s * gain).clamp(-1.0, 1.0);
+                }
+                // A refused push means a seek or a new track: the loop above sorts it out.
+                ring.push(&buf, gen);
+            }
+            Ok(None) => break,
+            Err(e) => return fail(e),
+        }
+    }
+    if let Some(next) = shared.next.lock().unwrap().take() {
+        return Some((next, true));
+    }
+    ring.mark(Mark::End);
+    None
+}
+
+/// Linear resampling to the output rate, for the rare track that has another one.
+struct Resampler {
+    /// Input frames per output frame.
+    step: f64,
+    /// Position of the next output frame in the input chunk; -1 is the previous chunk's last.
+    pos: f64,
+    prev: [f32; 2],
+}
+
+impl Resampler {
+    fn new(rate: u32) -> Resampler {
+        Resampler { step: f64::from(rate) / f64::from(RATE), pos: 0.0, prev: [0.0; 2] }
+    }
+
+    fn reset(&mut self) {
+        self.pos = 0.0;
+        self.prev = [0.0; 2];
+    }
+
+    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if self.step == 1.0 {
+            out.extend_from_slice(input);
+            return;
+        }
+        let frames = input.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        let at = |i: isize| if i < 0 { self.prev } else { [input[i as usize * 2], input[i as usize * 2 + 1]] };
+        while self.pos < frames as f64 - 1.0 {
+            let i = self.pos.floor();
+            let f = (self.pos - i) as f32;
+            let (a, b) = (at(i as isize), at(i as isize + 1));
+            out.extend([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+            self.pos += self.step;
+        }
+        self.pos -= frames as f64;
+        self.prev = at(frames as isize - 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Resampler;
+
+    #[test]
+    fn resampling() {
+        // 22050 Hz → 44100: twice the frames, midpoints in between, continuous across chunks.
+        let mut r = Resampler::new(22050);
+        let mut out = Vec::new();
+        r.process(&[0.0, 0.0, 1.0, -1.0], &mut out);
+        r.process(&[2.0, -2.0, 3.0, -3.0], &mut out);
+        assert_eq!(out, [0.0, 0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5]);
+        let mut same = Resampler::new(44100);
+        let mut out = Vec::new();
+        same.process(&[0.1, 0.2], &mut out);
+        assert_eq!(out, [0.1, 0.2]);
+    }
+}

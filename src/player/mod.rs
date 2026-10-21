@@ -10,9 +10,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-// Not used by the mpv player yet: the own one is being built around it.
-#[cfg_attr(not(test), allow(dead_code))]
 mod decode;
+mod engine;
+mod fetch;
+mod output;
+
+pub use engine::NativePlayer;
 
 #[derive(Debug)]
 pub enum PlayerEvent {
