@@ -102,7 +102,7 @@ makepkg -si
 
 ### Из исходников (Cargo)
 
-Нужны Rust ≥ 1.88 и `mpv` в `PATH`.
+Нужны Rust ≥ 1.89, компилятор C++ (для fdk-aac) и `mpv` в `PATH`.
 
 ```bash
 cargo install --git https://github.com/iodnoorov/ymusic
