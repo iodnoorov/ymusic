@@ -93,6 +93,19 @@ fn fdk_codecs() -> &'static CodecRegistry {
     })
 }
 
+/// Latency of fdk-aac for this stream, frames: it starts the output (and every restart after a
+/// seek) with that much of its own delay — 1685 frames for AAC-LC, 3671 for HE-AAC. The adapter
+/// does not tell it, so one packet goes through a decoder of our own.
+fn fdk_delay(asc: &[u8], packet: &[u8]) -> u64 {
+    let mut d = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Raw);
+    // Room for the longest frame (2048 with SBR) of up to 8 channels.
+    let mut pcm = vec![0i16; 2048 * 8];
+    if d.config_raw(asc).is_err() || d.fill(packet).is_err() || d.decode_frame(&mut pcm).is_err() {
+        return 0;
+    }
+    u64::from(d.stream_info().outputDelay)
+}
+
 fn make_decoder(params: &AudioCodecParameters, fdk: bool) -> Result<Box<dyn AudioDecoder>> {
     let codecs = if fdk { fdk_codecs() } else { symphonia::default::get_codecs() };
     Ok(codecs.make_audio_decoder(params, &AudioDecoderOptions::default())?)
@@ -108,8 +121,11 @@ pub struct Decoder {
     /// Sample rate of the track as the container states it: what the decoder must produce.
     rate: u32,
     duration: Option<f64>,
-    /// Frames still to drop after an accurate seek (the demuxer stops at a packet boundary).
+    /// Frames still to drop: fdk's latency, and after an accurate seek the part of the packet
+    /// before the target (the demuxer stops at a packet boundary).
     skip: u64,
+    /// fdk's latency, once its first packet is decoded.
+    delay: Option<u64>,
     samples: Vec<f32>,
     out: Vec<f32>,
 }
@@ -132,7 +148,7 @@ impl Decoder {
         let id = track.id;
         let fdk = params.codec == CODEC_ID_AAC && needs_fdk(params.extra_data.as_deref().unwrap_or(&[]));
         let decoder = make_decoder(&params, fdk)?;
-        Ok(Decoder { format, decoder, params, track: id, fdk, rate, duration, skip: 0, samples: Vec::new(), out: Vec::new() })
+        Ok(Decoder { format, decoder, params, track: id, fdk, rate, duration, skip: 0, delay: None, samples: Vec::new(), out: Vec::new() })
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -184,6 +200,11 @@ impl Decoder {
                     continue;
                 }
             }
+            if self.fdk && self.delay.is_none() {
+                let delay = fdk_delay(self.params.extra_data.as_deref().unwrap_or(&[]), &packet.data);
+                self.delay = Some(delay);
+                self.skip += delay;
+            }
             let buf = self.decoder.last_decoded();
             let channels = buf.spec().channels().count().max(1);
             self.samples.resize(buf.samples_interleaved(), 0.0);
@@ -208,7 +229,7 @@ impl Decoder {
         let to = self.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(self.track) })?;
         self.decoder.reset();
         let (required, actual) = (to.required_ts.get().max(0) as u64, to.actual_ts.get().max(0) as u64);
-        self.skip = required.saturating_sub(actual);
+        self.skip = required.saturating_sub(actual) + if self.fdk { self.delay.unwrap_or(0) } else { 0 };
         Ok(required as f64 / f64::from(self.rate))
     }
 }
@@ -325,5 +346,29 @@ mod tests {
         assert!(diff(0) < 0.005, "{}", diff(0));
         // One frame off is already far worse: the position is exact.
         assert!(diff(1) > 10.0 * diff(0), "{} {}", diff(0), diff(1));
+    }
+
+    /// With fdk (HE-AAC) its latency is dropped after a seek too: the sound lines up with the
+    /// full decode (not sample for sample: SBR adds noise of its own).
+    #[test]
+    fn seek_with_fdk_keeps_alignment() {
+        let data = include_bytes!("../../tests/data/he-aac.m4a");
+        let full = decode_all(&mut open(data));
+        let mut d = open(data);
+        // Play a little first: the latency is known by the time of the seek.
+        for _ in 0..5 {
+            d.next_chunk().unwrap();
+        }
+        let at = d.seek(1.0).unwrap();
+        let after: Vec<f32> = std::iter::from_fn(|| d.next_chunk().unwrap().map(<[f32]>::to_vec)).flatten().collect();
+        let start = (at * 44100.0).round() as i64;
+        // Correlate 0.25 s from a settled point against the full decode around the same position.
+        let (from, n) = (8192usize, 11025usize);
+        let corr = |lag: i64| -> f64 {
+            let base = ((start + from as i64 + lag) * 2) as usize;
+            (0..n).map(|i| f64::from(after[(from + i) * 2]) * f64::from(full[base + i * 2])).sum()
+        };
+        let best = (-400i64..=400).max_by(|a, b| corr(*a).total_cmp(&corr(*b))).unwrap();
+        assert_eq!(best, 0);
     }
 }

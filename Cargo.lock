@@ -1871,6 +1871,7 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "fdk-aac",
  "futures",
  "hmac",
  "image",

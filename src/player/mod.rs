@@ -26,7 +26,8 @@ pub enum PlayerEvent {
     Mute(bool),
     Eof,
     Error(String),
-    Died,
+    /// The player is gone for good; the program exits with this message.
+    Died(String),
     /// Levels of the spectrum bands (`SPECTRUM_BANDS`), dB, low to high.
     Spectrum(Vec<f32>),
 }
@@ -274,7 +275,13 @@ impl Player {
                     return;
                 }
             }
-            let _ = tx.send(PlayerEvent::Died.into());
+            let _ = tx.send(
+                PlayerEvent::Died(
+                    "mpv завершился неожиданно; подробности можно записать в лог: YMUSIC_MPV_LOG=/tmp/mpv.log ymusic"
+                        .into(),
+                )
+                .into(),
+            );
         });
 
         let mut p = Player { child, stream, sock, eq: String::new(), spectrum: false, fade: 0.0, duration: 0.0 };

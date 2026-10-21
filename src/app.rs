@@ -1118,11 +1118,8 @@ impl App {
                     self.set_error(format!("Ошибка воспроизведения: {e}"));
                     self.on_track_error();
                 }
-                PlayerEvent::Died => {
-                    self.exit_error = Some(
-                        "mpv завершился неожиданно; подробности можно записать в лог: YMUSIC_MPV_LOG=/tmp/mpv.log ymusic"
-                            .into(),
-                    );
+                PlayerEvent::Died(msg) => {
+                    self.exit_error = Some(msg);
                     self.quit = true;
                 }
             },

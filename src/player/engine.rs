@@ -213,8 +213,8 @@ impl Control {
                 match Output::open(self.shared.ring.clone()).and_then(|o| o.set_paused(self.paused).map(|()| o)) {
                     Ok(o) => self.output = Some(o),
                     Err(e2) => {
-                        let _ = tx.send(PlayerEvent::Error(format!("{e:#}; {e2:#}")).into());
-                        let _ = tx.send(PlayerEvent::Died.into());
+                        let msg = format!("звук пропал: {e:#}; переподключиться не удалось: {e2:#}");
+                        let _ = tx.send(PlayerEvent::Died(msg).into());
                         break;
                     }
                 }
