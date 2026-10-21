@@ -206,6 +206,47 @@ pub fn fade_gain(t: f64, fade: f64, duration: Option<f64>) -> f32 {
     (t.min(left) / fade).clamp(0.0, 1.0) as f32
 }
 
+/// Linear resampling, for the rare track (or device) with another rate than ours.
+pub struct Resampler {
+    /// Input frames per output frame.
+    step: f64,
+    /// Position of the next output frame in the input chunk; -1 is the previous chunk's last.
+    pos: f64,
+    prev: [f32; 2],
+}
+
+impl Resampler {
+    pub fn to(from: u32, to: u32) -> Resampler {
+        Resampler { step: f64::from(from) / f64::from(to), pos: 0.0, prev: [0.0; 2] }
+    }
+
+    pub fn reset(&mut self) {
+        self.pos = 0.0;
+        self.prev = [0.0; 2];
+    }
+
+    pub fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        if self.step == 1.0 {
+            out.extend_from_slice(input);
+            return;
+        }
+        let frames = input.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        let at = |i: isize| if i < 0 { self.prev } else { [input[i as usize * 2], input[i as usize * 2 + 1]] };
+        while self.pos < frames as f64 - 1.0 {
+            let i = self.pos.floor();
+            let f = (self.pos - i) as f32;
+            let (a, b) = (at(i as isize), at(i as isize + 1));
+            out.extend([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
+            self.pos += self.step;
+        }
+        self.pos -= frames as f64;
+        self.prev = at(frames as isize - 1);
+    }
+}
+
 /// Radix-2 FFT of a fixed length with its twiddle factors and bit-reversal order computed once.
 struct Fft {
     cos: Vec<f64>,
@@ -376,6 +417,27 @@ mod tests {
 
     fn peak(s: &[f32]) -> f32 {
         s.iter().fold(0.0, |m, v| m.max(v.abs()))
+    }
+
+    #[test]
+    fn resampling() {
+        // 22050 Hz → 44100: twice the frames, midpoints in between, continuous across chunks.
+        let mut r = Resampler::to(22050, 44100);
+        let mut out = Vec::new();
+        r.process(&[0.0, 0.0, 1.0, -1.0], &mut out);
+        r.process(&[2.0, -2.0, 3.0, -3.0], &mut out);
+        assert_eq!(out, [0.0, 0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5]);
+        let mut same = Resampler::to(44100, 44100);
+        let mut out = Vec::new();
+        same.process(&[0.1, 0.2], &mut out);
+        assert_eq!(out, [0.1, 0.2]);
+        // 44100 → 48000: about 48000 frames out of a second.
+        let mut up = Resampler::to(44100, 48000);
+        let mut out = Vec::new();
+        for _ in 0..10 {
+            up.process(&vec![0.0; 8820], &mut out);
+        }
+        assert!((out.len() / 2).abs_diff(48000) <= 1, "{}", out.len() / 2);
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+mod alsa;
 mod decode;
 mod dsp;
 mod engine;

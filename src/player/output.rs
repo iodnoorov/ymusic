@@ -171,7 +171,22 @@ impl Ring {
         frames * FRAME
     }
 
-    fn set_wake(&self, wake: Arc<Wake>) {
+    /// For the ALSA output thread: moves up to `max` frames to `out`; returns the frames moved.
+    /// When there are none, the thread is woken once some are pushed.
+    pub(super) fn take_samples(&self, max: usize, out: &mut Vec<f32>) -> usize {
+        let mut s = self.state.lock().unwrap();
+        let frames = max.min(s.samples.len() / 2);
+        if frames == 0 {
+            s.starving = true;
+            return 0;
+        }
+        out.extend(s.samples.drain(..frames * 2));
+        s.handed += frames as u64;
+        self.space.notify_all();
+        frames
+    }
+
+    pub(super) fn set_wake(&self, wake: Arc<Wake>) {
         let mut s = self.state.lock().unwrap();
         s.wake = Some(wake);
         s.starving = false;
@@ -194,10 +209,10 @@ impl Ring {
 }
 
 /// An eventfd that wakes the output thread from its `poll`.
-struct Wake(OwnedFd);
+pub(super) struct Wake(OwnedFd);
 
 impl Wake {
-    fn new() -> io::Result<Wake> {
+    pub(super) fn new() -> io::Result<Wake> {
         // SAFETY: plain syscall; the descriptor is owned from here on.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
@@ -207,13 +222,17 @@ impl Wake {
         Ok(Wake(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
 
-    fn signal(&self) {
+    pub(super) fn signal(&self) {
         let one = 1u64.to_ne_bytes();
         // SAFETY: writes 8 bytes from a live buffer to our own eventfd.
         unsafe { libc::write(self.0.as_raw_fd(), one.as_ptr().cast(), one.len()) };
     }
 
-    fn reset(&self) {
+    pub(super) fn fd(&self) -> i32 {
+        self.0.as_raw_fd()
+    }
+
+    pub(super) fn reset(&self) {
         let mut buf = [0u8; 8];
         // SAFETY: reads at most 8 bytes into a live buffer from our own eventfd.
         unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
@@ -299,16 +318,16 @@ impl Conn {
 /// A command for the output thread and where its reply goes (the latency for a timing query).
 type Request = (Command, Sender<Result<Option<protocol::PlaybackLatency>, String>>);
 
-pub struct Output {
+/// Output to a PulseAudio (or PipeWire) server.
+pub struct Pulse {
     channel: u32,
     requests: Option<Sender<Request>>,
     wake: Arc<Wake>,
-    ring: Arc<Ring>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl Output {
-    pub fn open(ring: Arc<Ring>) -> Result<Output> {
+impl Pulse {
+    fn open(ring: Arc<Ring>) -> Result<Pulse> {
         let none = || anyhow!("нет звукового сервера (PipeWire или PulseAudio)");
         let path = pulseaudio::socket_path_from_env().ok_or_else(none)?;
         let sock = UnixStream::connect(&path).with_context(|| format!("нет связи со звуковым сервером ({})", path.display()))?;
@@ -359,7 +378,7 @@ impl Output {
         let thread = std::thread::Builder::new()
             .name("player-output".into())
             .spawn(move || serve(conn, stream.channel, &r, &rx, &w))?;
-        Ok(Output { channel: stream.channel, requests: Some(tx), wake, ring, thread: Some(thread) })
+        Ok(Pulse { channel: stream.channel, requests: Some(tx), wake, thread: Some(thread) })
     }
 
     fn call(&self, command: Command) -> Result<Option<protocol::PlaybackLatency>> {
@@ -370,39 +389,86 @@ impl Output {
         rx.recv_timeout(Duration::from_secs(3)).map_err(|_| lost())?.map_err(|e| anyhow!("звуковой сервер: {e}"))
     }
 
-    pub fn set_paused(&self, paused: bool) -> Result<()> {
+    fn set_paused(&self, paused: bool) -> Result<()> {
         self.call(Command::CorkPlaybackStream(protocol::CorkStreamParams { channel: self.channel, cork: paused }))?;
         Ok(())
     }
 
-    /// Drops what the server has buffered (after the ring was cleared).
-    pub fn flush(&self) -> Result<()> {
+    fn flush(&self) -> Result<()> {
         self.call(Command::FlushPlaybackStream(self.channel))?;
         Ok(())
     }
 
-    /// Frames heard so far: handed to the server minus what it still holds and plays.
-    pub fn played(&self) -> Result<u64> {
+    /// Frames handed to the server that are not heard yet.
+    fn delay(&self) -> Result<u64> {
         let t = self
             .call(Command::GetPlaybackLatency(protocol::LatencyParams { channel: self.channel, now: SystemTime::now() }))?
             .ok_or_else(|| anyhow!("звуковой сервер не сообщил задержку"))?;
         let buffered = (t.write_offset - t.read_offset).max(0) as u64 / FRAME as u64;
         let latency = if buffered > 0 { t.sink_usec * u64::from(RATE) / 1_000_000 } else { 0 };
-        Ok(self.ring.handed().saturating_sub(buffered + latency))
+        Ok(buffered + latency)
     }
 
-    pub fn close(self) {
+    fn close(self) {
         let _ = self.call(Command::DeletePlaybackStream(self.channel));
     }
 }
 
-impl Drop for Output {
+impl Drop for Pulse {
     fn drop(&mut self) {
         // The thread stops once its channel is closed.
         self.requests = None;
         self.wake.signal();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+/// Where the sound goes: a PulseAudio (PipeWire) server, or an ALSA device when there is none.
+/// `YMUSIC_OUTPUT=pulse` or `alsa` forces one of them.
+pub enum Output {
+    Pulse(Pulse),
+    Alsa(super::alsa::Alsa),
+}
+
+impl Output {
+    pub fn open(ring: Arc<Ring>) -> Result<Output> {
+        let alsa = |ring: Arc<Ring>| super::alsa::Alsa::open(ring).map(Output::Alsa);
+        match crate::config::env_str("OUTPUT").as_deref() {
+            Some("alsa") => alsa(ring),
+            Some("pulse") => Pulse::open(ring).map(Output::Pulse),
+            _ => Pulse::open(ring.clone()).map(Output::Pulse).or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
+        }
+    }
+
+    pub fn set_paused(&self, paused: bool) -> Result<()> {
+        match self {
+            Output::Pulse(p) => p.set_paused(paused),
+            Output::Alsa(a) => a.set_paused(paused),
+        }
+    }
+
+    /// Drops the sound on its way (after the ring was cleared).
+    pub fn flush(&self) -> Result<()> {
+        match self {
+            Output::Pulse(p) => p.flush(),
+            Output::Alsa(a) => a.flush(),
+        }
+    }
+
+    /// Frames heard so far: handed on minus what is still buffered on the way to the speakers.
+    pub fn played(&self, ring: &Ring) -> Result<u64> {
+        let delay = match self {
+            Output::Pulse(p) => p.delay()?,
+            Output::Alsa(a) => a.delay()?,
+        };
+        Ok(ring.handed().saturating_sub(delay))
+    }
+
+    pub fn close(self) {
+        if let Output::Pulse(p) = self {
+            p.close();
         }
     }
 }

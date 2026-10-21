@@ -4,7 +4,7 @@
 //! heard rather than what is decoded.
 
 use super::decode::Decoder;
-use super::dsp::{fade_gain, Equalizer, Spectrum};
+use super::dsp::{fade_gain, Equalizer, Resampler, Spectrum};
 use super::fetch::Download;
 use super::output::{Mark, Output, Ring, RATE};
 use super::{spectrum_freq, spectrum_step, Audio, PlayerEvent, SPECTRUM_BANDS};
@@ -317,7 +317,7 @@ impl Control {
                 if let Some(c) = &self.cur {
                     let pos = match self.seek_to {
                         Some(t) => t,
-                        None => self.position(c, self.output()?.played()?),
+                        None => self.position(c, self.output()?.played(&self.shared.ring)?),
                     };
                     let target = (pos + d).max(0.0);
                     if self.shared.ring.request_seek(c.job, target) {
@@ -328,7 +328,7 @@ impl Control {
                 }
             }
             Cmd::RequestSpectrum => {
-                if let Some(levels) = self.shared.ring.spectrum(self.output()?.played()?) {
+                if let Some(levels) = self.shared.ring.spectrum(self.output()?.played(&self.shared.ring)?) {
                     events.push(PlayerEvent::Spectrum(levels));
                 }
             }
@@ -373,7 +373,7 @@ impl Control {
 
     /// Reports what playback has reached: track starts and ends, errors, the position.
     fn tick(&mut self, events: &mut Vec<PlayerEvent>) -> Result<()> {
-        let played = self.output()?.played()?;
+        let played = self.output()?.played(&self.shared.ring)?;
         for (frame, mark) in self.shared.ring.reached(played) {
             match mark {
                 Mark::Start { job, at, duration, gapless } => {
@@ -450,7 +450,7 @@ fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
         Err(e) => return fail(e),
     };
     let duration = dec.duration();
-    let mut resampler = Resampler::new(dec.sample_rate());
+    let mut resampler = Resampler::to(dec.sample_rate(), RATE);
     let mut effects = Effects::default();
     // Position in the track at the start of the next chunk, seconds.
     let mut pos = 0.0;
@@ -545,65 +545,5 @@ impl Effects {
         if let Some(s) = &mut self.spectrum {
             s.feed(buf, measured);
         }
-    }
-}
-
-/// Linear resampling to the output rate, for the rare track that has another one.
-struct Resampler {
-    /// Input frames per output frame.
-    step: f64,
-    /// Position of the next output frame in the input chunk; -1 is the previous chunk's last.
-    pos: f64,
-    prev: [f32; 2],
-}
-
-impl Resampler {
-    fn new(rate: u32) -> Resampler {
-        Resampler { step: f64::from(rate) / f64::from(RATE), pos: 0.0, prev: [0.0; 2] }
-    }
-
-    fn reset(&mut self) {
-        self.pos = 0.0;
-        self.prev = [0.0; 2];
-    }
-
-    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-        if self.step == 1.0 {
-            out.extend_from_slice(input);
-            return;
-        }
-        let frames = input.len() / 2;
-        if frames == 0 {
-            return;
-        }
-        let at = |i: isize| if i < 0 { self.prev } else { [input[i as usize * 2], input[i as usize * 2 + 1]] };
-        while self.pos < frames as f64 - 1.0 {
-            let i = self.pos.floor();
-            let f = (self.pos - i) as f32;
-            let (a, b) = (at(i as isize), at(i as isize + 1));
-            out.extend([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]);
-            self.pos += self.step;
-        }
-        self.pos -= frames as f64;
-        self.prev = at(frames as isize - 1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Resampler;
-
-    #[test]
-    fn resampling() {
-        // 22050 Hz → 44100: twice the frames, midpoints in between, continuous across chunks.
-        let mut r = Resampler::new(22050);
-        let mut out = Vec::new();
-        r.process(&[0.0, 0.0, 1.0, -1.0], &mut out);
-        r.process(&[2.0, -2.0, 3.0, -3.0], &mut out);
-        assert_eq!(out, [0.0, 0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5]);
-        let mut same = Resampler::new(44100);
-        let mut out = Vec::new();
-        same.process(&[0.1, 0.2], &mut out);
-        assert_eq!(out, [0.1, 0.2]);
     }
 }
