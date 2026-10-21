@@ -824,7 +824,6 @@ impl Api {
         let url = di["url"].as_str().or(di["urls"][0].as_str()).context("get-file-info не вернул ссылку")?;
         Ok(FileInfo {
             url: url.to_string(),
-            codec: di["codec"].as_str().unwrap_or("").to_string(),
             bitrate: di["bitrate"].as_u64().unwrap_or(0),
         })
     }
@@ -832,8 +831,6 @@ impl Api {
 
 struct FileInfo {
     url: String,
-    #[cfg_attr(not(test), allow(dead_code))]
-    codec: String,
     #[cfg_attr(not(test), allow(dead_code))]
     bitrate: u64,
 }
