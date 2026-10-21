@@ -4,6 +4,7 @@ mod auth;
 mod clipboard;
 mod config;
 mod eq;
+mod input;
 mod mpris;
 mod player;
 mod ui;
@@ -11,7 +12,7 @@ mod ui;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use config::Config;
-use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use ratatui::crossterm::execute;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -110,6 +111,9 @@ fn main() -> Result<()> {
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     // Must run after entering the alternate screen and before reading events.
     app.picker = Some(query_picker());
+    // Keys are read here rather than by crossterm: it drops the physical key the terminal tells.
+    let mut keys = input::Reader::new();
+    let mut size = ratatui::crossterm::terminal::size()?;
     // Media keys and desktop player widgets; their commands come back as messages.
     let mut mpris = mpris::Mpris::start(move |r| {
         let _ = remote.send(app::Msg::Remote(r));
@@ -137,15 +141,22 @@ fn main() -> Result<()> {
                 last_draw = Instant::now();
                 dirty = false;
             }
-            if event::poll(Duration::from_millis(50))? {
-                match event::read()? {
-                    Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
-                    Event::Paste(s) => app.on_paste(&s),
-                    Event::Resize(..) => app.on_resize(),
-                    _ => continue,
-                }
+            let inputs = keys.read(Duration::from_millis(50))?;
+            if !inputs.is_empty() {
                 dirty = true;
                 last_input = Instant::now();
+            }
+            for i in inputs {
+                match i {
+                    input::Input::Key(k) => app.on_key(k),
+                    input::Input::Paste(s) => app.on_paste(&s),
+                }
+            }
+            let now = ratatui::crossterm::terminal::size()?;
+            if now != size {
+                size = now;
+                app.on_resize();
+                dirty = true;
             }
             // Changed settings are saved once the keys are left alone for a moment, so they
             // survive a crash or kill; not on every volume step.
@@ -163,6 +174,7 @@ fn main() -> Result<()> {
         }
         Ok(())
     })();
+    keys.finish();
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 

@@ -5,6 +5,7 @@ use crate::api::{
     WaveBatch, MY_WAVE, QUALITIES,
 };
 use crate::player::{Audio, PlayerEvent};
+use crate::input::Press;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
@@ -1495,8 +1496,10 @@ impl App {
         }
     }
 
-    pub fn on_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+    /// A key press: hotkeys go by the physical key, text fields get what was typed.
+    pub fn on_key(&mut self, key: impl Into<Press>) {
+        let key = key.into();
+        if is_ctrl(&key.hotkey, 'c') {
             self.quit = true;
             return;
         }
@@ -1516,10 +1519,7 @@ impl App {
             }
             return;
         }
-        let code = match key.code {
-            KeyCode::Char(c) => KeyCode::Char(ru_to_en(c)),
-            c => c,
-        };
+        let code = key.hotkey.code;
         match code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') | KeyCode::F(1) => self.show_help = true,
@@ -1633,7 +1633,8 @@ impl App {
         }
     }
 
-    fn on_search_key(&mut self, key: KeyEvent) {
+    fn on_search_key(&mut self, press: Press) {
+        let key = press.typed;
         match key.code {
             KeyCode::Esc => self.search_editing = false,
             KeyCode::Enter => {
@@ -1651,7 +1652,7 @@ impl App {
             KeyCode::Backspace => {
                 self.search_input.pop();
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => self.search_input.clear(),
+            _ if is_ctrl(&press.hotkey, 'u') => self.search_input.clear(),
             KeyCode::Char(c) if is_typed(&key) => self.search_input.push(c),
             _ => {}
         }
@@ -1920,14 +1921,15 @@ impl App {
         self.modal = Some(Modal::Rename { pl, input });
     }
 
-    fn on_modal_key(&mut self, key: KeyEvent) {
+    fn on_modal_key(&mut self, press: Press) {
         let Some(modal) = self.modal.take() else { return };
-        let code = match (&modal, key.code) {
-            // Text input gets characters as typed; elsewhere map the Russian layout.
-            (Modal::Rename { .. } | Modal::OpenLink { .. }, c) => c,
-            (_, KeyCode::Char(c)) => KeyCode::Char(ru_to_en(c)),
-            (_, c) => c,
+        let key = press.typed;
+        // Text input gets characters as typed; elsewhere keys go by the physical key.
+        let code = match &modal {
+            Modal::Rename { .. } | Modal::OpenLink { .. } => key.code,
+            _ => press.hotkey.code,
         };
+        let clear = is_ctrl(&press.hotkey, 'u');
         match modal {
             Modal::AddTo { track, choices, mut sel } => match code {
                 KeyCode::Esc | KeyCode::Char('q') => {}
@@ -2027,9 +2029,7 @@ impl App {
                     input.pop();
                     self.modal = Some(Modal::Rename { pl, input });
                 }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.modal = Some(Modal::Rename { pl, input: String::new() });
-                }
+                _ if clear => self.modal = Some(Modal::Rename { pl, input: String::new() }),
                 KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::Rename { pl, input });
@@ -2043,9 +2043,7 @@ impl App {
                     input.pop();
                     self.modal = Some(Modal::OpenLink { input });
                 }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.modal = Some(Modal::OpenLink { input: String::new() });
-                }
+                _ if clear => self.modal = Some(Modal::OpenLink { input: String::new() }),
                 KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::OpenLink { input });
@@ -2207,25 +2205,13 @@ fn is_typed(key: &KeyEvent) -> bool {
     !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
-/// Maps Russian (ЙЦУКЕН) layout characters to their QWERTY keys so hotkeys work on either layout.
-fn ru_to_en(c: char) -> char {
-    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбю.ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,";
-    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,./QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?";
-    RU.chars().position(|r| r == c).and_then(|i| EN.chars().nth(i)).unwrap_or(c)
+/// Ctrl + the key `c` (by the physical key).
+fn is_ctrl(key: &KeyEvent, c: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(c)
 }
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn layout() {
-        assert_eq!(super::ru_to_en('д'), 'l');
-        assert_eq!(super::ru_to_en('т'), 'n');
-        assert_eq!(super::ru_to_en('Д'), 'L');
-        assert_eq!(super::ru_to_en('.'), '/');
-        assert_eq!(super::ru_to_en('Ф'), 'A');
-        assert_eq!(super::ru_to_en('x'), 'x');
-    }
-
     /// Keys inside pop-up dialogs.
     #[test]
     fn modal_keys() {
@@ -2641,6 +2627,30 @@ mod tests {
         assert!(app.spectrum.iter().all(|&v| v == 0.0));
     }
 
+    /// Presses as the kitty keyboard protocol gives them: the physical key decides hotkeys (any
+    /// layout, Caps Lock ignored), text fields get what was typed.
+    #[test]
+    fn physical_keys() {
+        use super::*;
+        let press = |typed: char, hotkey: char, mods: KeyModifiers| Press {
+            typed: KeyEvent::new(KeyCode::Char(typed), mods),
+            hotkey: KeyEvent::new(KeyCode::Char(hotkey), mods),
+        };
+        let (mut app, _audio) = App::for_test();
+        // `o` with Caps Lock in the Russian layout: «Щ», the settings window all the same.
+        app.on_key(press('Щ', 'o', KeyModifiers::NONE));
+        assert!(matches!(app.modal, Some(Modal::Settings { .. })));
+        app.on_key(KeyCode::Esc);
+        // The search field takes the letters as typed; Ctrl+U (Ctrl+Г) clears it.
+        app.tab = Tab::Search;
+        app.search_editing = true;
+        app.on_key(press('Д', 'l', KeyModifiers::NONE));
+        app.on_key(press('а', 'f', KeyModifiers::NONE));
+        assert_eq!(app.search_input, "Да");
+        app.on_key(press('г', 'u', KeyModifiers::CONTROL));
+        assert_eq!(app.search_input, "");
+    }
+
     /// While the link of the next track is resolved the previous one still plays: its positions
     /// are not the new track's, and do not count as its start.
     #[test]
@@ -2801,7 +2811,7 @@ mod tests {
         assert_eq!(app.queue[289].id, "289");
         // A new search does not touch the playing queue.
         app.search_input = "new".into();
-        app.on_search_key(KeyEvent::from(KeyCode::Enter));
+        app.on_search_key(KeyCode::Enter.into());
         app.on_msg(Msg::Search { query: "new".into(), page: 0, result: Ok((page(1000..1100), Some(900))) });
         assert_eq!(app.queue.len(), 290);
         app.search_query = "q".into();
@@ -2817,7 +2827,7 @@ mod tests {
 
         // The website API does not count the results: pages are loaded until the last one.
         app.search_input = "web".into();
-        app.on_search_key(KeyEvent::from(KeyCode::Enter));
+        app.on_search_key(KeyCode::Enter.into());
         app.on_msg(Msg::Search { query: "web".into(), page: 0, result: Ok((page(0..100), None)) });
         assert_eq!(app.search_total, None);
         app.move_sel(1000);
