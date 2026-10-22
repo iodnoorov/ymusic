@@ -68,7 +68,11 @@ impl Download {
 }
 
 fn run(shared: &Shared, url: &str, stall: Duration) {
-    let agent = ureq::AgentBuilder::new().timeout_connect(stall).timeout_read(stall).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(stall)
+        .timeout_read(stall)
+        .tls_config(crate::api::tls_config())
+        .build();
     let mut retries = 0;
     loop {
         let have = shared.state.lock().unwrap().data.len() as u64;

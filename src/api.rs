@@ -6,6 +6,7 @@ use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
 use serde_json::{json, Value};
 use sha2::Sha256;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Most requests of one operation run at once (a large library is loaded in parts). The server
@@ -255,6 +256,27 @@ pub struct Api {
     pub less_ai: bool,
 }
 
+/// TLS for every connection: the root certificates built into the program and those of the system
+/// (`SSL_CERT_FILE`, `SSL_CERT_DIR` or the usual places), so that a certificate the system trusts
+/// (a company or antivirus one) is accepted too. Made once.
+pub fn tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            // Unreadable or broken system certificates are skipped: the built-in ones remain.
+            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("протоколы TLS по умолчанию")
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Arc::new(config)
+        })
+        .clone()
+}
+
 fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
     match r {
         Ok(resp) => Ok(resp.into_json()?),
@@ -288,6 +310,7 @@ impl Api {
             .timeout_connect(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .user_agent("Yandex-Music-API")
+            .tls_config(tls_config())
             .build();
         Api { agent, token: token.to_string(), uid: String::new(), web: false, less_ai: false }
     }
