@@ -30,6 +30,9 @@ pub struct Config {
     /// A new list starts after the current track instead of cutting it off.
     #[serde(default)]
     pub finish_track: bool,
+    /// Repeat mode: `off`, `all` or `one` (see `app::Repeat`).
+    #[serde(default)]
+    pub repeat: String,
     /// Requests go to the API of the music.yandex.ru website instead of the mobile one.
     #[serde(default)]
     pub web_api: bool,
@@ -58,6 +61,7 @@ impl Default for Config {
             quality: String::new(),
             crossfade: 0,
             finish_track: false,
+            repeat: String::new(),
             web_api: false,
         }
     }

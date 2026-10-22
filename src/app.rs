@@ -152,6 +152,7 @@ pub enum Setting {
     Equalizer,
     Crossfade,
     FinishTrack,
+    Repeat,
     LessAi,
     Api,
     Art,
@@ -161,11 +162,12 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 10] = [
+    pub const ALL: [Setting; 11] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
         Setting::FinishTrack,
+        Setting::Repeat,
         Setting::LessAi,
         Setting::Api,
         Setting::Art,
@@ -176,6 +178,42 @@ impl Setting {
 
     fn index(self) -> usize {
         Setting::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+}
+
+/// Repeat mode (`T`): what plays after a track that has ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Repeat {
+    #[default]
+    Off,
+    /// After the last track of the list — the first one again (a wave has no end).
+    All,
+    /// The same track again; `n` still moves on.
+    One,
+}
+
+impl Repeat {
+    pub const ALL: [Repeat; 3] = [Repeat::Off, Repeat::All, Repeat::One];
+
+    /// Stored in the config.
+    pub fn id(self) -> &'static str {
+        match self {
+            Repeat::Off => "off",
+            Repeat::All => "all",
+            Repeat::One => "one",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Repeat> {
+        Repeat::ALL.into_iter().find(|r| r.id() == id)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Repeat::Off => "выкл",
+            Repeat::All => "вся очередь",
+            Repeat::One => "один трек",
+        }
     }
 }
 
@@ -313,6 +351,10 @@ pub struct App {
     pub crossfade: u8,
     /// A new list waits for the current track to end instead of cutting it off.
     pub finish_track: bool,
+    pub repeat: Repeat,
+    /// The list plays in random order (`s`, or shuffle turned on from the system): its own
+    /// order, to go back to when shuffle is turned off.
+    unshuffled: Option<Vec<Track>>,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
     /// What «Сейчас играет» shows above the track; covers are downloaded only for `Art::Cover`.
@@ -420,6 +462,8 @@ impl App {
             quality: 1,
             crossfade: 0,
             finish_track: false,
+            repeat: Repeat::Off,
+            unshuffled: None,
             icons: true,
             art: Art::Cover,
             spectrum: vec![0.0; crate::player::SPECTRUM_BANDS],
@@ -585,7 +629,7 @@ impl App {
             _ => Status::Playing,
         };
         let volume = if self.muted { 0.0 } else { self.volume };
-        (State { track, status, volume }, self.time_pos)
+        (State { track, status, volume, repeat: self.repeat, shuffle: self.shuffled() }, self.time_pos)
     }
 
     /// A command from the desktop: the same as the matching key.
@@ -601,6 +645,8 @@ impl App {
             Remote::Seek(d) if has_track => self.player.seek(d),
             Remote::SeekTo(t) if has_track => self.player.seek(t - self.time_pos),
             Remote::Volume(v) => self.change_volume(v - self.volume),
+            Remote::Repeat(r) => self.set_repeat(r),
+            Remote::Shuffle(on) => self.set_shuffled(on),
             Remote::Quit => self.quit = true,
             _ => {}
         }
@@ -613,6 +659,7 @@ impl App {
     pub fn source_name(&self) -> String {
         match (&self.source, &self.wave) {
             (Source::Wave, Some(w)) => w.name.clone(),
+            (Source::List(n), _) if self.shuffled() => format!("{n} (в случайном порядке)"),
             (Source::List(n), _) => n.clone(),
             _ => String::new(),
         }
@@ -871,9 +918,32 @@ impl App {
         true
     }
 
-    fn next_playable(&self) -> Option<usize> {
+    /// The track to play after the current one: the next available one, or with repeat the same
+    /// one when it has ended (`Repeat::One`) or the first one after the last (`Repeat::All`).
+    fn following(&self, end: End) -> Option<usize> {
+        let available = |i: usize| self.queue[i].available;
+        if self.repeat == Repeat::One && matches!(end, End::Eof) && self.pos.is_some_and(available) {
+            return self.pos;
+        }
         let from = self.pos.map_or(0, |p| p + 1);
-        (from..self.queue.len()).find(|&i| self.queue[i].available)
+        if let Some(i) = (from..self.queue.len()).find(|&i| available(i)) {
+            return Some(i);
+        }
+        // A search queue goes on with its next pages first; a track carried over from another
+        // list is not part of this one.
+        let ended = matches!(self.source, Source::List(_)) && !(self.search_queue.is_some() && self.can_load_more_search());
+        let carried = |i: usize| i == 0 && self.carried.is_some();
+        if self.repeat == Repeat::All && ended {
+            return (0..self.queue.len()).find(|&i| available(i) && !carried(i));
+        }
+        None
+    }
+
+    /// What follows the current track changed: the one already appended to the player is dropped.
+    fn following_changed(&mut self) {
+        self.preload = None;
+        self.player.clear_next();
+        self.schedule_preload();
     }
 
     /// Resolves the next track's URL in advance and appends it to the player.
@@ -881,7 +951,7 @@ impl App {
         if self.preload.is_some() || self.preload_pending || self.loading_track || self.pos.is_none() {
             return;
         }
-        let Some(idx) = self.next_playable() else { return };
+        let Some(idx) = self.following(End::Eof) else { return };
         let track = self.queue[idx].clone();
         self.preload_pending = true;
         self.load_cover(track.cover.clone());
@@ -895,7 +965,7 @@ impl App {
 
     /// Switches to the preloaded track if it is the next one. Returns false if there is none.
     fn advance_preloaded(&mut self, end: End, player_advanced: bool) -> bool {
-        let next = self.next_playable();
+        let next = self.following(end);
         match &self.preload {
             Some((idx, id)) if Some(*idx) == next && self.queue[*idx].id == *id => {
                 let idx = *idx;
@@ -915,8 +985,7 @@ impl App {
             return;
         }
         self.report_end(end);
-        let from = self.pos.map_or(0, |p| p + 1);
-        if let Some(i) = (from..self.queue.len()).find(|&i| self.queue[i].available) {
+        if let Some(i) = self.following(end) {
             self.play_index(i);
         } else if self.source == Source::Wave {
             if let Some(w) = &mut self.wave {
@@ -964,6 +1033,7 @@ impl App {
         self.report_end(End::Other);
         self.context = context;
         self.queue = tracks;
+        self.unshuffled = None;
         self.search_queue = None;
         self.preload = None;
         self.carried = None;
@@ -992,6 +1062,7 @@ impl App {
         };
         self.carried = Some(carried);
         self.queue = std::iter::once(cur.clone()).chain(tracks.into_iter().filter(|t| t.id != cur.id)).collect();
+        self.unshuffled = None;
         self.pos = Some(0);
         self.queue_state.select(Some(0));
         self.source = source;
@@ -1253,6 +1324,9 @@ impl App {
                             let queued: HashSet<&str> = self.queue.iter().map(|t| t.id.as_str()).collect();
                             let mut more: Vec<Track> =
                                 new.iter().filter(|t| !queued.contains(t.id.as_str())).cloned().collect();
+                            if let Some(own) = &mut self.unshuffled {
+                                own.extend(more.iter().cloned());
+                            }
                             if shuffled {
                                 shuffle_tracks(&mut more);
                             }
@@ -1311,14 +1385,12 @@ impl App {
             Msg::ListLoaded { intent, .. } | Msg::WaveStarted { intent, .. } if intent != self.intent => {}
             Msg::ListLoaded { name, context, shuffle, playlist, result, .. } => match result {
                 Ok(list) if list.is_empty() => self.set_status(format!("{name}: нет треков")),
-                Ok(mut list) => {
-                    let name = if shuffle {
-                        shuffle_tracks(&mut list);
-                        format!("{name} (перемешано)")
+                Ok(list) => {
+                    if shuffle {
+                        self.play_shuffled(&name, context, list);
                     } else {
-                        name
-                    };
-                    self.play_list(&name, context, list, 0);
+                        self.play_list(&name, context, list, 0);
+                    }
                     self.playing_playlist = playlist;
                     self.tab = Tab::Wave;
                 }
@@ -1343,6 +1415,7 @@ impl App {
                         self.wave = Some(wave);
                         self.source = Source::Wave;
                         self.queue = b.tracks;
+                        self.unshuffled = None;
                         self.search_queue = None;
                         self.preload = None;
                         self.carried = None;
@@ -1430,9 +1503,12 @@ impl App {
                 }
                 self.preload_pending = false;
                 if let Ok(url) = result {
-                    if self.next_playable() == Some(idx) && self.queue[idx].id == id {
+                    if self.following(End::Eof) == Some(idx) && self.queue[idx].id == id {
                         self.player.append(&url);
                         self.preload = Some((idx, id));
+                    } else {
+                        // The queue or the repeat mode changed meanwhile.
+                        self.schedule_preload();
                     }
                 }
             }
@@ -1563,6 +1639,10 @@ impl App {
             KeyCode::Char('E') if self.tab == Tab::Playlists => self.ask_rename_playlist(),
             KeyCode::Esc | KeyCode::Backspace if self.tab == Tab::Playlists => self.open_playlist = None,
             KeyCode::Char('s') => self.shuffle_play(),
+            KeyCode::Char('T') => {
+                let i = Repeat::ALL.iter().position(|r| *r == self.repeat).unwrap_or(0);
+                self.set_repeat(Repeat::ALL[(i + 1) % Repeat::ALL.len()]);
+            }
             KeyCode::Char('R') => {
                 self.reload_all();
                 self.set_status("Обновление…");
@@ -1620,7 +1700,12 @@ impl App {
 
     /// Plays the loaded search results; later pages are appended to the queue.
     fn play_search(&mut self, name: &str, tracks: Vec<Track>, start: usize, shuffled: bool) {
-        self.play_list(name, PlayContext::new("search", self.search_query.clone()), tracks, start);
+        let context = PlayContext::new("search", self.search_query.clone());
+        if shuffled {
+            self.play_shuffled(name, context, tracks);
+        } else {
+            self.play_list(name, context, tracks, start);
+        }
         self.search_queue = Some(shuffled);
         self.maybe_extend_search_queue();
     }
@@ -1693,6 +1778,70 @@ impl App {
         }
     }
 
+    /// Plays the list in random order; its own order is kept for turning shuffle off.
+    fn play_shuffled(&mut self, name: &str, context: PlayContext, tracks: Vec<Track>) {
+        let mut shuffled = tracks.clone();
+        shuffle_tracks(&mut shuffled);
+        let finishing = self.finishing_track();
+        self.play_list(name, context, shuffled, 0);
+        if matches!(&self.source, Source::List(n) if n == name) {
+            self.unshuffled = Some(tracks);
+            let when = if finishing { "После этого трека" } else { "Играет" };
+            self.set_status(format!("{when}: {}", self.source_name()));
+        }
+    }
+
+    /// The list plays in random order.
+    pub fn shuffled(&self) -> bool {
+        self.unshuffled.is_some()
+    }
+
+    /// Shuffle turned on or off from the system (MPRIS, Now Playing): the playing list is shuffled
+    /// with the current track first, or put back in its own order; the current track goes on.
+    fn set_shuffled(&mut self, on: bool) {
+        if on == self.shuffled() {
+            return;
+        }
+        let Some(pos) = self.pos.filter(|_| matches!(self.source, Source::List(_))) else { return };
+        let cur = self.queue[pos].clone();
+        if on {
+            // A track carried over from another list stays first; any other moves there now.
+            if pos != 0 {
+                self.carried = None;
+            }
+            self.unshuffled = Some(self.queue.clone());
+            self.queue = shuffled_from(std::mem::take(&mut self.queue), pos);
+            self.pos = Some(0);
+        } else if let Some(own) = self.unshuffled.take() {
+            let carried = pos == 0 && self.carried.is_some();
+            match own.iter().position(|t| t.id == cur.id).filter(|_| !carried) {
+                Some(i) => {
+                    self.queue = own;
+                    self.pos = Some(i);
+                }
+                // Carried over from another list: it stays first, the list follows in its order.
+                None => {
+                    let id = cur.id.clone();
+                    self.queue = std::iter::once(cur).chain(own.into_iter().filter(|t| t.id != id)).collect();
+                    self.pos = Some(0);
+                }
+            }
+        }
+        if let Some(shuffled) = &mut self.search_queue {
+            *shuffled = on;
+        }
+        self.queue_state.select(self.pos);
+        self.following_changed();
+        self.set_status(format!("В случайном порядке: {}", if on { "вкл" } else { "выкл" }));
+    }
+
+    pub fn set_repeat(&mut self, repeat: Repeat) {
+        self.repeat = repeat;
+        self.following_changed();
+        let wave = if repeat == Repeat::All && self.source == Source::Wave { " · волна и так бесконечна" } else { "" };
+        self.set_status(format!("Повтор: {}{wave}", repeat.name()));
+    }
+
     /// Current value of a settings row; `None` for rows that are actions.
     pub fn setting_value(&self, s: Setting) -> Option<String> {
         Some(match s {
@@ -1705,6 +1854,7 @@ impl App {
                 None => "…".to_string(),
             },
             Setting::FinishTrack => if self.finish_track { "вкл" } else { "выкл" }.to_string(),
+            Setting::Repeat => self.repeat.name().to_string(),
             Setting::Api => if self.api.web { "сайт" } else { "мобильный" }.to_string(),
             Setting::Art => self.art.name().to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
@@ -1742,6 +1892,10 @@ impl App {
                 None => self.set_status("Настройки аккаунта ещё загружаются"),
             },
             Setting::FinishTrack => self.finish_track = !self.finish_track,
+            Setting::Repeat => {
+                let i = Repeat::ALL.iter().position(|r| *r == self.repeat).unwrap_or(0);
+                self.set_repeat(Repeat::ALL[cycle(i, Repeat::ALL.len())]);
+            }
             Setting::Api => {
                 self.api.web = !self.api.web;
                 self.reload_all();
@@ -1851,14 +2005,13 @@ impl App {
     /// Plays the opened playlist from the selected track (or all of it shuffled).
     fn play_open(&mut self, shuffle: bool) {
         let Some(open) = &self.open_playlist else { return };
-        let (key, name, mut tracks) = (open.pl.key(), format!("Плейлист: {}", open.pl.title), open.tracks.clone());
+        let (key, name, tracks) = (open.pl.key(), format!("Плейлист: {}", open.pl.title), open.tracks.clone());
         if tracks.is_empty() {
             return;
         }
         let context = PlayContext::new("playlist", key.clone());
         if shuffle {
-            shuffle_tracks(&mut tracks);
-            self.play_list(&format!("{name} (перемешано)"), context, tracks, 0);
+            self.play_shuffled(&name, context, tracks);
         } else {
             let start = self.open_state.selected().unwrap_or(0);
             self.play_list(&name, context, tracks, start);
@@ -2168,15 +2321,10 @@ impl App {
     }
 
     fn shuffle_play(&mut self) {
-        let (name, mut list) = match self.tab {
-            Tab::Search => ("Поиск (перемешано)", self.search_results.clone()),
-            _ => ("Мне нравится (перемешано)", self.liked.clone()),
-        };
-        shuffle_tracks(&mut list);
         if self.tab == Tab::Search {
-            self.play_search(name, list, 0, true);
+            self.play_search("Поиск", self.search_results.clone(), 0, true);
         } else {
-            self.play_list(name, self.liked_context(), list, 0);
+            self.play_shuffled("Мне нравится", self.liked_context(), self.liked.clone());
         }
     }
 
@@ -2188,6 +2336,16 @@ impl App {
     pub fn save_volume(&self) -> u8 {
         self.volume.clamp(0.0, MAX_VOLUME) as u8
     }
+}
+
+/// The track at `first` goes to the start, the rest are shuffled.
+fn shuffled_from(mut tracks: Vec<Track>, first: usize) -> Vec<Track> {
+    if first < tracks.len() {
+        let t = tracks.remove(first);
+        tracks.insert(0, t);
+        shuffle_tracks(&mut tracks[1..]);
+    }
+    tracks
 }
 
 fn shuffle_tracks(list: &mut [Track]) {
@@ -2330,6 +2488,14 @@ mod tests {
         app.on_key(key(KeyCode::Left));
         assert!(!app.finish_track);
 
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.repeat, Repeat::All);
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.repeat, Repeat::One, "wraps around");
+        app.set_repeat(Repeat::Off);
+
         // «Меньше ИИ-музыки»: not loaded yet — nothing changes; then switched at once, rolled back on error.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
@@ -2385,14 +2551,14 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 8 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 9 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 9 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 10 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
@@ -2531,6 +2697,117 @@ mod tests {
         app.on_track_error();
         assert_eq!(app.pos, Some(2));
         assert!(app.retried);
+    }
+
+    #[test]
+    fn shuffle_from_system() {
+        use super::*;
+        let (mut app, _audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let ids = |app: &App| app.queue.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let own: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        app.play_list("Альбом", PlayContext::default(), own.iter().map(|id| t(id)).collect(), 5);
+        app.loading_track = false;
+        assert!(!app.shuffled());
+
+        // On: the current track goes first, the rest are shuffled; the name tells it.
+        use crate::media::Remote;
+        app.on_remote(Remote::Shuffle(true));
+        assert!(app.shuffled());
+        assert_eq!((app.pos, app.queue[0].id.as_str()), (Some(0), "5"));
+        assert_ne!(ids(&app), own);
+        let mut sorted = ids(&app);
+        sorted.sort_by_key(|id| id.parse::<u32>().unwrap());
+        assert_eq!(sorted, own);
+        assert_eq!(app.source_name(), "Альбом (в случайном порядке)");
+        assert!(app.media_state().0.shuffle);
+
+        // Off: the list's own order, the current track where it belongs.
+        app.begin_track(3, false);
+        let cur = app.queue[3].id.clone();
+        app.on_remote(Remote::Shuffle(false));
+        assert_eq!(ids(&app), own);
+        assert_eq!(app.current().map(|t| t.id.clone()), Some(cur));
+        assert_eq!(app.source_name(), "Альбом");
+
+        // `s` plays a list shuffled: shuffle shows as on and turns off to the list's order.
+        app.liked = own.iter().map(|id| t(id)).collect();
+        app.tab = Tab::Liked;
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert!(app.shuffled());
+        app.on_remote(Remote::Shuffle(false));
+        assert_eq!(ids(&app), own);
+
+        // A wave is not shuffled.
+        app.source = Source::Wave;
+        app.on_remote(Remote::Shuffle(true));
+        assert!(!app.shuffled());
+    }
+
+    #[test]
+    fn repeat_modes() {
+        use super::*;
+        let (mut app, audio) = App::for_test();
+        let t = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue = vec![t("a"), t("b"), t("c")];
+        app.source = Source::List("test".into());
+        app.begin_track(0, false);
+        app.loading_track = false;
+        audio.take();
+
+        // One track: the ended track plays again, the preload asks for it; `n` still moves on.
+        app.set_repeat(Repeat::One);
+        assert_eq!(app.following(End::Eof), Some(0));
+        assert_eq!(app.following(End::Skip), Some(1));
+        assert_eq!(audio.take(), ["clear"]);
+        app.on_msg(Msg::Preload { gen: app.gen, idx: 0, id: "a".into(), result: Ok("http://x/a".into()) });
+        assert_eq!(app.preload, Some((0, "a".to_string())));
+        app.on_msg(Msg::Player(PlayerEvent::Eof));
+        assert_eq!(app.pos, Some(0));
+        assert!(app.play.is_some(), "a new playback is reported");
+        // Switching the mode drops the preloaded repeat.
+        app.loading_track = false;
+        app.on_msg(Msg::Preload { gen: app.gen, idx: 0, id: "a".into(), result: Ok("http://x/a".into()) });
+        audio.take();
+        app.set_repeat(Repeat::Off);
+        assert!(app.preload.is_none());
+        assert_eq!(audio.take(), ["clear"]);
+
+        // The whole queue: after the last track — the first one.
+        app.begin_track(2, false);
+        app.loading_track = false;
+        assert_eq!(app.following(End::Eof), None);
+        app.set_repeat(Repeat::All);
+        assert_eq!(app.following(End::Eof), Some(0));
+        assert_eq!(app.following(End::Skip), Some(0));
+        // A wave has no end to go round.
+        app.source = Source::Wave;
+        assert_eq!(app.following(End::Eof), None);
+        app.source = Source::List("test".into());
+        app.next(End::Eof);
+        assert_eq!(app.pos, Some(0));
     }
 
     #[test]

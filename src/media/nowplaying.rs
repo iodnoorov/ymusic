@@ -2,7 +2,7 @@
 //! program and show what plays. Commands are delivered on the main thread's run loop, which
 //! `sync` turns on every pass of the UI loop; covers are downloaded in a thread of their own.
 
-use super::{Clock, Remote, State, Status};
+use super::{Clock, Remote, Repeat, State, Status};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -11,10 +11,11 @@ use objc2_app_kit::NSImage;
 use objc2_core_foundation::{kCFRunLoopDefaultMode, CFRunLoop, CGSize};
 use objc2_foundation::{NSArray, NSData, NSMutableDictionary, NSNumber, NSString, NSURL};
 use objc2_media_player::{
-    MPChangePlaybackPositionCommandEvent, MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
+    MPChangePlaybackPositionCommandEvent, MPChangeRepeatModeCommandEvent, MPChangeShuffleModeCommandEvent, MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
     MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle, MPNowPlayingInfoCenter,
     MPNowPlayingInfoPropertyElapsedPlaybackTime, MPNowPlayingInfoPropertyPlaybackRate, MPNowPlayingPlaybackState,
-    MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus,
+    MPRemoteCommand, MPRemoteCommandCenter, MPRemoteCommandEvent, MPRemoteCommandHandlerStatus, MPRepeatType,
+    MPShuffleType,
 };
 use std::ptr::NonNull;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -62,12 +63,34 @@ impl NowPlaying {
                 command.setPreferredIntervals(&step);
                 on(&command, Remote::Seek(by));
             }
-            let send = send.clone();
+            let seek = send.clone();
             center.changePlaybackPositionCommand().addTargetWithHandler(&RcBlock::new(
                 move |event: NonNull<MPRemoteCommandEvent>| {
                     // SAFETY: this command's events are position changes.
                     let event = event.cast::<MPChangePlaybackPositionCommandEvent>();
-                    send(Remote::SeekTo(event.as_ref().positionTime()));
+                    seek(Remote::SeekTo(event.as_ref().positionTime()));
+                    MPRemoteCommandHandlerStatus::Success
+                },
+            ));
+            let shuffle = send.clone();
+            center.changeRepeatModeCommand().addTargetWithHandler(&RcBlock::new(
+                move |event: NonNull<MPRemoteCommandEvent>| {
+                    // SAFETY: this command's events are repeat mode changes.
+                    let event = event.cast::<MPChangeRepeatModeCommandEvent>();
+                    let repeat = match event.as_ref().repeatType() {
+                        MPRepeatType::All => Repeat::All,
+                        MPRepeatType::One => Repeat::One,
+                        _ => Repeat::Off,
+                    };
+                    send(Remote::Repeat(repeat));
+                    MPRemoteCommandHandlerStatus::Success
+                },
+            ));
+            center.changeShuffleModeCommand().addTargetWithHandler(&RcBlock::new(
+                move |event: NonNull<MPRemoteCommandEvent>| {
+                    // SAFETY: this command's events are shuffle mode changes.
+                    let event = event.cast::<MPChangeShuffleModeCommandEvent>();
+                    shuffle(Remote::Shuffle(event.as_ref().shuffleType() != MPShuffleType::Off));
                     MPRemoteCommandHandlerStatus::Success
                 },
             ));
@@ -127,6 +150,14 @@ impl NowPlaying {
                 put(MPMediaItemPropertyArtwork, art);
             }
             center.setNowPlayingInfo(Some(&info));
+            let commands = MPRemoteCommandCenter::sharedCommandCenter();
+            commands.changeRepeatModeCommand().setCurrentRepeatType(match state.repeat {
+                Repeat::Off => MPRepeatType::Off,
+                Repeat::All => MPRepeatType::All,
+                Repeat::One => MPRepeatType::One,
+            });
+            let shuffle = if state.shuffle { MPShuffleType::Items } else { MPShuffleType::Off };
+            commands.changeShuffleModeCommand().setCurrentShuffleType(shuffle);
             center.setPlaybackState(match state.status {
                 Status::Playing => MPNowPlayingPlaybackState::Playing,
                 Status::Paused => MPNowPlayingPlaybackState::Paused,

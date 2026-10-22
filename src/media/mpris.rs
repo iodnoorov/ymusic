@@ -10,7 +10,7 @@ use std::task::{Poll, Waker};
 use zbus::object_server::SignalEmitter;
 use zbus::{ObjectPath, OwnedVariant, Variant};
 
-use super::{Clock, Remote, State, Status};
+use super::{Clock, Remote, Repeat, State, Status};
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
 const NAME: &str = "org.mpris.MediaPlayer2.ymusic";
@@ -37,7 +37,7 @@ type Send = Arc<dyn Fn(Remote) + std::marker::Send + Sync>;
 struct Inbox(Mutex<(VecDeque<Update>, Option<Waker>, bool)>);
 
 enum Update {
-    Changed { track: bool, status: bool, volume: bool },
+    Changed { track: bool, status: bool, volume: bool, repeat: bool, shuffle: bool },
     Seeked(f64),
 }
 
@@ -112,6 +112,8 @@ impl Mpris {
                 track: state.track != self.last.track,
                 status: state.status != self.last.status,
                 volume: state.volume != self.last.volume,
+                repeat: state.repeat != self.last.repeat,
+                shuffle: state.shuffle != self.last.shuffle,
             };
             cur.state = state.clone();
             self.last = state;
@@ -143,7 +145,7 @@ async fn serve(inbox: Arc<Inbox>, current: Arc<Mutex<Current>>, send: Send) -> z
     while let Some(update) = inbox.next().await {
         let emitter = player.signal_emitter();
         match update {
-            Update::Changed { track, status, volume } => {
+            Update::Changed { track, status, volume, repeat, shuffle } => {
                 let p = player.get().await;
                 if track {
                     p.metadata_changed(emitter).await?;
@@ -158,6 +160,12 @@ async fn serve(inbox: Arc<Inbox>, current: Arc<Mutex<Current>>, send: Send) -> z
                 }
                 if volume {
                     p.volume_changed(emitter).await?;
+                }
+                if repeat {
+                    p.loop_status_changed(emitter).await?;
+                }
+                if shuffle {
+                    p.shuffle_changed(emitter).await?;
                 }
             }
             Update::Seeked(pos) => Player::seeked(emitter, (pos * 1e6) as i64).await?,
@@ -323,6 +331,37 @@ impl Player {
         (self.send)(Remote::Volume(v.max(0.0) * 100.0));
     }
 
+    #[zbus(property)]
+    fn loop_status(&self) -> String {
+        match self.current.lock().unwrap().state.repeat {
+            Repeat::Off => "None",
+            Repeat::All => "Playlist",
+            Repeat::One => "Track",
+        }
+        .into()
+    }
+
+    #[zbus(property)]
+    fn set_loop_status(&mut self, v: String) {
+        let repeat = match v.as_str() {
+            "Playlist" => Repeat::All,
+            "Track" => Repeat::One,
+            _ => Repeat::Off,
+        };
+        (self.send)(Remote::Repeat(repeat));
+    }
+
+    /// The playing list in random order (a wave cannot be).
+    #[zbus(property)]
+    fn shuffle(&self) -> bool {
+        self.current.lock().unwrap().state.shuffle
+    }
+
+    #[zbus(property)]
+    fn set_shuffle(&mut self, v: bool) {
+        (self.send)(Remote::Shuffle(v));
+    }
+
     /// Asked for when needed (the desktop counts it on itself between `Seeked` signals).
     #[zbus(property(emits_changed_signal = "false"))]
     fn position(&self) -> i64 {
@@ -379,7 +418,7 @@ mod tests {
             art_url: None,
             url: String::new(),
         };
-        State { track: Some(track), status, volume: 50.0 }
+        State { track: Some(track), status, volume: 50.0, repeat: Repeat::Off, shuffle: false }
     }
 
     /// The tracking part alone, without the D-Bus thread.
@@ -396,7 +435,9 @@ mod tests {
         let mut q = m.inbox.0.lock().unwrap();
         q.0.drain(..)
             .map(|u| match u {
-                Update::Changed { track, status, volume } => format!("changed {track} {status} {volume}"),
+                Update::Changed { track, status, volume, repeat, shuffle } => {
+                    format!("changed {track} {status} {volume} {repeat} {shuffle}")
+                }
                 Update::Seeked(p) => format!("seeked {p}"),
             })
             .collect()
@@ -406,7 +447,7 @@ mod tests {
     fn changes_and_seeks() {
         let mut m = mpris();
         m.sync(state("1", Status::Playing), 0.0);
-        assert_eq!(drain(&m), ["changed true true true"]);
+        assert_eq!(drain(&m), ["changed true true true false false"]);
         // Playback moving on is not a seek; the same state is not told again.
         m.sync(state("1", Status::Playing), 0.25);
         assert!(drain(&m).is_empty());
@@ -418,10 +459,14 @@ mod tests {
         m.sync(state("1", Status::Playing), 10.5);
         assert!(drain(&m).is_empty());
         m.sync(state("1", Status::Paused), 10.5);
-        assert_eq!(drain(&m), ["changed false true false"]);
+        assert_eq!(drain(&m), ["changed false true false false false"]);
+        m.sync(State { repeat: Repeat::One, ..state("1", Status::Paused) }, 10.5);
+        assert_eq!(drain(&m), ["changed false false false true false"]);
+        m.sync(State { repeat: Repeat::One, shuffle: true, ..state("1", Status::Paused) }, 10.5);
+        assert_eq!(drain(&m), ["changed false false false false true"]);
         // A new track starting from 0 is not a seek.
         m.sync(state("2", Status::Playing), 0.0);
-        assert_eq!(drain(&m), ["changed true true false"]);
+        assert_eq!(drain(&m), ["changed true true false true true"]);
         assert_eq!(m.current.lock().unwrap().position, 0.0);
     }
 

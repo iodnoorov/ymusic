@@ -4,6 +4,8 @@
 
 use std::time::Instant;
 
+pub use crate::app::Repeat;
+
 #[cfg(target_os = "linux")]
 mod mpris;
 #[cfg(target_os = "macos")]
@@ -33,6 +35,9 @@ pub enum Remote {
     /// Volume, % (100 — normal).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Volume(f64),
+    Repeat(Repeat),
+    /// Play the list in random order or in its own.
+    Shuffle(bool),
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Quit,
 }
@@ -44,6 +49,9 @@ pub struct State {
     pub status: Status,
     /// Volume, % (100 — normal).
     pub volume: f64,
+    pub repeat: Repeat,
+    /// The list plays in random order.
+    pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

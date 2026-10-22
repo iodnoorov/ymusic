@@ -89,6 +89,7 @@ fn main() -> Result<()> {
     let art = app::Art::from_id(&cfg.art).unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None });
     app.set_art(art);
     app.finish_track = cfg.finish_track;
+    app.repeat = app::Repeat::from_id(&cfg.repeat).unwrap_or_default();
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
     let icons = cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
@@ -257,6 +258,7 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
         || cfg.crossfade != app.crossfade
         || cfg.art != app.art.id()
         || cfg.finish_track != app.finish_track
+        || cfg.repeat != app.repeat.id()
         || cfg.web_api != app.api.web
         || cfg.icons != icons;
     cfg.volume = volume;
@@ -265,6 +267,7 @@ fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
     cfg.crossfade = app.crossfade;
     cfg.art = app.art.id().to_string();
     cfg.finish_track = app.finish_track;
+    cfg.repeat = app.repeat.id().to_string();
     cfg.web_api = app.api.web;
     cfg.icons = icons;
     changed

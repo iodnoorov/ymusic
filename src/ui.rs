@@ -1,7 +1,7 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Art, Modal, Setting, Source, StationRow, Tab};
+use crate::app::{App, Art, Modal, Repeat, Setting, Source, StationRow, Tab};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -58,6 +58,8 @@ pub struct Icons {
     clock: &'static str,
     queue: &'static str,
     link: &'static str,
+    repeat: &'static str,
+    repeat_one: &'static str,
 }
 
 /// JetBrainsMono Nerd Font (Material Design icons).
@@ -92,6 +94,8 @@ const NERD: Icons = Icons {
     clock: "󰅐",
     queue: "󰲸",
     link: "󰌹",
+    repeat: "󰑖",
+    repeat_one: "󰑘",
 };
 
 /// Fallback for terminals without a Nerd Font.
@@ -126,6 +130,8 @@ const PLAIN: Icons = Icons {
     clock: "◷",
     queue: "≡",
     link: "↗",
+    repeat: "↻",
+    repeat_one: "↻1",
 };
 
 /// Nerd Font icons or plain Unicode symbols; switched from the settings window.
@@ -552,9 +558,8 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let title = match &app.source {
-        Source::Wave => app.source_name(),
-        Source::List(n) => n.clone(),
         Source::None => "Очередь".into(),
+        _ => app.source_name(),
     };
     let icon = if app.source == Source::Wave { i.wave } else { i.queue };
     let fetching = app.wave.as_ref().is_some_and(|w| w.fetching);
@@ -761,6 +766,14 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     let filled = ((app.volume.min(100.0) / 10.0).round() as usize).min(10);
     let vol_color = if app.muted { MUTED } else { ACCENT };
     let mut right = vec![];
+    let repeat = match app.repeat {
+        Repeat::Off => None,
+        Repeat::All => Some(i.repeat),
+        Repeat::One => Some(i.repeat_one),
+    };
+    if let Some(icon) = repeat {
+        right.push(Span::styled(format!("{icon}   "), Style::new().fg(ACCENT)));
+    }
     let preset = &crate::eq::PRESETS[app.eq];
     if !preset.is_flat() {
         right.push(Span::styled("EQ ", Style::new().fg(ACCENT).bold()));
@@ -836,7 +849,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
     } else if app.tab == Tab::Playlists && app.open_playlist.is_some() {
         &[
             ("Enter", "играть"),
-            ("s", "перемешать"),
+            ("s", "в случайном порядке"),
             ("x", "удалить"),
             ("a", "в плейлист"),
             ("E", "переименовать"),
@@ -855,7 +868,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             ],
             Tab::Playlists => &[
                 ("Enter", "открыть"),
-                ("s", "перемешать"),
+                ("s", "в случайном порядке"),
                 ("E", "переименовать"),
                 ("x", "удалить"),
                 ("R", "обновить"),
@@ -863,7 +876,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             ],
             Tab::Liked | Tab::Search => &[
                 ("Enter", "играть"),
-                ("s", "перемешать"),
+                ("s", "в случайном порядке"),
                 ("L", "лайк"),
                 ("r", "волна по треку"),
                 ("␣", "пауза"),
@@ -922,6 +935,7 @@ fn draw_help(f: &mut Frame) {
                 ("←  →", "перемотка ±10 с"),
                 ("+  -", "громкость"),
                 ("m", "без звука"),
+                ("T", "повтор: очередь / трек / выкл"),
             ],
         ),
         (i.heart, "Оценки", &[("l", "лайк текущего трека"), ("L", "лайк выбранного в списке"), ("d", "дизлайк и пропуск")]),
@@ -944,7 +958,7 @@ fn draw_help(f: &mut Frame) {
                 ("j k  ↑ ↓", "перемещение"),
                 ("g  G", "в начало / в конец"),
                 ("Enter", "играть"),
-                ("s", "перемешать список"),
+                ("s", "список в случайном порядке"),
                 ("y", "копировать ссылку на трек"),
                 ("Y", "играть по ссылке"),
                 ("/", "поиск"),
@@ -1080,6 +1094,7 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Equalizer => "Эквалайзер",
         Setting::Crossfade => "Плавные переходы",
         Setting::FinishTrack => "Доигрывать трек",
+        Setting::Repeat => "Повтор",
         Setting::LessAi => "Меньше ИИ-музыки",
         Setting::Api => "API",
         Setting::Art => "Картинка",
@@ -1096,6 +1111,7 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Equalizer => "Слышно сразу".into(),
         Setting::Crossfade => "Затухание в конце трека и нарастание в начале".into(),
         Setting::FinishTrack => "Новый список начнётся после текущего трека".into(),
+        Setting::Repeat => "T · вся очередь по кругу или один трек снова".into(),
         Setting::LessAi => "Реже ИИ-треки в рекомендациях · настройка аккаунта".into(),
         Setting::Api => "Запасной вариант — API сайта music.yandex.ru".into(),
         Setting::Art => "Над треком в «Сейчас играет»: обложка альбома или спектр".into(),
