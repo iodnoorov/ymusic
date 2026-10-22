@@ -1,0 +1,51 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Сборка
+        run: cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Тесты
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: cargo test --locked --target ${{ matrix.target }}
+
+      - name: Архив
+        run: |
+          V=$(cargo pkgid | sed 's/.*[#@]//')
+          A=${{ matrix.target }}; A=${A%%-*}
+          D=ymusic-$V-$A-macos
+          mkdir $D
+          cp target/${{ matrix.target }}/release/ymusic LICENSE README.md $D/
+          $D/ymusic --version || true
+          tar czf $D.tar.gz $D
+          shasum -a 256 $D.tar.gz > $D.tar.gz.sha256
+          echo "NAME=$D" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.tar.gz*
