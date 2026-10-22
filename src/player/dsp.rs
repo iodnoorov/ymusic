@@ -196,14 +196,11 @@ impl Equalizer {
     }
 }
 
-/// Gain of the fade-in from the start and the fade-out before the end of a track: 0 → 1 over
-/// `fade` seconds, as mpv's `volume` filter with `min(1, min(t, duration - t) / fade)` did.
-pub fn fade_gain(t: f64, fade: f64, duration: Option<f64>) -> f32 {
-    if fade <= 0.0 {
-        return 1.0;
-    }
-    let left = duration.map_or(f64::INFINITY, |d| d - t);
-    (t.min(left) / fade).clamp(0.0, 1.0) as f32
+/// Gains of a crossfade `t` of the way through (0..1): the outgoing track's and the incoming
+/// one's. Equal power — the squares add up to 1 — so two unrelated tracks do not dip in the middle.
+pub fn crossfade_gains(t: f64) -> (f32, f32) {
+    let a = t.clamp(0.0, 1.0) * std::f64::consts::FRAC_PI_2;
+    (a.cos() as f32, a.sin() as f32)
 }
 
 /// Linear resampling, for the rare track (or device) with another rate than ours.
@@ -489,13 +486,16 @@ mod tests {
     }
 
     #[test]
-    fn fade() {
-        assert_eq!(fade_gain(1.0, 0.0, Some(10.0)), 1.0);
-        assert_eq!(fade_gain(0.0, 5.0, Some(200.0)), 0.0);
-        assert_eq!(fade_gain(2.5, 5.0, Some(200.0)), 0.5);
-        assert_eq!(fade_gain(100.0, 5.0, Some(200.0)), 1.0);
-        assert_eq!(fade_gain(199.0, 5.0, Some(200.0)), 0.2);
-        assert_eq!(fade_gain(100.0, 5.0, None), 1.0);
+    fn crossfade() {
+        assert_eq!(crossfade_gains(0.0), (1.0, 0.0));
+        let (out, inc) = crossfade_gains(1.0);
+        assert!(out.abs() < 1e-6 && inc == 1.0);
+        for t in [0.1, 0.5, 0.9] {
+            let (out, inc) = crossfade_gains(t);
+            assert!((out * out + inc * inc - 1.0).abs() < 1e-6, "equal power at {t}");
+        }
+        assert_eq!(crossfade_gains(-1.0), (1.0, 0.0));
+        assert_eq!(crossfade_gains(2.0), crossfade_gains(1.0));
     }
 
     #[test]

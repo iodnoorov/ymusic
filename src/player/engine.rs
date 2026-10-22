@@ -1,15 +1,17 @@
 //! The own player. A control thread takes commands, talks to the sound server and reports
 //! events; a producer thread downloads and decodes tracks and pushes the sound into the ring
 //! between them. Track boundaries travel through the ring as marks, so events follow what is
-//! heard rather than what is decoded.
+//! heard rather than what is decoded. With a crossfade the producer decodes two tracks at once
+//! for a while and mixes them.
 
 use super::decode::Decoder;
-use super::dsp::{fade_gain, Equalizer, Resampler, Spectrum};
+use super::dsp::{crossfade_gains, Equalizer, Resampler, Spectrum};
 use super::fetch::Download;
 use super::output::{Mark, Output, Ring, RATE};
 use super::{spectrum_freq, spectrum_step, Audio, PlayerEvent, SPECTRUM_BANDS};
 use crate::eq::Preset;
 use anyhow::Result;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -18,6 +20,8 @@ use std::time::{Duration, Instant};
 
 /// How often the position is reported and the marks are checked.
 const TICK: Duration = Duration::from_millis(250);
+/// Frames the producer handles at a time (≈ 93 ms).
+const CHUNK: usize = 4096;
 
 /// One track: its download and whether it has been abandoned.
 struct Job {
@@ -51,6 +55,12 @@ struct Shared {
     ring: Arc<Ring>,
     /// The appended track: the producer moves on to it when the current one ends.
     next: Mutex<Option<Arc<Job>>>,
+    /// The appended track while it is being crossfaded into: already heard, but `Next` still
+    /// moves on to it at once.
+    incoming: Mutex<Option<Arc<Job>>>,
+    /// Bumped whenever what plays is dropped (a new track, `Next`, stop): the producer abandons
+    /// the tracks it is decoding.
+    epoch: AtomicU64,
     /// Gain applied to the samples (volume and mute), `f32` bits.
     gain: AtomicU32,
     settings: Mutex<Settings>,
@@ -60,7 +70,7 @@ struct Shared {
 #[derive(Clone, Copy, Default)]
 struct Settings {
     eq: Option<&'static Preset>,
-    /// Fade length, seconds (0 — off).
+    /// Crossfade length, seconds (0 — off).
     fade: f64,
     spectrum: bool,
     /// Bumped on every change: the producer rebuilds its filters.
@@ -113,6 +123,8 @@ impl Player {
         let shared = Arc::new(Shared {
             ring: Arc::new(Ring::default()),
             next: Mutex::new(None),
+            incoming: Mutex::new(None),
+            epoch: AtomicU64::new(0),
             gain: AtomicU32::new(0),
             settings: Mutex::new(Settings { version: 1, ..Settings::default() }),
         });
@@ -286,7 +298,8 @@ impl Control {
                 let _ = self.work.send(Work::Appended);
             }
             Cmd::Next => {
-                let next = self.shared.next.lock().unwrap().take();
+                // During a crossfade the incoming track starts over on its own.
+                let next = self.shared.next.lock().unwrap().take().or_else(|| self.shared.incoming.lock().unwrap().take());
                 if let Some(job) = next {
                     self.live.retain(|j| j.id != job.id);
                     self.reset()?;
@@ -354,6 +367,8 @@ impl Control {
     }
 
     fn reset_quietly(&mut self) {
+        self.shared.epoch.fetch_add(1, Ordering::Relaxed);
+        self.shared.incoming.lock().unwrap().take();
         for job in self.live.drain(..) {
             job.cancel();
         }
@@ -427,63 +442,178 @@ fn produce(shared: &Shared, work: &Receiver<Work>) {
         let newest = work.try_iter().filter_map(|w| if let Work::Play(j) = w { Some(j) } else { None }).last();
         let (job, gapless) = newest.map_or((job, gapless), |j| (j, false));
         if !job.cancelled() {
-            pending = play(shared, &job, gapless);
+            pending = play(shared, job, gapless);
         }
     }
 }
 
-/// Decodes `job` into the ring. Returns the appended track to go on with.
-fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
+/// A track on its way into the ring: decoded and resampled to our rate.
+struct Track {
+    dec: Decoder,
+    resampler: Resampler,
+    duration: Option<f64>,
+    /// Seconds into the track of the next frame `read` gives out.
+    pos: f64,
+    /// Resampled frames not given out yet.
+    pending: VecDeque<f32>,
+    ended: bool,
+    resampled: Vec<f32>,
+}
+
+impl Track {
+    fn open(job: &Job) -> Result<Track> {
+        Track::from_decoder(Decoder::open(Box::new(job.download.reader()))?)
+    }
+
+    fn from_decoder(dec: Decoder) -> Result<Track> {
+        Ok(Track {
+            resampler: Resampler::to(dec.sample_rate(), RATE),
+            duration: dec.duration(),
+            dec,
+            pos: 0.0,
+            pending: VecDeque::new(),
+            ended: false,
+            resampled: Vec::new(),
+        })
+    }
+
+    /// Appends up to `frames` frames to `out`; fewer only at the end of the track.
+    fn read(&mut self, frames: usize, out: &mut Vec<f32>) -> Result<usize> {
+        while self.pending.len() < frames * 2 && !self.ended {
+            match self.dec.next_chunk()? {
+                Some(chunk) => {
+                    self.resampled.clear();
+                    self.resampler.process(chunk, &mut self.resampled);
+                    self.pending.extend(&self.resampled);
+                }
+                None => self.ended = true,
+            }
+        }
+        let n = frames.min(self.pending.len() / 2);
+        out.extend(self.pending.drain(..n * 2));
+        self.pos += n as f64 / f64::from(RATE);
+        Ok(n)
+    }
+
+    /// Moves to `secs`; returns where it landed.
+    fn seek(&mut self, secs: f64) -> Result<f64> {
+        let at = self.dec.seek(secs)?;
+        self.resampler.reset();
+        self.pending.clear();
+        self.ended = false;
+        self.pos = at;
+        Ok(at)
+    }
+
+    /// Seconds left, if the length is known.
+    fn left(&self) -> Option<f64> {
+        self.duration.map(|d| d - self.pos)
+    }
+}
+
+/// The track being faded out while the next one comes in.
+struct Crossfade {
+    from: Track,
+    /// Length and how far it has gone, seconds.
+    len: f64,
+    done: f64,
+}
+
+impl Crossfade {
+    /// Mixes the outgoing track into `buf` (the incoming one's frames), both with their gains.
+    /// Returns false once it is over.
+    fn mix(&mut self, buf: &mut [f32], scratch: &mut Vec<f32>) -> bool {
+        let frames = buf.len() / 2;
+        scratch.clear();
+        // A failing outgoing track just ends early.
+        let got = self.from.read(frames, scratch).unwrap_or(0);
+        for (i, frame) in buf.chunks_exact_mut(2).enumerate() {
+            let (out, inc) = crossfade_gains((self.done + i as f64 / f64::from(RATE)) / self.len);
+            let old = scratch.get(i * 2..i * 2 + 2).unwrap_or(&[0.0, 0.0]);
+            frame[0] = frame[0] * inc + old[0] * out;
+            frame[1] = frame[1] * inc + old[1] * out;
+        }
+        self.done += frames as f64 / f64::from(RATE);
+        self.done < self.len && got == frames
+    }
+}
+
+/// Decodes `job` into the ring, crossfading into the appended track when the setting is on.
+/// Returns the appended track to go on with without a crossfade.
+fn play(shared: &Shared, job: Arc<Job>, gapless: bool) -> Option<(Arc<Job>, bool)> {
     let ring = &shared.ring;
+    let epoch = shared.epoch.load(Ordering::Relaxed);
     ring.begin(job.id);
-    let fail = |e: anyhow::Error| {
+    let fail = |job: &Job, e: anyhow::Error| {
         if !job.cancelled() {
             ring.mark(Mark::Error(format!("{e:#}")));
         }
         None
     };
-    let mut dec = match Decoder::open(Box::new(job.download.reader())) {
-        Ok(d) => d,
-        Err(e) => return fail(e),
+    let mut cur = match Track::open(&job) {
+        Ok(t) => t,
+        Err(e) => return fail(&job, e),
     };
-    let duration = dec.duration();
-    let mut resampler = Resampler::to(dec.sample_rate(), RATE);
+    let mut job = job;
+    ring.mark(Mark::Start { job: job.id, at: 0.0, duration: cur.duration, gapless });
     let mut effects = Effects::default();
-    // Position in the track at the start of the next chunk, seconds.
-    let mut pos = 0.0;
-    ring.mark(Mark::Start { job: job.id, at: 0.0, duration, gapless });
-    let mut buf = Vec::new();
+    let mut fade: Option<Crossfade> = None;
+    let (mut buf, mut scratch) = (Vec::new(), Vec::new());
     loop {
-        if job.cancelled() {
+        if job.cancelled() || shared.epoch.load(Ordering::Relaxed) != epoch {
             return None;
         }
         let (mut gen, seek) = ring.poll_seek();
         if let Some(t) = seek {
+            // A seek ends a crossfade: only the incoming track goes on.
+            fade = None;
+            shared.incoming.lock().unwrap().take();
             // Past the end the demuxer fails: the track is over.
-            let Ok(at) = dec.seek(t) else { break };
-            resampler.reset();
+            let Ok(at) = cur.seek(t) else { break };
             effects.reset();
-            pos = at;
-            gen = ring.mark(Mark::Start { job: job.id, at, duration, gapless: false });
+            gen = ring.mark(Mark::Start { job: job.id, at, duration: cur.duration, gapless: false });
         }
-        match dec.next_chunk() {
-            Ok(Some(chunk)) => {
-                let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
-                buf.clear();
-                resampler.process(chunk, &mut buf);
-                effects.sync(*shared.settings.lock().unwrap());
-                effects.process(&mut buf, pos, duration, |offset, levels| ring.push_spectrum(gen, offset, levels));
-                pos += (buf.len() / 2) as f64 / f64::from(RATE);
-                for s in &mut buf {
-                    *s = (*s * gain).clamp(-1.0, 1.0);
+        let settings = *shared.settings.lock().unwrap();
+        effects.sync(settings);
+        if fade.is_none() && settings.fade > 0.0 && cur.left().is_some_and(|l| l <= settings.fade) {
+            if let Some((next, track)) = open_next(shared) {
+                // As long as is left (the next track may have come late), at most half of either track.
+                let half = |t: &Track| t.duration.map_or(f64::INFINITY, |d| d / 2.0);
+                let len = cur.left().unwrap_or(0.0).min(half(&cur)).min(half(&track));
+                if len > 0.0 {
+                    gen = ring.begin(next.id);
+                    ring.mark(Mark::Start { job: next.id, at: 0.0, duration: track.duration, gapless: true });
+                    *shared.incoming.lock().unwrap() = Some(next.clone());
+                    let from = std::mem::replace(&mut cur, track);
+                    fade = Some(Crossfade { from, len, done: 0.0 });
+                    job = next;
+                } else {
+                    // Nothing left to overlap: the track follows right after.
+                    *shared.next.lock().unwrap() = Some(next);
                 }
-                // A refused push means a seek or a new track: the loop above sorts it out.
-                ring.push(&buf, gen);
             }
-            Ok(None) => break,
-            Err(e) => return fail(e),
         }
+        buf.clear();
+        let frames = match cur.read(CHUNK, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) => return fail(&job, e),
+        };
+        if let Some(f) = &mut fade {
+            if !f.mix(&mut buf[..frames * 2], &mut scratch) {
+                fade = None;
+                shared.incoming.lock().unwrap().take();
+            }
+        }
+        effects.process(&mut buf, |offset, levels| ring.push_spectrum(gen, offset, levels));
+        let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
+        for s in &mut buf {
+            *s = (*s * gain).clamp(-1.0, 1.0);
+        }
+        // A refused push means a seek or a new track: the loop above sorts it out.
+        ring.push(&buf, gen);
     }
+    shared.incoming.lock().unwrap().take();
     if let Some(next) = shared.next.lock().unwrap().take() {
         return Some((next, true));
     }
@@ -491,12 +621,28 @@ fn play(shared: &Shared, job: &Job, gapless: bool) -> Option<(Arc<Job>, bool)> {
     None
 }
 
-/// The processing of one track as mpv's filter chain did it: fade, equalizer with its limiter,
-/// then the spectrum measurement (before the volume, so the bars do not depend on it).
+/// Takes the appended track for a crossfade and opens it; one that fails to open is left to be
+/// played (and to report its error) the usual way.
+fn open_next(shared: &Shared) -> Option<(Arc<Job>, Track)> {
+    let next = shared.next.lock().unwrap().take()?;
+    match Track::open(&next) {
+        Ok(t) => Some((next, t)),
+        Err(_) => {
+            let mut slot = shared.next.lock().unwrap();
+            // Another track may have been appended meanwhile.
+            if slot.is_none() {
+                *slot = Some(next);
+            }
+            None
+        }
+    }
+}
+
+/// The processing of the sound as mpv's filter chain did it: equalizer with its limiter, then
+/// the spectrum measurement (before the volume, so the bars do not depend on it).
 #[derive(Default)]
 struct Effects {
     version: u64,
-    fade: f64,
     eq: Option<(&'static str, Equalizer)>,
     spectrum: Option<Spectrum>,
 }
@@ -508,7 +654,6 @@ impl Effects {
             return;
         }
         self.version = s.version;
-        self.fade = s.fade;
         if s.eq.map(|p| p.id) != self.eq.as_ref().map(|(id, _)| *id) {
             self.eq = s.eq.map(|p| (p.id, Equalizer::new(p.biquads(f64::from(RATE)), f64::from(RATE))));
         }
@@ -526,21 +671,90 @@ impl Effects {
         }
     }
 
-    /// Processes a chunk starting `pos` seconds into a track of `duration`; spectrum
-    /// measurements go to `measured` with the frame they end at within the chunk.
-    fn process(&mut self, buf: &mut [f32], pos: f64, duration: Option<f64>, measured: impl FnMut(usize, Vec<f32>)) {
-        if self.fade > 0.0 {
-            for (i, frame) in buf.chunks_exact_mut(2).enumerate() {
-                let g = fade_gain(pos + i as f64 / f64::from(RATE), self.fade, duration);
-                frame[0] *= g;
-                frame[1] *= g;
-            }
-        }
+    /// Processes a chunk; spectrum measurements go to `measured` with the frame they end at
+    /// within the chunk.
+    fn process(&mut self, buf: &mut [f32], measured: impl FnMut(usize, Vec<f32>)) {
         if let Some((_, eq)) = &mut self.eq {
             eq.process(buf);
         }
         if let Some(s) = &mut self.spectrum {
             s.feed(buf, measured);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    const LC: &[u8] = include_bytes!("../../tests/data/aac-lc.m4a");
+    const MP3: &[u8] = include_bytes!("../../tests/data/mp3.mp3");
+
+    fn track(data: &'static [u8]) -> Track {
+        Track::from_decoder(Decoder::open(Box::new(Cursor::new(data))).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn track_reads_by_frames() {
+        let mut t = track(LC);
+        let duration = t.duration.unwrap();
+        assert!((duration - 2.0).abs() < 0.1, "{duration}");
+        let mut out = Vec::new();
+        assert_eq!(t.read(1000, &mut out).unwrap(), 1000);
+        assert_eq!(out.len(), 2000);
+        assert!((t.pos - 1000.0 / 44100.0).abs() < 1e-9);
+        // A seek drops what was decoded ahead and goes on from there.
+        assert!((t.seek(1.5).unwrap() - 1.5).abs() < 0.001);
+        assert!((t.pos - 1.5).abs() < 0.001);
+        assert_eq!(t.seek(0.0).unwrap(), 0.0);
+        let mut total = 0;
+        loop {
+            match t.read(CHUNK, &mut out).unwrap() {
+                0 => break,
+                n => total += n,
+            }
+        }
+        // The encoder pads the end a little.
+        assert!((total as f64 / 44100.0 - duration).abs() < 0.05, "{total}");
+        assert!(t.left().unwrap().abs() < 0.05);
+    }
+
+    /// A crossfade starts by the length, so every format the server gives must tell it.
+    #[test]
+    fn lengths_are_known() {
+        for (name, data) in [("lc", LC), ("mp3", MP3), ("he", &include_bytes!("../../tests/data/he-aac.m4a")[..])] {
+            let d = track(data).duration;
+            // HE-AAC counts its encoder delay and padding too.
+            assert!(d.is_some_and(|d| (d - 2.0).abs() < 0.25), "{name}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn crossfade_mixes_both_tracks() {
+        // The last second of one track over the first second of another.
+        let (mut from, mut incoming) = (track(MP3), track(LC));
+        from.seek(1.0).unwrap();
+        let (mut want_out, mut want_in) = (track(MP3), track(LC));
+        want_out.seek(1.0).unwrap();
+        let mut f = Crossfade { from, len: 1.0, done: 0.0 };
+        let (mut mixed, mut old, mut new, mut scratch): (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
+        let mut more = true;
+        while more {
+            let mut buf = Vec::new();
+            let n = incoming.read(CHUNK, &mut buf).unwrap();
+            more = f.mix(&mut buf, &mut scratch);
+            mixed.extend(&buf[..n * 2]);
+            want_out.read(n, &mut old).unwrap();
+            want_in.read(n, &mut new).unwrap();
+        }
+        // Over after a second (or when the outgoing track ran out).
+        assert!(mixed.len() / 2 >= 44100 - CHUNK && mixed.len() / 2 <= 44100 + CHUNK, "{}", mixed.len());
+        for (i, ((m, o), n)) in mixed.iter().zip(&old).zip(&new).enumerate() {
+            let (go, gi) = crossfade_gains((i / 2) as f64 / 44100.0);
+            assert!((m - (o * go + n * gi)).abs() < 1e-5, "frame {}: {m} vs {o}·{go} + {n}·{gi}", i / 2);
+        }
+        // The start is all the outgoing track, the end all the incoming one.
+        assert!((mixed[0] - old[0]).abs() < 1e-6);
     }
 }

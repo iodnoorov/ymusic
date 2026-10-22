@@ -98,7 +98,10 @@ impl Ring {
 
     /// Drops the frames not yet handed to the server and all pending marks.
     pub fn clear(&self) {
-        let mut s = self.state.lock().unwrap();
+        self.clear_locked(&mut self.state.lock().unwrap());
+    }
+
+    fn clear_locked(&self, s: &mut RingState) {
         s.samples.clear();
         s.handed = s.pushed;
         s.marks.clear();
@@ -108,13 +111,14 @@ impl Ring {
         self.space.notify_all();
     }
 
-    /// Clears the ring and asks the producer to seek, if it is decoding `job`.
+    /// Clears the ring and asks the producer to seek, if it is decoding `job`. Both at once, so
+    /// the producer never sees the ring cleared without the seek.
     pub fn request_seek(&self, job: u64, secs: f64) -> bool {
-        if self.state.lock().unwrap().producing != job {
+        let mut s = self.state.lock().unwrap();
+        if s.producing != job {
             return false;
         }
-        self.clear();
-        let mut s = self.state.lock().unwrap();
+        self.clear_locked(&mut s);
         s.seek = Some(secs);
         true
     }

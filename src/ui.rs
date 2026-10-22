@@ -1109,7 +1109,7 @@ fn setting_note(app: &App, s: Setting) -> String {
     match s {
         Setting::Quality => format!("{} · со следующего трека", crate::api::QUALITIES[app.quality].note),
         Setting::Equalizer => "Слышно сразу".into(),
-        Setting::Crossfade => "Затухание в конце трека и нарастание в начале".into(),
+        Setting::Crossfade => "Конец трека накладывается на начало следующего".into(),
         Setting::FinishTrack => "Новый список начнётся после текущего трека".into(),
         Setting::Repeat => "T · вся очередь по кругу или один трек снова".into(),
         Setting::LessAi => "Реже ИИ-треки в рекомендациях · настройка аккаунта".into(),
@@ -1352,7 +1352,7 @@ mod tests {
             "Добавить в плейлист",
             "из плейлиста «Bloodborne soundtracks»?",
             "Новое название",
-            "Затухание в конце трека и нарастание в начале",
+            "Конец трека накладывается на начало следующего",
             "Выйти из аккаунта tester?",
         ];
         for (modal, want) in modals.into_iter().zip(expect) {
