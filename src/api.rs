@@ -8,8 +8,12 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Most requests of one operation run at once (a large library is loaded in parts).
-const PARALLEL: usize = 4;
+/// Most requests of one operation run at once (a large library is loaded in parts). The server
+/// answers 429 «Concurrency limit exceeded» when overloaded, so few.
+const PARALLEL: usize = 2;
+
+/// Pauses before repeating a request the server turned away with 429: it was not carried out.
+const RETRY_429_SECS: [u64; 3] = [1, 2, 4];
 
 /// Runs `f` for each item on up to `PARALLEL` threads; results keep the order of `items`.
 /// The first error (in item order) is returned.
@@ -313,22 +317,31 @@ impl Api {
 
     /// The answer itself: the mobile API wraps it in `{invocationInfo, result}`, the website API
     /// (asked with `X-Yandex-Music-Without-Invocation-Info`) does not.
-    fn result(&self, r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
+    /// `send` makes the request; one turned away with 429 is made again after a pause.
+    fn result(&self, send: impl Fn() -> Result<ureq::Response, ureq::Error>) -> Result<Value> {
+        let mut r = send();
+        for secs in RETRY_429_SECS {
+            if !matches!(r, Err(ureq::Error::Status(429, _))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(secs));
+            r = send();
+        }
         let mut v = handle(r)?;
         Ok(if self.web { v } else { v["result"].take() })
     }
 
     fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.result(self.req("GET", path, query).call())
+        self.result(|| self.req("GET", path, query).call())
     }
 
     fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<Value> {
-        self.result(self.req("POST", path, &[]).send_form(form))
+        self.result(|| self.req("POST", path, &[]).send_form(form))
     }
 
     /// POST with the parameters in the query and no body, as the website sends most changes.
     fn post_query(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.result(self.req("POST", path, query).call())
+        self.result(|| self.req("POST", path, query).call())
     }
 
     /// A change: the website sends its parameters in the query, the mobile apps as a form.
@@ -341,7 +354,7 @@ impl Api {
     }
 
     fn post_json(&self, path: &str, query: &[(&str, &str)], body: Value) -> Result<Value> {
-        self.result(self.req("POST", path, query).send_json(body))
+        self.result(|| self.req("POST", path, query).send_json(body.clone()))
     }
 
     // ---------------------------------------------------------------- account
@@ -671,7 +684,7 @@ impl Api {
         }
         let body = json!({"seeds": seeds, "includeTracksInResponse": true, "includeWaveModel": false, "interactive": true});
         let session = self
-            .result(self.rotor_req("/rotor/session/new").send_json(body))
+            .result(|| self.rotor_req("/rotor/session/new").send_json(body.clone()))
             .and_then(|r| {
                 let id = r["radioSessionId"].as_str().ok_or_else(|| anyhow!("нет radioSessionId"))?.to_string();
                 let b = Self::parse_batch(&r, Some(id));
@@ -689,7 +702,7 @@ impl Api {
     pub fn wave_more(&self, station: &str, session: Option<&str>, queue: &[String]) -> Result<WaveBatch> {
         match session {
             Some(id) => {
-                let r = self.result(self.rotor_req(&format!("/rotor/session/{id}/tracks")).send_json(json!({"queue": queue})))?;
+                let r = self.result(|| self.rotor_req(&format!("/rotor/session/{id}/tracks")).send_json(json!({"queue": queue})))?;
                 Ok(Self::parse_batch(&r, Some(id.to_string())))
             }
             None => self.station_tracks(station, queue.last().map(String::as_str)),
