@@ -172,6 +172,8 @@ pub fn parse_link(url: &str) -> Result<Link, &'static str> {
     match path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>()[..] {
         ["album", a, "track", t] if num(&a) && num(&t) => Ok(Link::Track(format!("{t}:{a}"))),
         ["track", t] if num(&t) => Ok(Link::Track(t.to_string())),
+        // An uploaded (UGC) track.
+        ["track", t] => uuid(t).map(Link::Track).ok_or("Ссылка не на трек, альбом или плейлист"),
         ["album", a] if num(&a) => Ok(Link::Album(a.to_string())),
         ["users", o, "playlists", k] if login(&o) && num(&k) => {
             Ok(Link::Playlist { owner: o.to_string(), kind: k.to_string() })
@@ -813,20 +815,28 @@ impl Api {
 
     /// Stream URL of a track in the given quality (`QUALITIES` id).
     pub fn track_url(&self, track_id: &str, quality: &str) -> Result<String> {
+        let low = quality == "lq";
         match self.file_info(track_id, quality) {
+            // Uploaded tracks: here the server falls back to 192 kbit/s, the low quality (AAC 64)
+            // is listed only by download-info.
+            Ok(info) if low && info.quality != "lq" => Ok(self.download_info(track_id, true).map_or(info.url, |i| i.url)),
             Ok(info) => Ok(info.url),
-            Err(e) => self.download_info_url(track_id).map_err(|e2| anyhow!("{e:#}; {e2:#}")),
+            Err(e) => self.download_info(track_id, low).map(|i| i.url).map_err(|e2| anyhow!("{e:#}; {e2:#}")),
         }
     }
 
-    fn download_info_url(&self, track_id: &str) -> Result<String> {
+    /// A stream from the older download-info: the best one, or with `low` the smallest AAC.
+    fn download_info(&self, track_id: &str, low: bool) -> Result<FileInfo> {
         let r = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
         let infos = r.as_array().ok_or_else(|| anyhow!("пустой download-info"))?;
-        let best = infos
-            .iter()
-            .filter(|i| matches!(i["codec"].as_str(), Some("mp3") | Some("aac")))
-            .max_by_key(|i| (i["codec"] == "mp3", i["bitrateInKbps"].as_u64().unwrap_or(0)))
-            .ok_or_else(|| anyhow!("нет доступных форматов"))?;
+        let kbps = |i: &&Value| i["bitrateInKbps"].as_u64().unwrap_or(0);
+        let formats = infos.iter().filter(|i| matches!(i["codec"].as_str(), Some("mp3") | Some("aac")));
+        let chosen = if low {
+            formats.min_by_key(|i| (i["codec"] != "aac", kbps(i)))
+        } else {
+            formats.max_by_key(|i| (i["codec"] == "mp3", kbps(i)))
+        };
+        let best = chosen.ok_or_else(|| anyhow!("нет доступных форматов"))?;
         let info_url = best["downloadInfoUrl"].as_str().ok_or_else(|| anyhow!("нет downloadInfoUrl"))?;
         let xml = self.agent.get(info_url).call()?.into_string()?;
         let tag = |name: &str| -> Result<String> {
@@ -839,7 +849,7 @@ impl Api {
         let (host, path, ts, s) = (tag("host")?, tag("path")?, tag("ts")?, tag("s")?);
         let sign = Md5::digest(format!("{MD5_SALT}{}{s}", path.trim_start_matches('/')).as_bytes());
         let sign: String = sign.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(format!("https://{host}/get-mp3/{sign}/{ts}{path}"))
+        Ok(FileInfo { url: format!("https://{host}/get-mp3/{sign}/{ts}{path}"), quality: String::new(), bitrate: kbps(&best) })
     }
 
     fn file_info(&self, track_id: &str, quality: &str) -> Result<FileInfo> {
@@ -860,6 +870,7 @@ impl Api {
         let url = di["url"].as_str().or(di["urls"][0].as_str()).context("get-file-info не вернул ссылку")?;
         Ok(FileInfo {
             url: url.to_string(),
+            quality: di["quality"].as_str().unwrap_or_default().to_string(),
             bitrate: di["bitrate"].as_u64().unwrap_or(0),
         })
     }
@@ -867,6 +878,8 @@ impl Api {
 
 struct FileInfo {
     url: String,
+    /// The quality the server gave, which may differ from the one asked for.
+    quality: String,
     #[cfg_attr(not(test), allow(dead_code))]
     bitrate: u64,
 }
@@ -1200,6 +1213,7 @@ mod tests {
         let uuid = "e46028ae-ce60-430d-bf2c-7e7c78e2c682";
         assert_eq!(parse_link(&format!("https://music.yandex.ru/playlists/{uuid}")), Ok(Link::PlaylistUuid(uuid.into())));
         assert_eq!(parse_link(&format!("https://music.yandex.ru/playlists/lk.{uuid}?x=1")), Ok(Link::PlaylistUuid(uuid.into())));
+        assert_eq!(parse_link(&format!("https://music.yandex.ru/track/{uuid}")), Ok(Link::Track(uuid.into())));
         assert_eq!(parse_link("https://music.yandex.ru.evil.com/track/1"), not_ym);
         assert_eq!(parse_link("https://evil.com/?r=music.yandex.ru/track/1"), not_ym);
         assert_eq!(parse_link("https://user@music.yandex.ru/track/1"), not_ym);
@@ -1345,8 +1359,19 @@ mod tests {
         let nq = api.file_info("39089632", "nq").unwrap();
         assert!(lq.bitrate > 0 && lq.bitrate < nq.bitrate, "{} {}", lq.bitrate, nq.bitrate);
         assert!(api.track_url("39089632:60058", "lq").unwrap().starts_with("https://"));
-        // Uploaded (UGC) tracks resolve too.
-        assert!(api.track_url("bfc384d6-bd20-47e0-89d7-7a8657a2236a", "lq").unwrap().starts_with("https://"));
+        // Uploaded (UGC) tracks resolve too; their low quality comes from download-info.
+        let ugc = "bfc384d6-bd20-47e0-89d7-7a8657a2236a";
+        assert!(api.track_url(ugc, "lq").unwrap().starts_with("https://"));
+        assert_eq!(api.file_info(ugc, "lq").unwrap().quality, "nq", "the server still falls back");
+        let low = api.download_info(ugc, true).unwrap();
+        assert!(low.bitrate > 0 && low.bitrate < 192, "{}", low.bitrate);
+        assert_eq!(api.download_info(ugc, false).unwrap().bitrate, 192);
+        let size = |q: &str| -> u64 {
+            let r = api.agent.get(&api.track_url(ugc, q).unwrap()).call().unwrap();
+            r.header("Content-Length").and_then(|l| l.parse().ok()).unwrap_or(0)
+        };
+        let (lq, nq) = (size("lq"), size("nq"));
+        assert!(lq > 0 && lq * 2 < nq, "{lq} {nq}");
     }
 
     /// Network test: WRITES to the listening history — reports the start of a track from both APIs.
