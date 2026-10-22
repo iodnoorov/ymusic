@@ -110,11 +110,11 @@ impl NowPlaying {
         let art_url = state.track.as_ref().and_then(|t| t.art_url.clone());
         let mut new_art = false;
         while let Ok((url, bytes)) = self.art_rx.try_recv() {
-            if art_url.as_ref() == Some(&url) {
-                if let Some(art) = artwork(&bytes) {
-                    self.art = Some((url, art));
-                    new_art = true;
-                }
+            if art_url.as_ref() == Some(&url)
+                && let Some(art) = artwork(&bytes)
+            {
+                self.art = Some((url, art));
+                new_art = true;
             }
         }
         let last_art = self.last.track.as_ref().and_then(|t| t.art_url.clone());

@@ -1,6 +1,8 @@
 //! Downloads a track into memory while it is being decoded. A dropped or stalled connection is
 //! resumed with a Range request from where it stopped; reads wait for the bytes they need.
 
+use crate::Lock;
+use std::sync::PoisonError;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -29,7 +31,7 @@ struct Shared {
 
 impl Shared {
     fn update(&self, f: impl FnOnce(&mut State)) {
-        f(&mut self.state.lock().unwrap());
+        f(&mut self.state.locked());
         self.changed.notify_all();
     }
 }
@@ -40,17 +42,17 @@ impl Shared {
 pub struct Download(Arc<Shared>);
 
 impl Download {
-    pub fn start(url: &str) -> Download {
-        Download::start_with(url, STALL_TIMEOUT)
+    pub fn start(url: &str, tls: &Arc<rustls::ClientConfig>) -> Download {
+        Download::start_with(url, tls, STALL_TIMEOUT)
     }
 
-    fn start_with(url: &str, stall: Duration) -> Download {
+    fn start_with(url: &str, tls: &Arc<rustls::ClientConfig>, stall: Duration) -> Download {
         let shared = Arc::new(Shared::default());
-        let (s, url) = (shared.clone(), url.to_string());
+        let (s, url, tls) = (shared.clone(), url.to_string(), tls.clone());
         // Only fails when the system is out of threads; the readers then get an error.
         if let Err(e) = std::thread::Builder::new().name("player-download".into()).spawn({
             let s = s.clone();
-            move || run(&s, &url, stall)
+            move || run(&s, &url, tls, stall)
         }) {
             s.update(|st| st.error = Some(e.to_string()));
         }
@@ -67,15 +69,15 @@ impl Download {
     }
 }
 
-fn run(shared: &Shared, url: &str, stall: Duration) {
+fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, stall: Duration) {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(stall)
         .timeout_read(stall)
-        .tls_config(crate::api::tls_config())
+        .tls_config(tls)
         .build();
     let mut retries = 0;
     loop {
-        let have = shared.state.lock().unwrap().data.len() as u64;
+        let have = shared.state.locked().data.len() as u64;
         let mut req = agent.get(url);
         if have > 0 {
             req = req.set("Range", &format!("bytes={have}-"));
@@ -106,7 +108,7 @@ fn run(shared: &Shared, url: &str, stall: Duration) {
             Err(e) => e.to_string(),
         };
         retries += 1;
-        if retries > MAX_RETRIES || shared.state.lock().unwrap().cancelled {
+        if retries > MAX_RETRIES || shared.state.locked().cancelled {
             shared.update(|s| s.error = Some(error));
             return;
         }
@@ -121,7 +123,7 @@ fn receive(shared: &Shared, mut body: impl Read, mut skip: u64) -> Result<bool, 
     let mut got = false;
     loop {
         let n = body.read(&mut buf).map_err(|e| (e.to_string(), got))?;
-        let mut state = shared.state.lock().unwrap();
+        let mut state = shared.state.locked();
         if state.cancelled {
             return Ok(false);
         }
@@ -147,7 +149,7 @@ pub struct Reader {
 
 impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut s = self.shared.state.lock().unwrap();
+        let mut s = self.shared.state.locked();
         loop {
             if s.cancelled {
                 return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "загрузка отменена"));
@@ -166,7 +168,7 @@ impl Read for Reader {
             if let Some(e) = &s.error {
                 return Err(io::Error::other(e.clone()));
             }
-            s = self.shared.changed.wait(s).unwrap();
+            s = self.shared.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
         }
     }
 }
@@ -178,7 +180,7 @@ impl Seek for Reader {
             SeekFrom::Current(d) => self.pos as i64 + d,
             SeekFrom::End(d) => {
                 // The size is needed: wait for it (or for the whole file).
-                let mut s = self.shared.state.lock().unwrap();
+                let mut s = self.shared.state.locked();
                 let len = loop {
                     if let Some(t) = s.total {
                         break t;
@@ -189,7 +191,7 @@ impl Seek for Reader {
                     if s.cancelled || s.error.is_some() {
                         return Err(io::Error::other("размер файла неизвестен"));
                     }
-                    s = self.shared.changed.wait(s).unwrap();
+                    s = self.shared.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
                 };
                 len as i64 + d
             }
@@ -215,8 +217,20 @@ impl symphonia::core::io::MediaSource for Reader {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{Download, Duration};
+
+    /// No server here speaks TLS: any configuration does.
+    pub fn tls() -> std::sync::Arc<rustls::ClientConfig> {
+        let roots = rustls::RootCertStore::empty();
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        std::sync::Arc::new(config)
+    }
     use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
     use std::net::TcpListener;
 
@@ -269,7 +283,7 @@ mod tests {
     fn resumes_a_stalled_download() {
         let body: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let (url, count) = server(body.clone(), 100_000);
-        let d = Download::start_with(&url, Duration::from_millis(500));
+        let d = Download::start_with(&url, &tls(), Duration::from_millis(500));
         let mut r = d.reader();
         // Seeking to the end needs the size, which the first response already gave.
         assert_eq!(r.seek(SeekFrom::End(-10)).unwrap(), body.len() as u64 - 10);
@@ -283,7 +297,7 @@ mod tests {
     #[test]
     fn cancel_wakes_a_waiting_reader() {
         let (url, _) = server(vec![1; 1000], 10);
-        let d = Download::start(&url);
+        let d = Download::start(&url, &tls());
         let mut r = d.reader();
         let mut buf = [0u8; 100];
         assert_eq!(r.read(&mut buf).unwrap(), 10);

@@ -1,18 +1,23 @@
 //! Login: through a browser window (token is captured automatically) or by pasting a token.
 //!
 //! Browser login opens the Yandex OAuth page in a separate browser instance with a temporary
-//! profile and remote debugging enabled (WebDriver BiDi for Firefox-based browsers, CDP for
-//! Chromium-based ones). After the user signs in, Yandex redirects to
+//! profile and remote debugging enabled. After the user signs in, Yandex redirects to
 //! `https://music.yandex.ru/#access_token=…`; the token is read from that URL and the window is closed.
+//!
+//! Chromium-based browsers are driven over CDP through a pair of pipes (`--remote-debugging-pipe`),
+//! which no other process can reach. Firefox-based ones have only a debugging port for WebDriver
+//! BiDi: the browser picks a free one itself and reports it, and the WebDriver session is taken at
+//! once (a browser allows one), so another local process has only a moment to get in.
 
 use crate::api::CLIENT_ID;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, PipeReader, PipeWriter, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
 
@@ -277,8 +282,9 @@ impl Drop for Session {
     }
 }
 
-/// Ctrl+C during browser login: the wait loops stop and `Session` closes the browser and
-/// removes the profile (the default SIGINT action would exit without running `Drop`).
+/// Ctrl+C (or SIGTERM, or the terminal closed) during browser login: the wait loops stop and
+/// `Session` closes the browser and removes the profile with the Yandex cookies in it (the signals'
+/// default action would exit without running `Drop`).
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 fn check_cancel() -> Result<()> {
@@ -291,12 +297,10 @@ fn check_cancel() -> Result<()> {
 /// A fresh private (0700) directory for the browser profile: it holds the Yandex session cookies.
 /// The name is not predictable, and an existing path (or symlink) is never reused.
 fn create_profile_dir() -> Result<PathBuf> {
-    use std::hash::{BuildHasher, Hasher};
     use std::os::unix::fs::DirBuilderExt;
     let mut last = None;
     for _ in 0..16 {
-        // RandomState is seeded from the OS random source: a cheap unpredictable suffix.
-        let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        let random = crate::api::random_u64();
         let dir = std::env::temp_dir().join(format!("ymusic-login-{}-{random:016x}", std::process::id()));
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => return Ok(dir),
@@ -307,19 +311,48 @@ fn create_profile_dir() -> Result<PathBuf> {
     Err(last.map_or_else(|| anyhow!("не удалось создать временный профиль браузера"), anyhow::Error::from))
 }
 
-fn free_port() -> Result<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+/// Our ends of the pipes a Chromium-based browser speaks CDP over, and its ends, to be closed here
+/// once it has started.
+struct Pipes {
+    to_browser: PipeWriter,
+    from_browser: PipeReader,
+    theirs: (PipeReader, PipeWriter),
+}
+
+/// Gives the browser `cmd` starts the descriptors 3 (commands to it) and 4 (its replies and events)
+/// that `--remote-debugging-pipe` expects.
+fn debugging_pipes(cmd: &mut Command) -> Result<Pipes> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let (their_in, to_browser) = std::io::pipe()?;
+    let (from_browser, their_out) = std::io::pipe()?;
+    let (input, output) = (their_in.as_raw_fd(), their_out.as_raw_fd());
+    // SAFETY: runs in the child between fork and exec and calls only fcntl and dup2, which are
+    // async-signal-safe. The descriptors are first moved above 10 so that neither is overwritten
+    // while the other is put in place; dup2 clears close-on-exec on the copies the browser gets.
+    unsafe {
+        cmd.pre_exec(move || {
+            let (input, output) = (libc::fcntl(input, libc::F_DUPFD_CLOEXEC, 10), libc::fcntl(output, libc::F_DUPFD_CLOEXEC, 10));
+            if input < 0 || output < 0 || libc::dup2(input, 3) < 0 || libc::dup2(output, 4) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(Pipes { to_browser, from_browser, theirs: (their_in, their_out) })
 }
 
 pub fn browser_login() -> Result<String> {
     let browser = find_browser().ok_or_else(|| {
         anyhow!("не найден поддерживаемый браузер (Firefox/Zen/LibreWolf или Chromium/Chrome/Brave/Яндекс Браузер); укажите его в YMUSIC_BROWSER")
     })?;
-    let port = free_port()?;
     let profile = create_profile_dir()?;
     let headless = crate::config::env("BROWSER_HEADLESS").is_some();
+    let url = auth_url();
 
     let mut cmd = Command::new(&browser.bin);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut pipes = None;
     match browser.kind {
         Kind::Firefox => {
             if let Err(e) = std::fs::write(profile.join("user.js"), FIREFOX_PREFS) {
@@ -327,7 +360,8 @@ pub fn browser_login() -> Result<String> {
                 return Err(e.into());
             }
             cmd.arg("--profile").arg(&profile).args(["--no-remote", "--new-instance"]);
-            cmd.arg("--remote-debugging-port").arg(port.to_string());
+            // Any free port: the browser tells which one on stderr.
+            cmd.args(["--remote-debugging-port", "0"]).stderr(Stdio::piped());
             if headless {
                 cmd.arg("--headless");
             }
@@ -335,37 +369,48 @@ pub fn browser_login() -> Result<String> {
         }
         Kind::Chromium => {
             cmd.arg(format!("--user-data-dir={}", profile.display()));
-            cmd.arg(format!("--remote-debugging-port={port}"));
+            cmd.arg("--remote-debugging-pipe");
             cmd.args(["--no-first-run", "--no-default-browser-check", "--new-window"]);
             if headless {
                 cmd.arg("--headless=new");
             }
-            cmd.arg("about:blank");
+            cmd.arg(&url);
+            match debugging_pipes(&mut cmd) {
+                Ok(p) => pipes = Some(p),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&profile);
+                    return Err(e);
+                }
+            }
         }
     }
     let name = Path::new(&browser.bin).file_name().unwrap_or_default().to_string_lossy().into_owned();
     println!("\n  Открываю окно браузера ({name})… Войдите в аккаунт Яндекса.");
     println!("  После входа окно закроется само. Ctrl+C — отмена.");
-    let child = match cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&profile);
             return Err(e).with_context(|| format!("не удалось запустить {}", browser.bin));
         }
     };
+    let stderr = child.stderr.take();
     let mut session = Session { child, profile };
     CANCELLED.store(false, Ordering::Relaxed);
-    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
-    let sigint = unsafe {
-        signal_hook::low_level::register(signal_hook::consts::SIGINT, || CANCELLED.store(true, Ordering::Relaxed))
-    }?;
+    let mut handlers = Vec::new();
+    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        handlers.push(unsafe { signal_hook::low_level::register(signal, || CANCELLED.store(true, Ordering::Relaxed)) }?);
+    }
     let deadline = Instant::now() + LOGIN_TIMEOUT;
-    let url = auth_url();
-    let token = match browser.kind {
-        Kind::Firefox => bidi_capture(port, &url, &mut session.child, deadline),
-        Kind::Chromium => cdp_capture(port, &url, &mut session.child, deadline),
+    let token = match (pipes, stderr) {
+        (Some(pipes), _) => cdp_capture(pipes, &mut session.child, deadline),
+        (None, Some(stderr)) => bidi_capture(stderr, &url, &mut session.child, deadline),
+        (None, None) => Err(anyhow!("нет связи с браузером")),
     };
-    signal_hook::low_level::unregister(sigint);
+    for h in handlers {
+        signal_hook::low_level::unregister(h);
+    }
     // Ctrl+C reaches the browser too, so it may close first: report the cancel, not the closed window.
     token.map_err(|e| if CANCELLED.load(Ordering::Relaxed) { anyhow!("вход отменён") } else { e })
 }
@@ -422,12 +467,77 @@ fn ws_recv(ws: &mut Ws) -> Result<Option<String>> {
     }
 }
 
-/// Reads messages until one of them contains the token. `tick` runs periodically.
+/// A debugging connection to the browser: JSON messages both ways.
+trait Channel {
+    fn send_json(&mut self, v: Value) -> Result<()>;
+    /// The next message, or `None` after a short wait without one.
+    fn next_message(&mut self) -> Result<Option<String>>;
+}
+
+impl Channel for Ws {
+    fn send_json(&mut self, v: Value) -> Result<()> {
+        ws_send(self, v)
+    }
+
+    fn next_message(&mut self) -> Result<Option<String>> {
+        ws_recv(self)
+    }
+}
+
+/// CDP over the pipes: messages end in a NUL byte; a thread reads them.
+struct Pipe {
+    to_browser: PipeWriter,
+    messages: Receiver<String>,
+}
+
+impl Pipe {
+    fn new(to_browser: PipeWriter, from_browser: PipeReader) -> Pipe {
+        let (tx, messages) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut r = BufReader::new(from_browser);
+            loop {
+                let mut msg = Vec::new();
+                match r.read_until(0, &mut msg) {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {
+                        if msg.last() == Some(&0) {
+                            msg.pop();
+                        }
+                        if tx.send(String::from_utf8_lossy(&msg).into_owned()).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        Pipe { to_browser, messages }
+    }
+}
+
+impl Channel for Pipe {
+    fn send_json(&mut self, v: Value) -> Result<()> {
+        let mut msg = v.to_string().into_bytes();
+        msg.push(0);
+        self.to_browser.write_all(&msg).context("окно браузера закрыто до завершения входа")
+    }
+
+    fn next_message(&mut self) -> Result<Option<String>> {
+        match self.messages.recv_timeout(Duration::from_millis(400)) {
+            Ok(m) => Ok(Some(m)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => bail!("окно браузера закрыто до завершения входа"),
+        }
+    }
+}
+
+/// Reads messages until one of them contains the token; the request `tick` makes is sent every
+/// half a second (its reply may hold the token too), and the one `react` makes to a message, if any.
 fn wait_token(
-    ws: &mut Ws,
+    ch: &mut impl Channel,
     child: &mut Child,
     deadline: Instant,
-    mut tick: impl FnMut(&mut Ws) -> Option<String>,
+    mut tick: impl FnMut() -> Value,
+    mut react: impl FnMut(&str) -> Option<Value>,
 ) -> Result<String> {
     let mut last = Instant::now();
     loop {
@@ -438,23 +548,56 @@ fn wait_token(
         if child.try_wait()?.is_some() {
             bail!("окно браузера закрыто до завершения входа");
         }
-        if let Some(text) = ws_recv(ws)? {
+        if let Some(text) = ch.next_message()? {
             if let Some(t) = extract_token(&text) {
                 return Ok(t);
+            }
+            if let Some(request) = react(&text) {
+                let _ = ch.send_json(request);
             }
         }
         if last.elapsed() > Duration::from_millis(500) {
             last = Instant::now();
-            if let Some(t) = tick(ws) {
-                return Ok(t);
+            // A failed request shows up as a closed window on the next read.
+            let _ = ch.send_json(tick());
+        }
+    }
+}
+
+/// The address of the WebDriver BiDi server, as a Firefox-based browser reports it on stderr:
+/// `WebDriver BiDi listening on ws://127.0.0.1:<port>`. The rest of stderr is drained, so that
+/// the browser never blocks on it.
+fn bidi_address(stderr: std::process::ChildStderr, child: &mut Child) -> Result<String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { return };
+            if let Some(i) = line.find("ws://127.0.0.1:") {
+                let _ = tx.send(line[i..].trim().to_string());
             }
+        }
+    });
+    let start = Instant::now();
+    loop {
+        check_cancel()?;
+        if child.try_wait()?.is_some() {
+            bail!("браузер завершился при запуске");
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            bail!("браузер не сообщил адрес WebDriver BiDi");
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(address) => return Ok(address),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => bail!("браузер не сообщил адрес WebDriver BiDi"),
         }
     }
 }
 
 /// Firefox-based browsers: WebDriver BiDi.
-fn bidi_capture(port: u16, url: &str, child: &mut Child, deadline: Instant) -> Result<String> {
-    let mut ws = ws_connect(&format!("ws://127.0.0.1:{port}/session"), child, deadline)?;
+fn bidi_capture(stderr: std::process::ChildStderr, url: &str, child: &mut Child, deadline: Instant) -> Result<String> {
+    let address = bidi_address(stderr, child)?;
+    let mut ws = ws_connect(&format!("{address}/session"), child, deadline)?;
     ws_send(&mut ws, json!({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))?;
     let events = ["browsingContext.navigationStarted", "browsingContext.fragmentNavigated", "browsingContext.load", "network.responseStarted"];
     ws_send(&mut ws, json!({"id": 2, "method": "session.subscribe", "params": {"events": events}}))?;
@@ -496,42 +639,40 @@ fn bidi_capture(port: u16, url: &str, child: &mut Child, deadline: Instant) -> R
     ws_send(&mut ws, json!({"id": 4, "method": "browsingContext.navigate", "params": {"context": context, "url": url}}))?;
 
     let mut id = 100;
-    wait_token(&mut ws, child, deadline, |ws| {
+    let tick = || {
         id += 1;
-        let _ = ws_send(ws, json!({"id": id, "method": "browsingContext.getTree", "params": {}}));
-        None
-    })
+        json!({"id": id, "method": "browsingContext.getTree", "params": {}})
+    };
+    wait_token(&mut ws, child, deadline, tick, |_| None)
 }
 
-/// Chromium-based browsers: Chrome DevTools Protocol.
-fn cdp_capture(port: u16, url: &str, child: &mut Child, deadline: Instant) -> Result<String> {
-    let list_url = format!("http://127.0.0.1:{port}/json/list");
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build();
-    let start = Instant::now();
-    let ws_url = loop {
-        check_cancel()?;
-        if child.try_wait()?.is_some() {
-            bail!("браузер завершился при запуске");
-        }
-        if start.elapsed() > Duration::from_secs(30) {
-            bail!("не удалось подключиться к браузеру (CDP)");
-        }
-        if let Some(v) = agent.get(&list_url).call().ok().and_then(|r| r.into_json::<Value>().ok()) {
-            let page = v.as_array().into_iter().flatten().find(|p| p["type"] == "page");
-            if let Some(ws) = page.and_then(|p| p["webSocketDebuggerUrl"].as_str()) {
-                break ws.to_string();
-            }
-        }
-        std::thread::sleep(Duration::from_millis(200));
+/// Chromium-based browsers: Chrome DevTools Protocol over the pipes. The browser has opened the
+/// login page itself; the addresses of its tabs are watched for the token: the tabs' own
+/// (`Target.*`) and their navigations (`Page.*`, which also tell a move to another `#…` within
+/// the page).
+fn cdp_capture(pipes: Pipes, child: &mut Child, deadline: Instant) -> Result<String> {
+    // Without our copies of the browser's ends, its exit closes the pipe.
+    drop(pipes.theirs);
+    let mut pipe = Pipe::new(pipes.to_browser, pipes.from_browser);
+    pipe.send_json(json!({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": true}}))?;
+    let attach = json!({"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true});
+    pipe.send_json(json!({"id": 2, "method": "Target.setAutoAttach", "params": attach}))?;
+    let ids = std::cell::Cell::new(100);
+    let next_id = || {
+        ids.set(ids.get() + 1);
+        ids.get()
     };
-    let mut ws = ws_connect(&ws_url, child, deadline)?;
-    ws_send(&mut ws, json!({"id": 1, "method": "Network.enable"}))?;
-    ws_send(&mut ws, json!({"id": 2, "method": "Page.enable"}))?;
-    ws_send(&mut ws, json!({"id": 3, "method": "Page.navigate", "params": {"url": url}}))?;
-    wait_token(&mut ws, child, deadline, |_| {
-        let text = agent.get(&list_url).call().ok()?.into_string().ok()?;
-        extract_token(&text)
-    })
+    let tick = || json!({"id": next_id(), "method": "Target.getTargets"});
+    // Every tab attached to gets its page events turned on.
+    let react = |text: &str| {
+        let v: Value = serde_json::from_str(text).ok()?;
+        if v["method"] != "Target.attachedToTarget" || v["params"]["targetInfo"]["type"] != "page" {
+            return None;
+        }
+        let session = v["params"]["sessionId"].as_str()?;
+        Some(json!({"id": next_id(), "sessionId": session, "method": "Page.enable"}))
+    };
+    wait_token(&mut pipe, child, deadline, tick, react)
 }
 
 #[cfg(test)]
@@ -555,6 +696,31 @@ mod tests {
         assert_eq!(classify("google-chrome-stable"), Some(Kind::Chromium));
         assert_eq!(classify("yandex-browser"), Some(Kind::Chromium));
         assert_eq!(classify("flatpak"), None);
+    }
+
+    /// The descriptors `--remote-debugging-pipe` expects reach the child; messages go both ways.
+    #[test]
+    fn debugging_pipes() {
+        use super::Channel;
+        // A stand-in for the browser: sends back on 4 what comes on 3.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "cat <&3 >&4"]);
+        let pipes = super::debugging_pipes(&mut cmd).unwrap();
+        let mut child = cmd.spawn().unwrap();
+        drop(pipes.theirs);
+        let mut pipe = super::Pipe::new(pipes.to_browser, pipes.from_browser);
+        pipe.send_json(serde_json::json!({"id": 1, "method": "Target.getTargets"})).unwrap();
+        let echoed = loop {
+            if let Some(m) = pipe.next_message().unwrap() {
+                break m;
+            }
+        };
+        assert_eq!(echoed, r#"{"id":1,"method":"Target.getTargets"}"#);
+        // Our end closed: the child reads the end of input and exits, which closes its end too.
+        let super::Pipe { to_browser, messages } = pipe;
+        drop(to_browser);
+        assert!(child.wait().unwrap().success());
+        assert!(messages.recv().is_err());
     }
 
     #[test]

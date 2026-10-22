@@ -1,6 +1,6 @@
 //! Equalizer presets: bands of peaking and shelving filters for the player.
 
-use crate::player::Biquad;
+use crate::Biquad;
 
 pub struct Preset {
     /// Stored in the config.
@@ -55,6 +55,13 @@ pub const PRESETS: &[Preset] = &[
 /// Index of the preset with this id (the flat one if unknown).
 pub fn index(id: &str) -> usize {
     PRESETS.iter().position(|p| p.id == id).unwrap_or(0)
+}
+
+/// Presets are the same if their ids are.
+impl PartialEq for Preset {
+    fn eq(&self, other: &Preset) -> bool {
+        self.id == other.id
+    }
 }
 
 impl Preset {

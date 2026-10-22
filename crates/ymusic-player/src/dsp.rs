@@ -97,6 +97,10 @@ impl Biquad {
         y
     }
 
+    fn reset(&mut self) {
+        self.z = [[0.0; 2]; 2];
+    }
+
     fn process(&mut self, frame: &mut [f32]) {
         for (x, z) in frame.iter_mut().zip(&mut self.z) {
             let v = f64::from(*x);
@@ -143,15 +147,31 @@ impl Limiter {
             delay: VecDeque::new(),
             n: 0,
         };
-        l.boxed.extend(std::iter::repeat_n(1.0, hold));
-        l.sum = hold as f64;
-        // A peak's gain is fully down `hold - 1` frames after it enters: the sound waits as long.
-        l.delay.extend(std::iter::repeat_n([0.0; 2], hold - 1));
+        l.reset();
         l
     }
 
-    /// Processes one frame; the output lags the input by the look-ahead.
-    fn process(&mut self, frame: &mut [f32]) {
+    /// Forgets the sound so far: the look-ahead is silence again.
+    pub fn reset(&mut self) {
+        self.gain = 1.0;
+        self.minimum.clear();
+        self.boxed.clear();
+        self.boxed.extend(std::iter::repeat_n(1.0, self.hold));
+        self.sum = self.hold as f64;
+        // A peak's gain is fully down `hold - 1` frames after it enters: the sound waits as long.
+        self.delay.clear();
+        self.delay.extend(std::iter::repeat_n([0.0; 2], self.hold - 1));
+        self.n = 0;
+    }
+
+    /// Processes interleaved stereo; the output lags the input by the look-ahead.
+    pub fn process(&mut self, samples: &mut [f32]) {
+        for frame in samples.chunks_exact_mut(2) {
+            self.process_frame(frame);
+        }
+    }
+
+    fn process_frame(&mut self, frame: &mut [f32]) {
         let peak = frame[0].abs().max(frame[1].abs());
         let target = if peak > self.limit { self.limit / peak } else { 1.0 };
         // Down at once, back up slowly.
@@ -191,8 +211,16 @@ impl Equalizer {
             for b in &mut self.bands {
                 b.process(frame);
             }
-            self.limiter.process(frame);
+            self.limiter.process_frame(frame);
         }
+    }
+
+    /// Forgets the sound so far, as after a seek.
+    pub fn reset(&mut self) {
+        for b in &mut self.bands {
+            b.reset();
+        }
+        self.limiter.reset();
     }
 }
 
@@ -352,7 +380,7 @@ impl Spectrum {
     pub fn reset(&mut self) {
         self.buf.clear();
         for (b, buf) in &mut self.narrow {
-            b.z = [[0.0; 2]; 2];
+            b.reset();
             buf.clear();
         }
     }
@@ -468,16 +496,12 @@ mod tests {
         // Quiet input is only delayed and levelled up; a loud one is held at full scale.
         let mut l = Limiter::new(0.9, RATE);
         let mut quiet = sine(440.0, 0.5, 0.2);
-        for f in quiet.chunks_exact_mut(2) {
-            l.process(f);
-        }
+        l.process(&mut quiet);
         assert!((peak(&quiet) - 0.5 / 0.9).abs() < 0.01, "{}", peak(&quiet));
         let mut loud = sine(440.0, 2.0, 0.5);
         loud.extend(sine(440.0, 0.3, 0.5));
         let mut l = Limiter::new(0.9, RATE);
-        for f in loud.chunks_exact_mut(2) {
-            l.process(f);
-        }
+        l.process(&mut loud);
         assert!(peak(&loud) <= 1.0 + 1e-6, "{}", peak(&loud));
         assert!(peak(&loud[..loud.len() / 2]) > 0.99);
         // After the release the quiet part comes back to its level.

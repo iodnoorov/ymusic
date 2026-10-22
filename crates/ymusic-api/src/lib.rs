@@ -51,6 +51,7 @@ const FILE_INFO_KEY: &str = "p93jhgh689SBReK6ghtw62";
 const WEB_FILE_INFO_KEY: &str = "7tvSmFbyf5hJnIHhCimDDD";
 pub const MY_WAVE: &str = "user:onyourwave";
 
+#[derive(PartialEq)]
 pub struct Quality {
     /// `quality` parameter of `get-file-info`; stored in the config.
     pub id: &'static str,
@@ -279,6 +280,75 @@ pub fn tls_config() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
+/// What went wrong with a request, as far as the program acts on it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ErrorKind {
+    /// The token was refused (HTTP 401): nothing works until `ymusic login`.
+    Unauthorized,
+    /// Too many requests at once (HTTP 429), still after the retries.
+    RateLimited,
+    /// Another error status.
+    Http(u16),
+    /// No answer: no network, a timeout, TLS.
+    Network,
+    Other,
+}
+
+/// An error of a request: its kind and the whole message (with what it happened in).
+#[derive(Clone, Debug)]
+pub struct ApiError {
+    pub kind: ErrorKind,
+    message: String,
+}
+
+impl ApiError {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> ApiError {
+        ApiError { kind, message: message.into() }
+    }
+
+    /// Tells the kind of an error from a request (`handle`, ureq) or anything else.
+    pub fn from_anyhow(e: &anyhow::Error) -> ApiError {
+        let kind = if let Some(a) = e.downcast_ref::<ApiError>() {
+            a.kind
+        } else {
+            match e.downcast_ref::<ureq::Error>() {
+                Some(ureq::Error::Status(401, _)) => ErrorKind::Unauthorized,
+                Some(ureq::Error::Status(429, _)) => ErrorKind::RateLimited,
+                Some(ureq::Error::Status(code, _)) => ErrorKind::Http(*code),
+                Some(ureq::Error::Transport(_)) => ErrorKind::Network,
+                None if e.downcast_ref::<std::io::Error>().is_some() => ErrorKind::Network,
+                None => ErrorKind::Other,
+            }
+        };
+        ApiError::new(kind, format!("{e:#}"))
+    }
+
+    pub fn is_unauthorized(&self) -> bool {
+        self.kind == ErrorKind::Unauthorized
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// A message alone is an error of no particular kind.
+impl From<String> for ApiError {
+    fn from(message: String) -> ApiError {
+        ApiError::new(ErrorKind::Other, message)
+    }
+}
+
+impl From<&str> for ApiError {
+    fn from(message: &str) -> ApiError {
+        ApiError::new(ErrorKind::Other, message)
+    }
+}
+
 fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
     match r {
         Ok(resp) => Ok(resp.into_json()?),
@@ -297,10 +367,12 @@ fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
                         .map(String::from)
                 })
                 .unwrap_or_else(|| body.chars().take(200).collect());
-            if code == 401 {
-                bail!("HTTP 401: токен недействителен, выполните `ymusic login` ({msg})");
+            Err(match code {
+                401 => ApiError::new(ErrorKind::Unauthorized, format!("HTTP 401: токен недействителен, выполните `ymusic login` ({msg})")),
+                429 => ApiError::new(ErrorKind::RateLimited, format!("HTTP 429: {msg}")),
+                _ => ApiError::new(ErrorKind::Http(code), format!("HTTP {code}: {msg}")),
             }
-            bail!("HTTP {code}: {msg}")
+            .into())
         }
         Err(e) => Err(e.into()),
     }
@@ -821,6 +893,8 @@ impl Api {
             // is listed only by download-info.
             Ok(info) if low && info.quality != "lq" => Ok(self.download_info(track_id, true).map_or(info.url, |i| i.url)),
             Ok(info) => Ok(info.url),
+            // A refused token is told as it is: the other method is refused too.
+            Err(e) if ApiError::from_anyhow(&e).is_unauthorized() => Err(e),
             Err(e) => self.download_info(track_id, low).map(|i| i.url).map_err(|e2| anyhow!("{e:#}; {e2:#}")),
         }
     }
@@ -1012,25 +1086,26 @@ pub struct PlayReport {
 
 /// A random id in the UUID v4 format.
 pub fn random_uuid() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
-    let mut x = nanos ^ COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(std::process::id());
-    let mut next = || {
-        // splitmix64
-        x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = x;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    };
     let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&next().to_be_bytes());
-    bytes[8..].copy_from_slice(&next().to_be_bytes());
+    bytes[..8].copy_from_slice(&random_u64().to_be_bytes());
+    bytes[8..].copy_from_slice(&random_u64().to_be_bytes());
     bytes[6] = (bytes[6] & 0x0F) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3F) | 0x80; // RFC 4122 variant
     let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
+/// A random number, not for cryptography. The standard library seeds `RandomState` from the
+/// system's random source once per thread and changes the key for every new one, so each call
+/// hashes nothing with a key nobody can guess.
+pub fn random_u64() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new().build_hasher().finish()
+}
+
+/// A random number below `n` (> 0), without the bias of `% n`.
+pub fn random_below(n: usize) -> usize {
+    ((u128::from(random_u64()) * n as u128) >> 64) as usize
 }
 
 pub fn iso_now() -> String {
@@ -1084,9 +1159,54 @@ mod tests {
         assert_eq!(cover_url("avatars.yandex.net/x/%%"), "https://avatars.yandex.net/x/400x400");
     }
 
-    /// Token for network tests: `YMUSIC_TOKEN`, otherwise the one saved in the config.
+    #[test]
+    fn randomness() {
+        let a: Vec<u64> = (0..1000).map(|_| random_u64()).collect();
+        let mut sorted = a.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 1000, "no repeats");
+        let mut buckets = [0u32; 6];
+        for _ in 0..60_000 {
+            buckets[random_below(6)] += 1;
+        }
+        assert!(buckets.iter().all(|&n| (9_000..11_000).contains(&n)), "{buckets:?}");
+        let id = random_uuid();
+        assert_eq!((id.len(), &id[14..15]), (36, "4"));
+        assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
+        assert_ne!(random_uuid(), id);
+    }
+
+    #[test]
+    fn error_kinds() {
+        let e = handle(Err(ureq::Error::Status(401, ureq::Response::new(401, "Unauthorized", r#"{"error": {"name": "session-expired"}}"#).unwrap())))
+            .unwrap_err();
+        let a = ApiError::from_anyhow(&e);
+        assert!(a.is_unauthorized());
+        assert_eq!(a.to_string(), "HTTP 401: токен недействителен, выполните `ymusic login` (session-expired)");
+        // With what it happened in: the kind stays, the message tells both.
+        let a = ApiError::from_anyhow(&e.context("плейлисты"));
+        assert!(a.is_unauthorized() && a.to_string().starts_with("плейлисты: HTTP 401"));
+        let e = handle(Err(ureq::Error::Status(500, ureq::Response::new(500, "Oops", "boom").unwrap()))).unwrap_err();
+        assert_eq!(ApiError::from_anyhow(&e).kind, ErrorKind::Http(500));
+        assert_eq!(ApiError::from_anyhow(&anyhow!("что-то")).kind, ErrorKind::Other);
+        assert_eq!(ApiError::from("текст").to_string(), "текст");
+    }
+
+    /// Token for network tests: `YMUSIC_TOKEN`, otherwise the one the program saved
+    /// (`$XDG_CONFIG_HOME/ymusic/config.json` or `~/.config/ymusic/config.json`).
     fn test_token() -> String {
-        crate::config::env_str("TOKEN").or_else(|| crate::config::Config::load().token).expect("token")
+        if let Ok(t) = std::env::var("YMUSIC_TOKEN") {
+            return t;
+        }
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+            .expect("HOME")
+            .join("ymusic/config.json");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(config).expect("config")).expect("config");
+        v["token"].as_str().expect("token").to_string()
     }
 
     /// Signed-in clients of both APIs for network tests: mobile, then website.

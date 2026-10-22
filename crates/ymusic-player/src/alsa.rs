@@ -4,7 +4,8 @@
 //! the format and the rate are whatever it supports, converted here.
 
 use super::dsp::Resampler;
-use super::output::{Ring, Wake, RATE};
+use super::output::{Sink, RATE};
+use super::ring::{Ring, Wake};
 use anyhow::{anyhow, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -76,6 +77,9 @@ struct XferI {
     frames: u64,
 }
 
+// The structures above are those of 64-bit kernels; the targets are x86_64 and aarch64.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the ALSA output is written for 64-bit systems only");
 const _: () = assert!(size_of::<HwParams>() == 608 && size_of::<XferI>() == 24);
 
 impl HwParams {
@@ -217,10 +221,10 @@ fn configure(dev: &File) -> Result<Setup> {
     Err(anyhow!("устройство не поддерживает ни один из форматов"))
 }
 
-/// Playback devices in the order they are tried: `YMUSIC_ALSA_DEVICE` (`hw:1,0` or `1,0`) or all
-/// of them, card by card.
-fn devices() -> Vec<String> {
-    if let Some(d) = crate::config::env_str("ALSA_DEVICE") {
+/// Playback devices in the order they are tried: `device` (`hw:1,0` or `1,0`) or all of them,
+/// card by card.
+fn devices(device: Option<&str>) -> Vec<String> {
+    if let Some(d) = device {
         let d = d.trim_start_matches("hw:").replace(',', "D");
         return vec![format!("/dev/snd/pcmC{d}p")];
     }
@@ -252,9 +256,9 @@ pub struct Alsa {
 }
 
 impl Alsa {
-    pub fn open(ring: Arc<Ring>) -> Result<Alsa> {
+    pub fn open(ring: Arc<Ring>, device: Option<&str>) -> Result<Alsa> {
         let mut errors = Vec::new();
-        for path in devices() {
+        for path in devices(device) {
             // Opened non-blocking so that a busy device fails at once; writes block later.
             let dev = match OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path) {
                 Ok(d) => d,
@@ -290,17 +294,19 @@ impl Alsa {
         self.wake.signal();
         Ok(rx.recv_timeout(Duration::from_secs(3)).map_err(|_| lost())??)
     }
+}
 
-    pub fn set_paused(&self, paused: bool) -> Result<()> {
+impl Sink for Alsa {
+    fn set_paused(&self, paused: bool) -> Result<()> {
         self.call(Request::Pause(paused)).map(drop)
     }
 
-    pub fn flush(&self) -> Result<()> {
+    fn flush(&self) -> Result<()> {
         self.call(Request::Flush).map(drop)
     }
 
     /// Frames still to be heard (in the device's buffer), at our rate.
-    pub fn delay(&self) -> Result<u64> {
+    fn delay(&self) -> Result<u64> {
         self.call(Request::Delay)
     }
 }

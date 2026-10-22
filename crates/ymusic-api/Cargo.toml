@@ -1,0 +1,25 @@
+[package]
+name = "ymusic-api"
+description = "Yandex Music API: the mobile one and the website's"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+hmac = "0.12"
+image.workspace = true
+md-5 = "0.10"
+rustls.workspace = true
+rustls-native-certs = "0.8"
+serde_json.workspace = true
+sha2 = "0.10"
+ureq.workspace = true
+webpki-roots = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,83 @@
+name: Linux
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # Without the network tests (`--ignored`): they need an account.
+      - name: Тесты
+        run: cargo test --locked
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust
+        run: |
+          V=$(grep -m1 '^rust-version *=' Cargo.toml | cut -d'"' -f2)
+          rustup toolchain install $V --profile minimal
+          echo "MSRV=$V" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Сборка на ${{ env.MSRV }}
+        run: cargo +$MSRV check --locked --all-targets
+
+  # The static binary that releases ship, built the same way (packaging/musl.sh).
+  musl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.arch }}-unknown-linux-musl
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+
+      - name: Сборка
+        run: packaging/musl.sh ${{ matrix.arch }} build --locked --release
+
+      - name: Проверка
+        run: |
+          B=target/${{ matrix.arch }}-unknown-linux-musl/release/ymusic
+          file $B
+          file $B | grep -Eq 'static(-pie|ally) linked'
+          $B --version

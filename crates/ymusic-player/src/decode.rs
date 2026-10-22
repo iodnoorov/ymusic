@@ -305,9 +305,9 @@ mod tests {
     #[test]
     fn decodes_all_formats() {
         for (name, data, fdk) in [
-            ("aac-lc", &include_bytes!("../../tests/data/aac-lc.m4a")[..], false),
-            ("he-aac", &include_bytes!("../../tests/data/he-aac.m4a")[..], true),
-            ("mp3", &include_bytes!("../../tests/data/mp3.mp3")[..], false),
+            ("aac-lc", &include_bytes!("../tests/data/aac-lc.m4a")[..], false),
+            ("he-aac", &include_bytes!("../tests/data/he-aac.m4a")[..], true),
+            ("mp3", &include_bytes!("../tests/data/mp3.mp3")[..], false),
         ] {
             let mut d = open(data);
             assert_eq!(d.uses_fdk(), fdk, "{name}");
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn seek_is_sample_accurate() {
-        let data = include_bytes!("../../tests/data/aac-lc.m4a");
+        let data = include_bytes!("../tests/data/aac-lc.m4a");
         let full = decode_all(&mut open(data));
         let mut d = open(data);
         let at = d.seek(1.0).unwrap();
@@ -352,7 +352,7 @@ mod tests {
     /// full decode (not sample for sample: SBR adds noise of its own).
     #[test]
     fn seek_with_fdk_keeps_alignment() {
-        let data = include_bytes!("../../tests/data/he-aac.m4a");
+        let data = include_bytes!("../tests/data/he-aac.m4a");
         let full = decode_all(&mut open(data));
         let mut d = open(data);
         // Play a little first: the latency is known by the time of the seek.

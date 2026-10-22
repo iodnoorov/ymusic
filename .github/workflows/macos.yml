@@ -19,12 +19,16 @@ jobs:
 
       - name: Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component clippy
           rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      - name: Clippy
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: Сборка
         run: cargo build --locked --release --target ${{ matrix.target }}
@@ -39,7 +43,7 @@ jobs:
           A=${{ matrix.target }}; A=${A%%-*}
           D=ymusic-$V-$A-macos
           mkdir $D
-          cp target/${{ matrix.target }}/release/ymusic LICENSE README.md $D/
+          cp target/${{ matrix.target }}/release/ymusic LICENSE LICENSE-FDK-AAC README.md $D/
           $D/ymusic --version || true
           tar czf $D.tar.gz $D
           shasum -a 256 $D.tar.gz > $D.tar.gz.sha256

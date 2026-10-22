@@ -1,4 +1,4 @@
-Test files for the decoder (`src/player/decode.rs`): 2 s of a stereo signal at 44.1 kHz, the same in
+Test files for the decoder (`src/decode.rs` of this crate): 2 s of a stereo signal at 44.1 kHz, the same in
 both channels — 440 Hz at 0.3, 3 kHz at 0.2 and a noise-like band of 50 tones over 9–14 kHz
 (0.1 RMS in all), where HE-AAC's spectral band replication has to recreate it.
 

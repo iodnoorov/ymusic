@@ -1,0 +1,27 @@
+[package]
+name = "ymusic-player"
+description = "Audio player of ymusic: download, decoding, processing, output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+fdk-aac = "0.8"
+libc.workspace = true
+pulseaudio = "0.3.2"
+rustls.workspace = true
+symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "aac", "mp3"] }
+symphonia-adapter-fdk-aac = "0.2"
+ureq.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-audio-toolbox = { version = "0.3", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "HostTime"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+
+[lints]
+workspace = true

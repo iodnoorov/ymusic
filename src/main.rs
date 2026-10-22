@@ -1,21 +1,24 @@
-mod api;
 mod app;
 mod auth;
 mod clipboard;
 mod config;
-mod eq;
+mod effect;
 mod input;
+mod keymap;
 mod media;
-mod player;
 mod ui;
+
+use ymusic_api as api;
+use ymusic_core::{library, queue};
+use ymusic_player as player;
+use ymusic_player::eq;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use config::Config;
 use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use ratatui::crossterm::execute;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
@@ -51,6 +54,22 @@ enum Cmd {
     Whoami,
 }
 
+/// Locking that goes on after a panic in another thread holding the lock: the state under these
+/// locks is updated in small steps, and one failed thread should not bring the rest down with a
+/// second panic.
+trait Lock<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> Lock<T> for std::sync::Mutex<T> {
+    fn locked(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Changed settings are saved once the keys have been left alone this long.
+const SAVE_AFTER: Duration = Duration::from_secs(2);
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut cfg = Config::load();
@@ -66,7 +85,7 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Whoami) => {
             let mut api = api::Api::new(&token(&mut cfg)?);
-            api.web = cfg.web_api;
+            api.web = cfg.settings.web_api;
             let a = api.account_status()?;
             println!("{} ({}) uid={} Плюс: {}", a.name, a.login, a.uid, if a.has_plus { "да" } else { "нет" });
             return Ok(());
@@ -76,56 +95,75 @@ fn main() -> Result<()> {
 
     let token = token(&mut cfg)?;
     let mut api = api::Api::new(&token);
-    api.web = cfg.web_api;
+    api.web = cfg.settings.web_api;
     let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
-    let player = player::Player::spawn(tx.clone(), cfg.volume)?;
-    let remote = tx.clone();
-    let mut app = app::App::new(api, account, tx, Box::new(player), cfg.volume);
+    let options = player::Options {
+        output: config::env_str("OUTPUT"),
+        alsa_device: config::env_str("ALSA_DEVICE"),
+        tls: api::tls_config(),
+    };
+    let player = player::Player::spawn(tx.clone(), cfg.settings.volume, options)?;
+    let (remote, input_tx, signal_tx) = (tx.clone(), tx.clone(), tx.clone());
+    let mut runtime = effect::Runtime::new(player, tx);
+    let s = &cfg.settings;
+    let mut app = app::App::new(api, account, s.volume);
     app.start();
-    app.set_eq(eq::index(&cfg.eq));
-    app.set_crossfade(cfg.crossfade);
-    let art = app::Art::from_id(&cfg.art).unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None });
-    app.set_art(art);
-    app.finish_track = cfg.finish_track;
-    app.repeat = app::Repeat::from_id(&cfg.repeat).unwrap_or_default();
+    app.set_eq(eq::index(s.eq.id));
+    app.set_crossfade(s.crossfade);
+    app.set_art(s.art.unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None }));
+    app.finish_track = s.finish_track;
+    app.queue.set_repeat(s.repeat);
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
-    let icons = cfg.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
+    let icons = s.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
     app.set_icons(icons);
-    app.quality = api::quality_index(&cfg.quality);
+    app.quality = api::quality_index(s.quality.id);
     if let Some(id) = cli.station {
         app.start_station_id(&id);
     } else if cli.wave {
         app.start_station_id(api::MY_WAVE);
     }
+    runtime.run(app.take_effects(), &app.task_api());
 
-    // SIGTERM ends the loop like `q`: the sound stops, settings are saved. SIGHUP keeps its default
-    // action: with the terminal gone crossterm spins on EOF and the loop would never see a flag;
-    // the sound stops with the process and settings are already saved by then.
-    let stop = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&stop))?;
+    // A changed window size and SIGTERM wake the loop: the screen is redrawn at once; SIGTERM ends
+    // the loop like `q` (the sound stops, settings are saved). SIGHUP keeps its default action:
+    // the sound stops with the process, and the settings are saved by then.
+    {
+        use signal_hook::consts::{SIGTERM, SIGWINCH};
+        let mut signals = signal_hook::iterator::Signals::new([SIGWINCH, SIGTERM])?;
+        std::thread::Builder::new().name("signals".into()).spawn(move || {
+            for signal in signals.forever() {
+                let _ = signal_tx.send(if signal == SIGTERM { app::Msg::Terminate } else { app::Msg::Resized });
+            }
+        })?;
+    }
 
     let mut terminal = ratatui::init();
     // Pasted text arrives as one event instead of a stream of hotkeys.
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     // Must run after entering the alternate screen and before reading events.
     app.picker = Some(query_picker());
-    // Keys are read here rather than by crossterm: it drops the physical key the terminal tells.
-    let mut keys = input::Reader::new();
-    let mut size = ratatui::crossterm::terminal::size()?;
+    // Keys are read here rather than by crossterm (it drops the physical key the terminal tells),
+    // in a thread of their own: they come as messages like everything else.
+    input::Reader::new().spawn(move |i| {
+        let _ = input_tx.send(app::Msg::Input(i));
+    });
+    let mut kitty = false;
     // Media keys and desktop player widgets; their commands come back as messages.
     let mut media = media::Media::start(move |r| {
         let _ = remote.send(app::Msg::Remote(r));
     });
     let res = (|| -> Result<()> {
-        // Redraw only when something changed: immediately on input/messages,
-        // otherwise at 5 fps while something animates and 1 fps when idle.
+        // Redraw only when something changed: at once on input and messages, otherwise at
+        // 12.5 fps while the spectrum moves, 5 fps while something animates and 1 fps when idle.
+        // In between the loop sleeps until a message comes.
         let mut dirty = true;
         let mut last_draw = Instant::now();
         let mut last_input = Instant::now();
-        while !app.quit && !stop.load(Ordering::Relaxed) {
+        let mut unsaved = false;
+        while !app.quit {
             if std::mem::take(&mut app.clear_images) {
                 delete_images(app.picker.as_ref());
                 // Full redraw: the screen is erased, which also removes sixel images.
@@ -142,40 +180,68 @@ fn main() -> Result<()> {
                 last_draw = Instant::now();
                 dirty = false;
             }
-            let inputs = keys.read(Duration::from_millis(50))?;
-            if !inputs.is_empty() {
-                dirty = true;
-                last_input = Instant::now();
+            // Until the next frame, or the moment to save changed settings.
+            let mut wait = frame.saturating_sub(last_draw.elapsed());
+            if unsaved {
+                wait = wait.min(SAVE_AFTER.saturating_sub(last_input.elapsed()));
             }
-            for i in inputs {
-                match i {
-                    input::Input::Key(k) => app.on_key(k),
-                    input::Input::Paste(s) => app.on_paste(&s),
+            // On macOS «Исполняется» delivers its commands on this thread's run loop, which
+            // `media.sync` turns: it must come round often.
+            #[cfg(target_os = "macos")]
+            let wait = wait.min(Duration::from_millis(50));
+            let first = match rx.recv_timeout(wait) {
+                Ok(m) => Some(m),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            for m in first.into_iter().chain(rx.try_iter()) {
+                match m {
+                    app::Msg::Input(input::Input::KittyProtocol) => {
+                        if !std::mem::replace(&mut kitty, true) {
+                            input::kitty_on();
+                        }
+                    }
+                    app::Msg::Input(i) => {
+                        dirty = true;
+                        last_input = Instant::now();
+                        unsaved = true;
+                        match i {
+                            input::Input::Key(k) => app.on_key(k),
+                            input::Input::Paste(s) => app.on_paste(&s),
+                            input::Input::KittyProtocol => {}
+                        }
+                    }
+                    app::Msg::Resized => {
+                        app.on_resize();
+                        dirty = true;
+                    }
+                    app::Msg::Terminate => app.quit = true,
+                    m => {
+                        // Playback position is shown by the regular animation frames.
+                        dirty |= !matches!(m, app::Msg::Player(player::PlayerEvent::TimePos(_)));
+                        app.on_msg(m);
+                    }
                 }
-            }
-            let now = ratatui::crossterm::terminal::size()?;
-            if now != size {
-                size = now;
-                app.on_resize();
-                dirty = true;
             }
             // Changed settings are saved once the keys are left alone for a moment, so they
             // survive a crash or kill; not on every volume step.
-            if last_input.elapsed() > Duration::from_secs(2) && sync_settings(&mut cfg, &app, icons) {
-                let _ = cfg.save();
-            }
-            while let Ok(m) = rx.try_recv() {
-                // Playback position is shown by the regular animation frames.
-                dirty |= !matches!(m, app::Msg::Player(player::PlayerEvent::TimePos(_)));
-                app.on_msg(m);
+            if unsaved && last_input.elapsed() >= SAVE_AFTER {
+                unsaved = false;
+                if sync_settings(&mut cfg, &app, icons) {
+                    let _ = cfg.save();
+                }
             }
             app.tick();
+            // What the keys and messages above asked for.
+            runtime.run(app.take_effects(), &app.task_api());
             let (state, position) = app.media_state();
             media.sync(state, position);
         }
         Ok(())
     })();
-    keys.finish();
+    if kitty {
+        input::kitty_off();
+    }
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
 
@@ -245,31 +311,27 @@ fn delete_images(picker: Option<&ratatui_image::picker::Picker>) {
     let _ = out.flush();
 }
 
+/// The settings as they are in the program now. `icons`: the value this run started with (the
+/// saved one stays unless icons are switched by hand: `--no-icons` is not saved).
+fn settings_of(app: &app::App, saved: &config::Settings, icons: bool) -> config::Settings {
+    config::Settings {
+        volume: app.save_volume(),
+        icons: if app.icons != icons { app.icons } else { saved.icons },
+        art: Some(app.art),
+        eq: &eq::PRESETS[app.eq],
+        quality: &api::QUALITIES[app.quality],
+        crossfade: app.crossfade,
+        finish_track: app.finish_track,
+        repeat: app.queue.repeat(),
+        web_api: app.api.web,
+    }
+}
+
 /// Copies the settings changed in the program into the config; true if any of them changed.
-/// `icons`: the value this run started with (`--no-icons` is not saved unless switched by hand).
 fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
-    let volume = app.save_volume();
-    let eq = eq::PRESETS[app.eq].id;
-    let quality = api::QUALITIES[app.quality].id;
-    let icons = if app.icons != icons { app.icons } else { cfg.icons };
-    let changed = cfg.volume != volume
-        || cfg.eq != eq
-        || cfg.quality != quality
-        || cfg.crossfade != app.crossfade
-        || cfg.art != app.art.id()
-        || cfg.finish_track != app.finish_track
-        || cfg.repeat != app.repeat.id()
-        || cfg.web_api != app.api.web
-        || cfg.icons != icons;
-    cfg.volume = volume;
-    cfg.eq = eq.to_string();
-    cfg.quality = quality.to_string();
-    cfg.crossfade = app.crossfade;
-    cfg.art = app.art.id().to_string();
-    cfg.finish_track = app.finish_track;
-    cfg.repeat = app.repeat.id().to_string();
-    cfg.web_api = app.api.web;
-    cfg.icons = icons;
+    let now = settings_of(app, &cfg.settings, icons);
+    let changed = now != cfg.settings;
+    cfg.settings = now;
     changed
 }
 

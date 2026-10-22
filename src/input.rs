@@ -45,6 +45,20 @@ impl From<KeyCode> for Press {
 pub enum Input {
     Key(Press),
     Paste(String),
+    /// The terminal answered that it speaks the kitty keyboard protocol: `kitty_on` turns it on.
+    KittyProtocol,
+}
+
+/// Turns the kitty keyboard protocol on (see `Input::KittyProtocol`).
+pub fn kitty_on() {
+    let mut out = io::stdout();
+    let _ = out.write_all(format!("\x1b[>{KITTY_FLAGS}u").as_bytes()).and_then(|()| out.flush());
+}
+
+/// Turns it off again.
+pub fn kitty_off() {
+    let mut out = io::stdout();
+    let _ = out.write_all(b"\x1b[<u").and_then(|()| out.flush());
 }
 
 /// Maps Russian (ЙЦУКЕН) layout characters to their QWERTY keys so hotkeys work on either layout.
@@ -278,28 +292,29 @@ impl From<Press> for Input {
 pub struct Reader {
     buf: Vec<u8>,
     paste: Option<Vec<u8>>,
-    kitty: bool,
 }
 
 impl Reader {
-    /// Asks the terminal whether it speaks the kitty keyboard protocol; the protocol is turned
-    /// on when (if) it answers.
+    /// Asks the terminal whether it speaks the kitty keyboard protocol; its answer comes as
+    /// `Input::KittyProtocol`.
     pub fn new() -> Reader {
         let mut out = io::stdout();
         let _ = out.write_all(b"\x1b[?u").and_then(|()| out.flush());
-        Reader { buf: Vec::new(), paste: None, kitty: false }
+        Reader { buf: Vec::new(), paste: None }
     }
 
-    /// Turns the protocol off again.
-    pub fn finish(&mut self) {
-        if std::mem::take(&mut self.kitty) {
-            let mut out = io::stdout();
-            let _ = out.write_all(b"\x1b[<u").and_then(|()| out.flush());
-        }
+    /// Reads in a thread of its own, handing every input to `send`, until the terminal is gone.
+    /// It never writes to the terminal: the program draws there meanwhile.
+    pub fn spawn(mut self, send: impl Fn(Input) + Send + 'static) {
+        let _ = std::thread::Builder::new().name("input".into()).spawn(move || {
+            while let Ok(inputs) = self.read(Duration::from_secs(60)) {
+                inputs.into_iter().for_each(&send);
+            }
+        });
     }
 
     /// Waits up to `timeout` for input; returns what came.
-    pub fn read(&mut self, timeout: Duration) -> io::Result<Vec<Input>> {
+    fn read(&mut self, timeout: Duration) -> io::Result<Vec<Input>> {
         if !wait(timeout)? {
             return Ok(Vec::new());
         }
@@ -324,12 +339,7 @@ impl Reader {
                 }
                 Parsed::KittySupported(n) => {
                     self.buf.drain(..n);
-                    if !self.kitty {
-                        self.kitty = true;
-                        let mut out = io::stdout();
-                        out.write_all(format!("\x1b[>{KITTY_FLAGS}u").as_bytes())?;
-                        out.flush()?;
-                    }
+                    events.push(Input::KittyProtocol);
                 }
                 Parsed::PasteStart(n) => {
                     self.buf.drain(..n);
@@ -353,6 +363,10 @@ impl Reader {
     fn fill(&mut self) -> io::Result<()> {
         let mut chunk = [0u8; 4096];
         let n = io::stdin().lock().read(&mut chunk)?;
+        if n == 0 {
+            // The terminal is gone.
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
         self.buf.extend_from_slice(&chunk[..n]);
         Ok(())
     }

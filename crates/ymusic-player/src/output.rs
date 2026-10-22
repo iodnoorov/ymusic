@@ -3,280 +3,29 @@
 //! the connection and sleeps in `poll` until the server asks for data, the ring gets some it was
 //! waiting for, or a command comes; the `pulseaudio` crate only encodes and decodes the messages.
 
+use crate::Lock;
 use anyhow::{anyhow, Context, Result};
 use pulseaudio::protocol::{self, Command, TagStructRead, TagStructReader};
-use std::collections::{HashMap, VecDeque};
+use super::ring::{Ring, Wake};
+use super::Options;
+use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Output sample rate; every track the server sends has it, others are resampled.
 pub const RATE: u32 = 44100;
 /// Bytes per frame: stereo `f32`.
 const FRAME: usize = 8;
-/// The ring holds 100 ms, the server about as much again: a change of volume is heard that soon.
-const RING_SAMPLES: usize = RATE as usize / 10 * 2;
+/// The server's buffer: the sound ahead of what is heard, besides the ring's 100 ms.
 const SERVER_BUFFER_MS: u32 = 200;
-
-/// Where something happens in the stream of frames: a track starts, ends or fails.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Mark {
-    /// A track (`job`) starts at `at` seconds into it; `gapless` — right after the previous one.
-    Start { job: u64, at: f64, duration: Option<f64>, gapless: bool },
-    End,
-    Error(String),
-}
-
-#[derive(Default)]
-struct RingState {
-    samples: VecDeque<f32>,
-    /// The output thread found the ring empty and waits to be woken when it is not.
-    starving: bool,
-    wake: Option<Arc<Wake>>,
-    /// Frames ever pushed and handed to the server (dropped ones count as handed).
-    pushed: u64,
-    handed: u64,
-    /// Bumped by `clear`: a producer still pushing older audio is told to stop.
-    gen: u64,
-    marks: VecDeque<(u64, Mark)>,
-    /// The job being decoded and a seek requested in it.
-    producing: u64,
-    seek: Option<f64>,
-    /// Spectrum measurements by the frame they end at.
-    spectra: VecDeque<(u64, Vec<f32>)>,
-}
-
-/// Measurements kept for the visualizer: about the sound in the ring and on the server.
-const MAX_SPECTRA: usize = 32;
-
-/// Interleaved stereo frames on their way to the server, with marks at track boundaries.
-#[derive(Default)]
-pub struct Ring {
-    state: Mutex<RingState>,
-    space: Condvar,
-}
-
-impl Ring {
-    /// Appends frames, waiting while the ring is full. False if it was cleared since `gen`.
-    pub fn push(&self, mut data: &[f32], gen: u64) -> bool {
-        let mut s = self.state.lock().unwrap();
-        while !data.is_empty() {
-            if s.gen != gen {
-                return false;
-            }
-            let room = (RING_SAMPLES - s.samples.len().min(RING_SAMPLES)).min(data.len()) & !1;
-            if room == 0 {
-                s = self.space.wait(s).unwrap();
-                continue;
-            }
-            s.samples.extend(&data[..room]);
-            s.pushed += room as u64 / 2;
-            data = &data[room..];
-            if s.starving {
-                s.starving = false;
-                if let Some(w) = &s.wake {
-                    w.signal();
-                }
-            }
-        }
-        true
-    }
-
-    /// Puts a mark at the current end of the stream; returns the generation it belongs to.
-    pub fn mark(&self, mark: Mark) -> u64 {
-        let mut s = self.state.lock().unwrap();
-        let at = s.pushed;
-        s.marks.push_back((at, mark));
-        s.gen
-    }
-
-    /// Drops the frames not yet handed to the server and all pending marks.
-    pub fn clear(&self) {
-        self.clear_locked(&mut self.state.lock().unwrap());
-    }
-
-    fn clear_locked(&self, s: &mut RingState) {
-        s.samples.clear();
-        s.handed = s.pushed;
-        s.marks.clear();
-        s.spectra.clear();
-        s.seek = None;
-        s.gen += 1;
-        self.space.notify_all();
-    }
-
-    /// Clears the ring and asks the producer to seek, if it is decoding `job`. Both at once, so
-    /// the producer never sees the ring cleared without the seek.
-    pub fn request_seek(&self, job: u64, secs: f64) -> bool {
-        let mut s = self.state.lock().unwrap();
-        if s.producing != job {
-            return false;
-        }
-        self.clear_locked(&mut s);
-        s.seek = Some(secs);
-        true
-    }
-
-    /// For the producer: starts decoding `job`; returns the current generation.
-    pub fn begin(&self, job: u64) -> u64 {
-        let mut s = self.state.lock().unwrap();
-        s.producing = job;
-        s.seek = None;
-        s.gen
-    }
-
-    /// For the producer: the current generation and a seek requested since the last call.
-    pub fn poll_seek(&self) -> (u64, Option<f64>) {
-        let mut s = self.state.lock().unwrap();
-        let seek = s.seek.take();
-        (s.gen, seek)
-    }
-
-    /// Stores band levels measured over the sound about to be pushed, ending `offset` frames into
-    /// it; dropped if the ring was cleared since `gen`.
-    pub fn push_spectrum(&self, gen: u64, offset: usize, levels: Vec<f32>) {
-        let mut s = self.state.lock().unwrap();
-        if s.gen != gen {
-            return;
-        }
-        let at = s.pushed + offset as u64;
-        if s.spectra.len() == MAX_SPECTRA {
-            s.spectra.pop_front();
-        }
-        s.spectra.push_back((at, levels));
-    }
-
-    /// The latest band levels playback has reached by frame `played`.
-    pub fn spectrum(&self, played: u64) -> Option<Vec<f32>> {
-        let mut s = self.state.lock().unwrap();
-        let mut last = None;
-        while s.spectra.front().is_some_and(|(at, _)| *at <= played) {
-            last = s.spectra.pop_front().map(|(_, l)| l);
-        }
-        last
-    }
-
-    /// For the output thread: moves up to `max` bytes of frames to `out` as `f32` little-endian;
-    /// returns the bytes moved. When there are none, the thread is woken once some are pushed.
-    fn take(&self, max: usize, out: &mut Vec<u8>) -> usize {
-        let mut s = self.state.lock().unwrap();
-        let frames = (max / FRAME).min(s.samples.len() / 2);
-        if frames == 0 {
-            s.starving = true;
-            return 0;
-        }
-        out.extend(s.samples.drain(..frames * 2).flat_map(f32::to_le_bytes));
-        s.handed += frames as u64;
-        self.space.notify_all();
-        frames * FRAME
-    }
-
-    /// For the ALSA output thread and the Core Audio callback: moves up to `max` frames to `out`;
-    /// returns the frames moved. When there are none, a thread is woken once some are pushed.
-    pub(super) fn take_samples(&self, max: usize, out: &mut Vec<f32>) -> usize {
-        let mut s = self.state.lock().unwrap();
-        let frames = max.min(s.samples.len() / 2);
-        if frames == 0 {
-            s.starving = true;
-            return 0;
-        }
-        out.extend(s.samples.drain(..frames * 2));
-        s.handed += frames as u64;
-        self.space.notify_all();
-        frames
-    }
-
-    pub(super) fn set_wake(&self, wake: Arc<Wake>) {
-        let mut s = self.state.lock().unwrap();
-        s.wake = Some(wake);
-        s.starving = false;
-    }
-
-    /// Frames handed to the server so far.
-    fn handed(&self) -> u64 {
-        self.state.lock().unwrap().handed
-    }
-
-    /// Takes the marks that playback has reached by frame `played`, with the frames they are at.
-    pub fn reached(&self, played: u64) -> Vec<(u64, Mark)> {
-        let mut s = self.state.lock().unwrap();
-        let mut out = Vec::new();
-        while s.marks.front().is_some_and(|(at, _)| *at <= played) {
-            out.extend(s.marks.pop_front());
-        }
-        out
-    }
-}
-
-/// An eventfd that wakes the output thread from its `poll`.
-#[cfg(target_os = "linux")]
-pub(super) struct Wake(OwnedFd);
-
-#[cfg(target_os = "linux")]
-impl Wake {
-    pub(super) fn new() -> io::Result<Wake> {
-        // SAFETY: plain syscall; the descriptor is owned from here on.
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fd` is a fresh descriptor nobody else owns.
-        Ok(Wake(unsafe { OwnedFd::from_raw_fd(fd) }))
-    }
-
-    pub(super) fn signal(&self) {
-        let one = 1u64.to_ne_bytes();
-        // SAFETY: writes 8 bytes from a live buffer to our own eventfd.
-        unsafe { libc::write(self.0.as_raw_fd(), one.as_ptr().cast(), one.len()) };
-    }
-
-    pub(super) fn fd(&self) -> i32 {
-        self.0.as_raw_fd()
-    }
-
-    pub(super) fn reset(&self) {
-        let mut buf = [0u8; 8];
-        // SAFETY: reads at most 8 bytes into a live buffer from our own eventfd.
-        unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-    }
-}
-
-/// Elsewhere (macOS has no eventfd) a socket pair: a byte written to one end wakes the other.
-#[cfg(not(target_os = "linux"))]
-pub(super) struct Wake {
-    rx: UnixStream,
-    tx: UnixStream,
-}
-
-#[cfg(not(target_os = "linux"))]
-impl Wake {
-    pub(super) fn new() -> io::Result<Wake> {
-        let (rx, tx) = UnixStream::pair()?;
-        rx.set_nonblocking(true)?;
-        tx.set_nonblocking(true)?;
-        Ok(Wake { rx, tx })
-    }
-
-    pub(super) fn signal(&self) {
-        // A full buffer already holds a wake-up, so a failed write loses nothing.
-        let _ = (&self.tx).write(&[1]);
-    }
-
-    pub(super) fn fd(&self) -> i32 {
-        self.rx.as_raw_fd()
-    }
-
-    pub(super) fn reset(&self) {
-        let mut buf = [0u8; 64];
-        while matches!((&self.rx).read(&mut buf), Ok(n) if n > 0) {}
-    }
-}
+/// How long the server's answer about its delay is trusted: in between, playback is assumed to
+/// go on at our rate.
+const DELAY_REFRESH: Duration = Duration::from_secs(1);
 
 /// The connection to the server: messages are read into `rbuf` and taken from there whole.
 struct Conn {
@@ -363,6 +112,17 @@ pub struct Pulse {
     requests: Option<Sender<Request>>,
     wake: Arc<Wake>,
     thread: Option<JoinHandle<()>>,
+    ring: Arc<Ring>,
+    clock: Mutex<Clock>,
+}
+
+/// What the server last said about playback, to tell the position in between without asking it
+/// (a round trip to the server each time the position is wanted, several times a second).
+#[derive(Default)]
+struct Clock {
+    /// Frames heard by then, and when it was asked.
+    heard: Option<(u64, Instant)>,
+    paused: bool,
 }
 
 impl Pulse {
@@ -417,7 +177,7 @@ impl Pulse {
         let thread = std::thread::Builder::new()
             .name("player-output".into())
             .spawn(move || serve(conn, stream.channel, &r, &rx, &w))?;
-        Ok(Pulse { channel: stream.channel, requests: Some(tx), wake, thread: Some(thread) })
+        Ok(Pulse { channel: stream.channel, requests: Some(tx), wake, thread: Some(thread), ring, clock: Mutex::default() })
     }
 
     fn call(&self, command: Command) -> Result<Option<protocol::PlaybackLatency>> {
@@ -428,18 +188,8 @@ impl Pulse {
         rx.recv_timeout(Duration::from_secs(3)).map_err(|_| lost())?.map_err(|e| anyhow!("звуковой сервер: {e}"))
     }
 
-    fn set_paused(&self, paused: bool) -> Result<()> {
-        self.call(Command::CorkPlaybackStream(protocol::CorkStreamParams { channel: self.channel, cork: paused }))?;
-        Ok(())
-    }
-
-    fn flush(&self) -> Result<()> {
-        self.call(Command::FlushPlaybackStream(self.channel))?;
-        Ok(())
-    }
-
-    /// Frames handed to the server that are not heard yet.
-    fn delay(&self) -> Result<u64> {
+    /// Frames handed to the server that are not heard yet, as the server tells.
+    fn server_delay(&self) -> Result<u64> {
         let t = self
             .call(Command::GetPlaybackLatency(protocol::LatencyParams { channel: self.channel, now: SystemTime::now() }))?
             .ok_or_else(|| anyhow!("звуковой сервер не сообщил задержку"))?;
@@ -447,14 +197,45 @@ impl Pulse {
         let latency = if buffered > 0 { t.sink_usec * u64::from(RATE) / 1_000_000 } else { 0 };
         Ok(buffered + latency)
     }
+}
 
-    fn close(self) {
-        let _ = self.call(Command::DeletePlaybackStream(self.channel));
+impl Sink for Pulse {
+    fn set_paused(&self, paused: bool) -> Result<()> {
+        self.call(Command::CorkPlaybackStream(protocol::CorkStreamParams { channel: self.channel, cork: paused }))?;
+        let mut clock = self.clock.locked();
+        *clock = Clock { heard: None, paused };
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<()> {
+        self.call(Command::FlushPlaybackStream(self.channel))?;
+        self.clock.locked().heard = None;
+        Ok(())
+    }
+
+    /// Between the server's answers playback goes on at our rate (unless paused), though never past
+    /// what the server got: it stops there when the sound runs out.
+    fn delay(&self) -> Result<u64> {
+        let handed = self.ring.handed();
+        let mut clock = self.clock.locked();
+        let heard = match clock.heard {
+            Some((heard, at)) if at.elapsed() < DELAY_REFRESH => {
+                let gone = if clock.paused { 0 } else { (at.elapsed().as_secs_f64() * f64::from(RATE)) as u64 };
+                (heard + gone).min(handed)
+            }
+            _ => {
+                let heard = handed.saturating_sub(self.server_delay()?);
+                clock.heard = Some((heard, Instant::now()));
+                heard
+            }
+        };
+        Ok(handed - heard)
     }
 }
 
 impl Drop for Pulse {
     fn drop(&mut self) {
+        let _ = self.call(Command::DeletePlaybackStream(self.channel));
         // The thread stops once its channel is closed.
         self.requests = None;
         self.wake.signal();
@@ -464,72 +245,50 @@ impl Drop for Pulse {
     }
 }
 
-/// Where the sound goes. On Linux a PulseAudio (PipeWire) server, or an ALSA device when there is
-/// none; `YMUSIC_OUTPUT=pulse` or `alsa` forces one of them. On macOS Core Audio, or a PulseAudio
-/// server with `YMUSIC_OUTPUT=pulse`.
-pub enum Output {
-    Pulse(Pulse),
-    #[cfg(target_os = "linux")]
-    Alsa(super::alsa::Alsa),
-    #[cfg(target_os = "macos")]
-    CoreAudio(super::coreaudio::CoreAudio),
+/// A sound output: takes the frames from the ring at its own pace.
+pub trait Sink: Send {
+    fn set_paused(&self, paused: bool) -> Result<()>;
+    /// Drops the sound on its way (after the ring was cleared).
+    fn flush(&self) -> Result<()>;
+    /// Frames handed on that are not heard yet.
+    fn delay(&self) -> Result<u64>;
 }
 
+/// Where the sound goes. On Linux a PulseAudio (PipeWire) server, or an ALSA device when there is
+/// none; `YMUSIC_OUTPUT=pulse` or `alsa` forces one of them. On macOS Core Audio, or a PulseAudio
+/// server with `YMUSIC_OUTPUT=pulse`. Closed when dropped.
+pub struct Output(Box<dyn Sink>);
+
 impl Output {
-    pub fn open(ring: Arc<Ring>) -> Result<Output> {
+    pub fn open(ring: Arc<Ring>, options: &Options) -> Result<Output> {
+        let pulse = |ring| Pulse::open(ring).map(|p| Output(Box::new(p)));
         #[cfg(target_os = "linux")]
         {
-            let alsa = |ring: Arc<Ring>| super::alsa::Alsa::open(ring).map(Output::Alsa);
-            match crate::config::env_str("OUTPUT").as_deref() {
+            let alsa = |ring| super::alsa::Alsa::open(ring, options.alsa_device.as_deref()).map(|a| Output(Box::new(a)));
+            match options.output.as_deref() {
                 Some("alsa") => alsa(ring),
-                Some("pulse") => Pulse::open(ring).map(Output::Pulse),
-                _ => Pulse::open(ring.clone()).map(Output::Pulse).or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
+                Some("pulse") => pulse(ring),
+                _ => pulse(ring.clone()).or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
             }
         }
         #[cfg(target_os = "macos")]
-        match crate::config::env_str("OUTPUT").as_deref() {
-            Some("pulse") => Pulse::open(ring).map(Output::Pulse),
-            _ => super::coreaudio::CoreAudio::open(ring).map(Output::CoreAudio),
+        match options.output.as_deref() {
+            Some("pulse") => pulse(ring),
+            _ => super::coreaudio::CoreAudio::open(ring).map(|c| Output(Box::new(c))),
         }
     }
 
     pub fn set_paused(&self, paused: bool) -> Result<()> {
-        match self {
-            Output::Pulse(p) => p.set_paused(paused),
-            #[cfg(target_os = "linux")]
-            Output::Alsa(a) => a.set_paused(paused),
-            #[cfg(target_os = "macos")]
-            Output::CoreAudio(c) => c.set_paused(paused),
-        }
+        self.0.set_paused(paused)
     }
 
-    /// Drops the sound on its way (after the ring was cleared).
     pub fn flush(&self) -> Result<()> {
-        match self {
-            Output::Pulse(p) => p.flush(),
-            #[cfg(target_os = "linux")]
-            Output::Alsa(a) => a.flush(),
-            #[cfg(target_os = "macos")]
-            Output::CoreAudio(c) => c.flush(),
-        }
+        self.0.flush()
     }
 
     /// Frames heard so far: handed on minus what is still buffered on the way to the speakers.
     pub fn played(&self, ring: &Ring) -> Result<u64> {
-        let delay = match self {
-            Output::Pulse(p) => p.delay()?,
-            #[cfg(target_os = "linux")]
-            Output::Alsa(a) => a.delay()?,
-            #[cfg(target_os = "macos")]
-            Output::CoreAudio(c) => c.delay()?,
-        };
-        Ok(ring.handed().saturating_sub(delay))
-    }
-
-    pub fn close(self) {
-        if let Output::Pulse(p) = self {
-            p.close();
-        }
+        Ok(ring.handed().saturating_sub(self.0.delay()?))
     }
 }
 
@@ -555,7 +314,7 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
             }
             while conn.requested >= FRAME && out.len() < 256 * 1024 {
                 chunk.clear();
-                let n = ring.take(conn.requested.min(64 * 1024), &mut chunk);
+                let n = ring.take_bytes(conn.requested.min(64 * 1024), &mut chunk);
                 if n == 0 {
                     break;
                 }
@@ -614,37 +373,5 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
         for (_, reply) in pending.drain() {
             let _ = reply.send(Err(format!("{e:#}")));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Mark, Ring, RING_SAMPLES};
-    use std::sync::Arc;
-
-    #[test]
-    fn marks_and_clearing() {
-        let ring = Arc::new(Ring::default());
-        let gen = ring.begin(1);
-        assert_eq!(ring.mark(Mark::Start { job: 1, at: 0.0, duration: None, gapless: false }), gen);
-        assert!(ring.push(&[0.5; 100], gen));
-        ring.mark(Mark::End);
-        assert_eq!(ring.reached(0).len(), 1);
-        assert!(ring.reached(49).is_empty());
-        assert_eq!(ring.reached(50), vec![(50, Mark::End)]);
-
-        // A full ring blocks the producer until it is cleared; then its push reports that.
-        let r = ring.clone();
-        let producer = std::thread::spawn(move || r.push(&vec![0.0; RING_SAMPLES * 2], gen));
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        assert!(!producer.is_finished());
-        assert!(!ring.request_seek(2, 10.0), "not the job being decoded");
-        assert!(ring.request_seek(1, 10.0));
-        assert!(!producer.join().unwrap());
-        let (new_gen, seek) = ring.poll_seek();
-        assert_eq!((new_gen, seek), (gen + 1, Some(10.0)));
-        assert_eq!(ring.poll_seek().1, None);
-        // Everything pushed counts as handed: playback position continues from there.
-        assert_eq!(ring.handed(), ring.state.lock().unwrap().pushed);
     }
 }

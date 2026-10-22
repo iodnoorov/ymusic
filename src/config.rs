@@ -1,70 +1,120 @@
+use crate::api::{quality_index, Quality, QUALITIES};
+use crate::app::Art;
+use crate::eq::{index as eq_index, Preset, PRESETS};
+use crate::queue::Repeat;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize, Debug)]
+/// No `Debug`: printing the config would print the token.
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-    #[serde(default = "default_volume")]
-    pub volume: u8,
-    /// Nerd Font icons (false — plain Unicode symbols).
-    #[serde(default = "default_true")]
-    pub icons: bool,
-    /// What «Сейчас играет» shows above the track: `cover`, `spectrum` or `none` (see `app::Art`).
-    #[serde(default)]
-    pub art: String,
+    #[serde(flatten)]
+    pub settings: Settings,
     /// Older configs: `false` — no cover; read once into `art` and not written back.
     #[serde(default = "default_true", skip_serializing)]
     pub covers: bool,
-    /// Equalizer preset id (see `eq::PRESETS`).
-    #[serde(default)]
-    pub eq: String,
-    /// Sound quality id (see `api::QUALITIES`).
-    #[serde(default)]
-    pub quality: String,
-    /// Fade-in at the start and fade-out at the end of each track, seconds (0 — off).
-    #[serde(default)]
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config { token: None, settings: Settings::default(), covers: true }
+    }
+}
+
+/// What the program remembers between runs, as the settings window and the keys change it.
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct Settings {
+    pub volume: u8,
+    /// Nerd Font icons (false — plain Unicode symbols).
+    pub icons: bool,
+    /// What «Сейчас играет» shows above the track; not set in older configs (see `Config::covers`).
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub art: Option<Art>,
+    /// Equalizer preset, stored by its id.
+    #[serde(serialize_with = "by_id", deserialize_with = "preset")]
+    pub eq: &'static Preset,
+    /// Sound quality, stored by its id.
+    #[serde(serialize_with = "by_id", deserialize_with = "quality")]
+    pub quality: &'static Quality,
+    /// Crossfade: the end of a track overlaps the start of the next one, seconds (0 — off).
     pub crossfade: u8,
     /// A new list starts after the current track instead of cutting it off.
-    #[serde(default)]
     pub finish_track: bool,
-    /// Repeat mode: `off`, `all` or `one` (see `app::Repeat`).
-    #[serde(default)]
-    pub repeat: String,
+    #[serde(deserialize_with = "lenient")]
+    pub repeat: Repeat,
     /// Requests go to the API of the music.yandex.ru website instead of the mobile one.
-    #[serde(default)]
     pub web_api: bool,
 }
 
-/// Longest allowed fade-in/fade-out, seconds.
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            volume: 70,
+            icons: true,
+            art: None,
+            eq: &PRESETS[0],
+            quality: &QUALITIES[quality_index("")],
+            crossfade: 0,
+            finish_track: false,
+            repeat: Repeat::Off,
+            web_api: false,
+        }
+    }
+}
+
+/// Something stored by its id in the config.
+trait Id {
+    fn id(&self) -> &'static str;
+}
+
+impl Id for &'static Preset {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+}
+
+impl Id for &'static Quality {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+}
+
+fn by_id<S: Serializer>(v: &impl Id, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(v.id())
+}
+
+/// The id as a string; anything else is no id (and gets the default).
+fn id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_str().unwrap_or_default().to_string())
+}
+
+/// An unknown preset is the flat one.
+fn preset<'de, D: Deserializer<'de>>(d: D) -> Result<&'static Preset, D::Error> {
+    Ok(&PRESETS[eq_index(&id(d)?)])
+}
+
+/// An unknown quality is the normal one.
+fn quality<'de, D: Deserializer<'de>>(d: D) -> Result<&'static Quality, D::Error> {
+    Ok(&QUALITIES[quality_index(&id(d)?)])
+}
+
+/// An unknown or broken value is the default instead of an error: one stale setting must not throw
+/// the whole config (and the token in it) away.
+fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
+    Ok(T::deserialize(serde_json::Value::deserialize(d)?).unwrap_or_default())
+}
+
+/// Longest allowed crossfade, seconds.
 pub const MAX_CROSSFADE: u8 = 15;
 
 fn default_true() -> bool {
     true
-}
-
-fn default_volume() -> u8 {
-    70
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            token: None,
-            volume: default_volume(),
-            icons: true,
-            art: String::new(),
-            covers: true,
-            eq: String::new(),
-            quality: String::new(),
-            crossfade: 0,
-            finish_track: false,
-            repeat: String::new(),
-            web_api: false,
-        }
-    }
 }
 
 /// Environment variable `YMUSIC_<name>`.
@@ -140,7 +190,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, Settings};
     use std::os::unix::fs::PermissionsExt;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -148,6 +198,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The file keeps its format: an older config is read as it is, unknown values are defaults
+    /// (not a broken config), and the settings are written under the same names.
+    #[test]
+    fn settings_format() {
+        use crate::app::Art;
+        use crate::queue::Repeat;
+        let cfg: Config = serde_json::from_str(
+            r#"{"token": "t", "volume": 40, "art": "spectrum", "eq": "laptop", "quality": "lq", "repeat": "one",
+                "crossfade": 5, "finish_track": true, "web_api": true, "icons": false}"#,
+        )
+        .unwrap();
+        let s = &cfg.settings;
+        assert_eq!((s.volume, s.art, s.eq.id, s.quality.id, s.repeat), (40, Some(Art::Spectrum), "laptop", "lq", Repeat::One));
+        assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5);
+        let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back["art"], "spectrum");
+        assert_eq!(back["eq"], "laptop");
+        assert_eq!(back["quality"], "lq");
+        assert_eq!(back["repeat"], "one");
+
+        // Stale or empty values, as older versions wrote them: defaults, the token stays.
+        let cfg: Config =
+            serde_json::from_str(r#"{"token": "t", "art": "", "eq": "gone", "quality": 5, "repeat": "", "covers": false}"#).unwrap();
+        assert_eq!(cfg.token.as_deref(), Some("t"));
+        assert!(cfg.settings == Settings::default());
+        assert!(!cfg.covers, "the old switch is still read");
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("covers"), "and not written back");
+        // A missing file: covers are on.
+        assert!(Config::default().covers);
     }
 
     #[test]
@@ -172,12 +253,12 @@ mod tests {
         let link = d.join("config.json");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let cfg = Config { token: Some("t".into()), volume: 120, ..Config::default() };
+        let cfg = Config { token: Some("t".into()), settings: Settings { volume: 120, ..Settings::default() }, ..Config::default() };
         cfg.save_to(&link).unwrap();
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
         let back = Config::load_from(&link);
-        assert_eq!((back.token.as_deref(), back.volume), (Some("t"), 120));
+        assert_eq!((back.token.as_deref(), back.settings.volume), (Some("t"), 120));
         assert!(!d.join("real.json.tmp").exists());
         let _ = std::fs::remove_dir_all(&d);
     }

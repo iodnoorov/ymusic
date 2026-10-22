@@ -1,42 +1,71 @@
-[package]
-name = "ymusic-cli"
+[workspace]
+members = ["crates/*"]
+# `cargo build` and `cargo test` in the root take all the crates.
+default-members = [".", "crates/*"]
+resolver = "3"
+
+[workspace.package]
 version = "3.4.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.89"
-description = "Terminal client for Yandex Music: My Wave, likes, stations"
 license = "MIT"
 repository = "https://github.com/iodnoorov/ymusic"
+
+[workspace.dependencies]
+ymusic-api = { path = "crates/ymusic-api" }
+ymusic-core = { path = "crates/ymusic-core" }
+ymusic-player = { path = "crates/ymusic-player" }
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+libc = "0.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+await_holding_lock = "warn"
+
+[package]
+name = "ymusic-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal client for Yandex Music: My Wave, likes, stations"
 readme = "README.md"
 keywords = ["yandex", "music", "tui", "player", "cli"]
 categories = ["command-line-utilities", "multimedia::audio"]
+# Installed from the repository (AUR, `cargo install --git`), not from crates.io.
+publish = false
 
 [[bin]]
 name = "ymusic"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1"
+ymusic-api.workspace = true
+ymusic-core.workspace = true
+ymusic-player.workspace = true
+anyhow.workspace = true
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-fdk-aac = "0.8"
-hmac = "0.12"
-md-5 = "0.10"
+image.workspace = true
+libc.workspace = true
 ratatui = "0.29"
 ratatui-image = { version = "8.1", default-features = false, features = ["crossterm"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-libc = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-pulseaudio = "0.3.2"
-sha2 = "0.10"
-symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "aac", "mp3"] }
-symphonia-adapter-fdk-aac = "0.2"
+serde.workspace = true
+serde_json.workspace = true
 signal-hook = "0.3"
-ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "1"
-rustls-native-certs = "0.8"
+
+[dev-dependencies]
+ymusic-core = { workspace = true, features = ["testing"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "6", default-features = false, features = ["default-rt", "service"] }
@@ -48,6 +77,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFRunLoop", "CFString"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSDictionary", "NSGeometry", "NSObject", "NSString", "NSURL", "NSValue"] }
 objc2-media-player = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "MPNowPlayingInfoCenter", "MPRemoteCommandCenter", "MPRemoteCommand", "MPRemoteCommandEvent", "MPMediaItem", "MPMediaItemCollection", "MPMediaEntity", "MPRemoteControlTypes", "objc2-core-foundation"] }
+
+[lints]
+workspace = true
 
 [profile.release]
 lto = "thin"

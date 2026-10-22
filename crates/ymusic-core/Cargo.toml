@@ -1,0 +1,23 @@
+[package]
+name = "ymusic-core"
+description = "Logic of ymusic without the outside world: the play queue and the account's lists"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ymusic-api.workspace = true
+serde.workspace = true
+
+[features]
+# Helpers for the app's tests to set up a state directly.
+testing = []
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -3,6 +3,7 @@
 //! thread of its own; the app hands over its state as it changes, and the commands come back
 //! to it as messages.
 
+use crate::Lock;
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
@@ -44,7 +45,7 @@ enum Update {
 impl Inbox {
     /// Queues an update; dropped once the D-Bus thread is gone (no session bus, say).
     fn push(&self, u: Update) {
-        let mut q = self.0.lock().unwrap();
+        let mut q = self.0.locked();
         if q.2 {
             return;
         }
@@ -55,7 +56,7 @@ impl Inbox {
     }
 
     fn close(&self) {
-        let mut q = self.0.lock().unwrap();
+        let mut q = self.0.locked();
         q.2 = true;
         if let Some(w) = q.1.take() {
             w.wake();
@@ -65,7 +66,7 @@ impl Inbox {
     /// The next update; `None` once closed.
     async fn next(&self) -> Option<Update> {
         poll_fn(|cx| {
-            let mut q = self.0.lock().unwrap();
+            let mut q = self.0.locked();
             if let Some(u) = q.0.pop_front() {
                 return Poll::Ready(Some(u));
             }
@@ -105,7 +106,7 @@ impl Mpris {
         if self.clock.seeked(position, self.last.status == Status::Playing, same_track) {
             self.inbox.push(Update::Seeked(position));
         }
-        let mut cur = self.current.lock().unwrap();
+        let mut cur = self.current.locked();
         cur.position = position;
         if state != self.last {
             let changed = Update::Changed {
@@ -229,7 +230,7 @@ fn owned<'a>(v: impl Into<Variant<'a>>) -> OwnedVariant {
 
 impl Player {
     fn has_track(&self) -> bool {
-        self.current.lock().unwrap().state.track.is_some()
+        self.current.locked().state.track.is_some()
     }
 }
 
@@ -265,7 +266,7 @@ impl Player {
     }
 
     fn set_position(&self, track_id: ObjectPath<'_>, position: i64) {
-        let current = self.current.lock().unwrap().state.track.as_ref().map(|t| track_path(&t.id));
+        let current = self.current.locked().state.track.as_ref().map(|t| track_path(&t.id));
         // A request for another track than the current one is ignored, as the specification says.
         if current.as_deref() == Some(track_id.as_str()) && position >= 0 {
             (self.send)(Remote::SeekTo(position as f64 / 1e6));
@@ -276,7 +277,7 @@ impl Player {
 
     #[zbus(property)]
     fn playback_status(&self) -> String {
-        match self.current.lock().unwrap().state.status {
+        match self.current.locked().state.status {
             Status::Playing => "Playing",
             Status::Paused => "Paused",
             Status::Stopped => "Stopped",
@@ -301,7 +302,7 @@ impl Player {
 
     #[zbus(property)]
     fn metadata(&self) -> HashMap<String, OwnedVariant> {
-        let cur = self.current.lock().unwrap();
+        let cur = self.current.locked();
         let mut m = HashMap::new();
         let Some(t) = &cur.state.track else {
             m.insert("mpris:trackid".into(), owned(ObjectPath::from_static_str_unchecked(NO_TRACK)));
@@ -323,7 +324,7 @@ impl Player {
 
     #[zbus(property)]
     fn volume(&self) -> f64 {
-        self.current.lock().unwrap().state.volume / 100.0
+        self.current.locked().state.volume / 100.0
     }
 
     #[zbus(property)]
@@ -333,7 +334,7 @@ impl Player {
 
     #[zbus(property)]
     fn loop_status(&self) -> String {
-        match self.current.lock().unwrap().state.repeat {
+        match self.current.locked().state.repeat {
             Repeat::Off => "None",
             Repeat::All => "Playlist",
             Repeat::One => "Track",
@@ -354,7 +355,7 @@ impl Player {
     /// The playing list in random order (a wave cannot be).
     #[zbus(property)]
     fn shuffle(&self) -> bool {
-        self.current.lock().unwrap().state.shuffle
+        self.current.locked().state.shuffle
     }
 
     #[zbus(property)]
@@ -365,7 +366,7 @@ impl Player {
     /// Asked for when needed (the desktop counts it on itself between `Seeked` signals).
     #[zbus(property(emits_changed_signal = "false"))]
     fn position(&self) -> i64 {
-        (self.current.lock().unwrap().position * 1e6) as i64
+        (self.current.locked().position * 1e6) as i64
     }
 
     #[zbus(property)]
@@ -432,7 +433,7 @@ mod tests {
     }
 
     fn drain(m: &Mpris) -> Vec<String> {
-        let mut q = m.inbox.0.lock().unwrap();
+        let mut q = m.inbox.0.locked();
         q.0.drain(..)
             .map(|u| match u {
                 Update::Changed { track, status, volume, repeat, shuffle } => {
@@ -467,7 +468,7 @@ mod tests {
         // A new track starting from 0 is not a seek.
         m.sync(state("2", Status::Playing), 0.0);
         assert_eq!(drain(&m), ["changed true true false true true"]);
-        assert_eq!(m.current.lock().unwrap().position, 0.0);
+        assert_eq!(m.current.locked().position, 0.0);
     }
 
     #[test]
