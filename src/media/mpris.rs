@@ -7,62 +7,14 @@ use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
-use std::time::Instant;
 use zbus::object_server::SignalEmitter;
 use zbus::{ObjectPath, OwnedVariant, Variant};
+
+use super::{Clock, Remote, State, Status};
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
 const NAME: &str = "org.mpris.MediaPlayer2.ymusic";
 const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
-/// A position this far both from where playback should be by now and from where it was is a
-/// seek (a stall — loading, a slow network — goes on from where it was).
-const SEEK_JUMP: f64 = 1.5;
-
-/// A command from the desktop.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Remote {
-    PlayPause,
-    Play,
-    Pause,
-    Next,
-    Previous,
-    /// Seek by this many seconds.
-    Seek(f64),
-    /// Go to this position of the current track, seconds.
-    SeekTo(f64),
-    /// Volume, % (100 — normal).
-    Volume(f64),
-    Quit,
-}
-
-/// What the desktop is shown.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct State {
-    pub track: Option<TrackInfo>,
-    pub status: Status,
-    /// Volume, % (100 — normal).
-    pub volume: f64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum Status {
-    Playing,
-    Paused,
-    #[default]
-    Stopped,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TrackInfo {
-    pub id: String,
-    pub title: String,
-    pub artists: String,
-    pub album: String,
-    /// Seconds.
-    pub length: f64,
-    pub art_url: Option<String>,
-    pub url: String,
-}
 
 /// D-Bus object path of a track (only letters, digits and `_` are allowed in its elements).
 fn track_path(id: &str) -> String {
@@ -131,9 +83,7 @@ pub struct Mpris {
     inbox: Arc<Inbox>,
     current: Arc<Mutex<Current>>,
     last: State,
-    /// Last position told and when: where playback should be now.
-    last_pos: f64,
-    last_at: Instant,
+    clock: Clock,
 }
 
 impl Mpris {
@@ -146,22 +96,14 @@ impl Mpris {
             let _ = zbus::block_on(serve(i.clone(), c, s));
             i.close();
         });
-        Mpris { inbox, current, last: State::default(), last_pos: 0.0, last_at: Instant::now() }
+        Mpris { inbox, current, last: State::default(), clock: Clock::default() }
     }
 
     /// Takes the app's state and position (seconds), tells the desktop what changed.
     pub fn sync(&mut self, state: State, position: f64) {
         let same_track = state.track.as_ref().map(|t| &t.id) == self.last.track.as_ref().map(|t| &t.id);
-        if position != self.last_pos {
-            let expected = match self.last.status {
-                Status::Playing => self.last_pos + self.last_at.elapsed().as_secs_f64(),
-                _ => self.last_pos,
-            };
-            if same_track && (position - expected).abs() > SEEK_JUMP && (position - self.last_pos).abs() > SEEK_JUMP {
-                self.inbox.push(Update::Seeked(position));
-            }
-            self.last_pos = position;
-            self.last_at = Instant::now();
+        if self.clock.seeked(position, self.last.status == Status::Playing, same_track) {
+            self.inbox.push(Update::Seeked(position));
         }
         let mut cur = self.current.lock().unwrap();
         cur.position = position;
@@ -424,6 +366,8 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::TrackInfo;
+    use std::time::Instant;
 
     fn state(id: &str, status: Status) -> State {
         let track = TrackInfo {
@@ -444,8 +388,7 @@ mod tests {
             inbox: Arc::new(Inbox::default()),
             current: Arc::new(Mutex::new(Current::default())),
             last: State::default(),
-            last_pos: 0.0,
-            last_at: Instant::now(),
+            clock: Clock::default(),
         }
     }
 
@@ -471,7 +414,7 @@ mod tests {
         m.sync(state("1", Status::Playing), 10.25);
         assert_eq!(drain(&m), ["seeked 10.25"]);
         // A stall (the position stood still for 3 s) is not.
-        m.last_at = Instant::now() - std::time::Duration::from_secs(3);
+        m.clock.at = Instant::now() - std::time::Duration::from_secs(3);
         m.sync(state("1", Status::Playing), 10.5);
         assert!(drain(&m).is_empty());
         m.sync(state("1", Status::Paused), 10.5);

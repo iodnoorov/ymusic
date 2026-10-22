@@ -5,7 +5,7 @@ mod clipboard;
 mod config;
 mod eq;
 mod input;
-mod mpris;
+mod media;
 mod player;
 mod ui;
 
@@ -115,7 +115,7 @@ fn main() -> Result<()> {
     let mut keys = input::Reader::new();
     let mut size = ratatui::crossterm::terminal::size()?;
     // Media keys and desktop player widgets; their commands come back as messages.
-    let mut mpris = mpris::Mpris::start(move |r| {
+    let mut media = media::Media::start(move |r| {
         let _ = remote.send(app::Msg::Remote(r));
     });
     let res = (|| -> Result<()> {
@@ -169,8 +169,8 @@ fn main() -> Result<()> {
                 app.on_msg(m);
             }
             app.tick();
-            let (state, position) = app.mpris_state();
-            mpris.sync(state, position);
+            let (state, position) = app.media_state();
+            media.sync(state, position);
         }
         Ok(())
     })();

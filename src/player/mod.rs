@@ -1,8 +1,10 @@
 //! Audio playback: the own player (`engine`) — download, decoding, processing and output to the
-//! sound server or an ALSA device.
+//! sound server or an ALSA device on Linux, to Core Audio on macOS.
 
 #[cfg(target_os = "linux")]
 mod alsa;
+#[cfg(target_os = "macos")]
+mod coreaudio;
 mod decode;
 mod dsp;
 mod engine;

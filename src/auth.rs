@@ -93,6 +93,7 @@ struct Browser {
     kind: Kind,
 }
 
+#[cfg(target_os = "linux")]
 const CANDIDATES: &[&str] = &[
     "zen-browser",
     "zen",
@@ -135,6 +136,7 @@ fn which(bin: &str) -> Option<String> {
 }
 
 /// Binary of the default browser from its .desktop file.
+#[cfg(target_os = "linux")]
 fn default_browser_bin() -> Option<String> {
     let out = Command::new("xdg-settings").args(["get", "default-web-browser"]).stderr(Stdio::null()).output().ok()?;
     let desktop = String::from_utf8(out.stdout).ok()?.trim().to_string();
@@ -164,17 +166,100 @@ fn default_browser_bin() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "linux")]
+fn candidates() -> impl Iterator<Item = String> {
+    let default = default_browser_bin().and_then(|b| which(&b));
+    default.into_iter().chain(CANDIDATES.iter().filter_map(|c| which(c)))
+}
+
+#[cfg(target_os = "linux")]
+fn resolve(bin: &str) -> Option<String> {
+    which(bin)
+}
+
+/// Application bundles looked for in /Applications and ~/Applications.
+#[cfg(target_os = "macos")]
+const APPS: &[&str] = &[
+    "Zen.app",
+    "Zen Browser.app",
+    "Firefox.app",
+    "LibreWolf.app",
+    "Floorp.app",
+    "Waterfox.app",
+    "Chromium.app",
+    "Google Chrome.app",
+    "Yandex.app",
+    "Brave Browser.app",
+    "Vivaldi.app",
+    "Microsoft Edge.app",
+    "Thorium.app",
+];
+
+/// The program inside an application bundle (`Contents/MacOS/<CFBundleExecutable>`).
+#[cfg(target_os = "macos")]
+fn app_bin(app: &Path) -> Option<String> {
+    let out = Command::new("defaults")
+        .arg("read")
+        .arg(app.join("Contents/Info"))
+        .arg("CFBundleExecutable")
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let exe = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let bin = app.join("Contents/MacOS").join(exe);
+    bin.is_file().then(|| bin.to_string_lossy().into_owned())
+}
+
+/// The bundle id that handles https links in `defaults read` of LaunchServices' `LSHandlers`:
+/// entries are `{ … }` blocks, the handler is the `LSHandlerRoleAll` that is not `-` (the one
+/// inside `LSHandlerPreferredVersions`).
+#[cfg(target_os = "macos")]
+fn https_handler(handlers: &str) -> Option<String> {
+    handlers
+        .split("},")
+        .find(|e| e.lines().any(|l| l.trim() == "LSHandlerURLScheme = https;"))?
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("LSHandlerRoleAll = ")?.strip_suffix(';'))
+        .map(|v| v.trim_matches('"'))
+        .find(|v| *v != "-")
+        .map(String::from)
+}
+
+/// Binary of the default browser: its bundle id from LaunchServices, the bundle by Spotlight.
+#[cfg(target_os = "macos")]
+fn default_browser_bin() -> Option<String> {
+    let out = Command::new("defaults")
+        .args(["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let id = https_handler(&String::from_utf8(out.stdout).ok()?)?;
+    let out = Command::new("mdfind").arg(format!("kMDItemCFBundleIdentifier == '{id}'")).stderr(Stdio::null()).output().ok()?;
+    let app = String::from_utf8(out.stdout).ok()?.lines().next()?.to_string();
+    app_bin(Path::new(&app))
+}
+
+#[cfg(target_os = "macos")]
+fn candidates() -> impl Iterator<Item = String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dirs = [PathBuf::from("/Applications"), PathBuf::from(home).join("Applications")];
+    let apps = APPS.iter().flat_map(move |a| dirs.clone().map(|d| d.join(a))).filter(|p| p.is_dir());
+    default_browser_bin().into_iter().chain(apps.filter_map(|p| app_bin(&p)))
+}
+
+/// `YMUSIC_BROWSER`: a program, or on macOS also an application bundle.
+#[cfg(target_os = "macos")]
+fn resolve(bin: &str) -> Option<String> {
+    which(bin).or_else(|| app_bin(Path::new(bin)))
+}
+
 fn find_browser() -> Option<Browser> {
     if let Some(b) = crate::config::env_str("BROWSER") {
-        let bin = which(&b)?;
+        let bin = resolve(&b)?;
         let kind = classify(&bin).unwrap_or(Kind::Chromium);
         return Some(Browser { bin, kind });
     }
-    let default = default_browser_bin().and_then(|b| which(&b));
-    default
-        .into_iter()
-        .chain(CANDIDATES.iter().filter_map(|c| which(c)))
-        .find_map(|bin| classify(&bin).map(|kind| Browser { bin, kind }))
+    candidates().find_map(|bin| classify(&bin).map(|kind| Browser { bin, kind }))
 }
 
 // ---------------------------------------------------------------- browser login
@@ -479,5 +564,29 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
         let _ = (std::fs::remove_dir(a), std::fs::remove_dir(b));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn https_handler() {
+        let handlers = r#"(
+        {
+        LSHandlerContentType = "public.html";
+        LSHandlerRoleAll = "com.apple.safari";
+    },
+        {
+        LSHandlerPreferredVersions =         {
+            LSHandlerRoleAll = "-";
+        };
+        LSHandlerRoleAll = "org.mozilla.firefox";
+        LSHandlerURLScheme = https;
+    },
+        {
+        LSHandlerRoleAll = "com.google.chrome";
+        LSHandlerURLScheme = http;
+    }
+)"#;
+        assert_eq!(super::https_handler(handlers).as_deref(), Some("org.mozilla.firefox"));
+        assert_eq!(super::https_handler("()"), None);
     }
 }

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub enum Msg {
     Player(PlayerEvent),
     /// A command from the desktop (media keys, player widgets).
-    Remote(crate::mpris::Remote),
+    Remote(crate::media::Remote),
     Url { gen: u64, result: Result<String, String> },
     LikedIds(Vec<String>),
     Liked(Result<Vec<Track>, String>),
@@ -568,8 +568,8 @@ impl App {
     }
 
     /// What the desktop's player widgets show, and the position in the track (seconds).
-    pub fn mpris_state(&self) -> (crate::mpris::State, f64) {
-        use crate::mpris::{State, Status, TrackInfo};
+    pub fn media_state(&self) -> (crate::media::State, f64) {
+        use crate::media::{State, Status, TrackInfo};
         let track = self.current().map(|t| TrackInfo {
             id: t.id.clone(),
             title: t.title.clone(),
@@ -589,8 +589,8 @@ impl App {
     }
 
     /// A command from the desktop: the same as the matching key.
-    fn on_remote(&mut self, r: crate::mpris::Remote) {
-        use crate::mpris::Remote;
+    fn on_remote(&mut self, r: crate::media::Remote) {
+        use crate::media::Remote;
         let has_track = self.pos.is_some() && !self.stopped;
         match r {
             Remote::PlayPause if has_track => self.player.toggle_pause(),

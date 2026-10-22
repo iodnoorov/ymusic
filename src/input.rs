@@ -359,10 +359,31 @@ impl Reader {
 }
 
 /// Whether stdin has data within `timeout`.
+#[cfg(target_os = "linux")]
 fn wait(timeout: Duration) -> io::Result<bool> {
     let mut fd = libc::pollfd { fd: io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
     // SAFETY: one valid pollfd.
     let r = unsafe { libc::poll(&mut fd, 1, timeout.as_millis().min(i32::MAX as u128) as i32) };
+    waited(r)
+}
+
+/// Whether stdin has data within `timeout`. `poll` on macOS does not support terminals
+/// (devices), `select` does.
+#[cfg(target_os = "macos")]
+fn wait(timeout: Duration) -> io::Result<bool> {
+    let fd = io::stdin().as_raw_fd();
+    let mut tv = libc::timeval { tv_sec: timeout.as_secs() as libc::time_t, tv_usec: timeout.subsec_micros() as libc::suseconds_t };
+    // SAFETY: a zeroed fd_set is empty; stdin is below FD_SETSIZE.
+    let r = unsafe {
+        let mut set: libc::fd_set = std::mem::zeroed();
+        libc::FD_SET(fd, &mut set);
+        libc::select(fd + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
+    };
+    waited(r)
+}
+
+/// What `poll` or `select` returned: data, none in time (or a signal came), or an error.
+fn waited(r: i32) -> io::Result<bool> {
     match r {
         r if r > 0 => Ok(true),
         0 => Ok(false),

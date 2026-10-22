@@ -173,9 +173,8 @@ impl Ring {
         frames * FRAME
     }
 
-    /// For the ALSA output thread: moves up to `max` frames to `out`; returns the frames moved.
-    /// When there are none, the thread is woken once some are pushed.
-    #[cfg(target_os = "linux")]
+    /// For the ALSA output thread and the Core Audio callback: moves up to `max` frames to `out`;
+    /// returns the frames moved. When there are none, a thread is woken once some are pushed.
     pub(super) fn take_samples(&self, max: usize, out: &mut Vec<f32>) -> usize {
         let mut s = self.state.lock().unwrap();
         let frames = max.min(s.samples.len() / 2);
@@ -461,24 +460,32 @@ impl Drop for Pulse {
     }
 }
 
-/// Where the sound goes: a PulseAudio (PipeWire) server, or an ALSA device when there is none.
-/// `YMUSIC_OUTPUT=pulse` or `alsa` forces one of them.
+/// Where the sound goes. On Linux a PulseAudio (PipeWire) server, or an ALSA device when there is
+/// none; `YMUSIC_OUTPUT=pulse` or `alsa` forces one of them. On macOS Core Audio, or a PulseAudio
+/// server with `YMUSIC_OUTPUT=pulse`.
 pub enum Output {
     Pulse(Pulse),
     #[cfg(target_os = "linux")]
     Alsa(super::alsa::Alsa),
+    #[cfg(target_os = "macos")]
+    CoreAudio(super::coreaudio::CoreAudio),
 }
 
 impl Output {
     pub fn open(ring: Arc<Ring>) -> Result<Output> {
         #[cfg(target_os = "linux")]
-        let alsa = |ring: Arc<Ring>| super::alsa::Alsa::open(ring).map(Output::Alsa);
-        #[cfg(not(target_os = "linux"))]
-        let alsa = |_: Arc<Ring>| -> Result<Output> { Err(anyhow!("ALSA is only on Linux")) };
+        {
+            let alsa = |ring: Arc<Ring>| super::alsa::Alsa::open(ring).map(Output::Alsa);
+            match crate::config::env_str("OUTPUT").as_deref() {
+                Some("alsa") => alsa(ring),
+                Some("pulse") => Pulse::open(ring).map(Output::Pulse),
+                _ => Pulse::open(ring.clone()).map(Output::Pulse).or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
+            }
+        }
+        #[cfg(target_os = "macos")]
         match crate::config::env_str("OUTPUT").as_deref() {
-            Some("alsa") => alsa(ring),
             Some("pulse") => Pulse::open(ring).map(Output::Pulse),
-            _ => Pulse::open(ring.clone()).map(Output::Pulse).or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
+            _ => super::coreaudio::CoreAudio::open(ring).map(Output::CoreAudio),
         }
     }
 
@@ -487,6 +494,8 @@ impl Output {
             Output::Pulse(p) => p.set_paused(paused),
             #[cfg(target_os = "linux")]
             Output::Alsa(a) => a.set_paused(paused),
+            #[cfg(target_os = "macos")]
+            Output::CoreAudio(c) => c.set_paused(paused),
         }
     }
 
@@ -496,6 +505,8 @@ impl Output {
             Output::Pulse(p) => p.flush(),
             #[cfg(target_os = "linux")]
             Output::Alsa(a) => a.flush(),
+            #[cfg(target_os = "macos")]
+            Output::CoreAudio(c) => c.flush(),
         }
     }
 
@@ -505,11 +516,12 @@ impl Output {
             Output::Pulse(p) => p.delay()?,
             #[cfg(target_os = "linux")]
             Output::Alsa(a) => a.delay()?,
+            #[cfg(target_os = "macos")]
+            Output::CoreAudio(c) => c.delay()?,
         };
         Ok(ring.handed().saturating_sub(delay))
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(irrefutable_let_patterns))]
     pub fn close(self) {
         if let Output::Pulse(p) = self {
             p.close();
