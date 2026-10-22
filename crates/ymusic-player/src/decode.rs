@@ -256,7 +256,7 @@ mod tests {
         let w = 2.0 * std::f64::consts::PI * f / f64::from(rate);
         let (mut s1, mut s2) = (0.0, 0.0);
         let n = pcm.len() / 2;
-        for frame in pcm.chunks_exact(2) {
+        for frame in pcm.as_chunks::<2>().0 {
             let s = f64::from(frame[0]) + 2.0 * w.cos() * s1 - s2;
             s2 = s1;
             s1 = s;
@@ -271,7 +271,7 @@ mod tests {
         let a0 = 1.0 + alpha;
         let (b0, b1, b2) = ((1.0 + w.cos()) / 2.0 / a0, -(1.0 + w.cos()) / a0, (1.0 + w.cos()) / 2.0 / a0);
         let (a1, a2) = (-2.0 * w.cos() / a0, (1.0 - alpha) / a0);
-        let mut x: Vec<f64> = pcm.chunks_exact(2).map(|f| f64::from(f[0])).collect();
+        let mut x: Vec<f64> = pcm.as_chunks::<2>().0.iter().map(|f| f64::from(f[0])).collect();
         for _ in 0..2 {
             let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
             for v in &mut x {

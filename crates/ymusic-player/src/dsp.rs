@@ -166,7 +166,7 @@ impl Limiter {
 
     /// Processes interleaved stereo; the output lags the input by the look-ahead.
     pub fn process(&mut self, samples: &mut [f32]) {
-        for frame in samples.chunks_exact_mut(2) {
+        for frame in samples.as_chunks_mut::<2>().0 {
             self.process_frame(frame);
         }
     }
@@ -207,7 +207,7 @@ impl Equalizer {
     }
 
     pub fn process(&mut self, samples: &mut [f32]) {
-        for frame in samples.chunks_exact_mut(2) {
+        for frame in samples.as_chunks_mut::<2>().0 {
             for b in &mut self.bands {
                 b.process(frame);
             }
@@ -361,7 +361,7 @@ impl Spectrum {
     /// Feeds stereo samples; for every window that fills up, calls `out` with the number of
     /// frames fed so far and the band levels (dB).
     pub fn feed(&mut self, samples: &[f32], mut out: impl FnMut(usize, Vec<f32>)) {
-        for (i, frame) in samples.chunks_exact(2).enumerate() {
+        for (i, frame) in samples.as_chunks::<2>().0.iter().enumerate() {
             let mono = (f64::from(frame[0]) + f64::from(frame[1])) / 2.0;
             self.buf.push(mono);
             for (b, buf) in &mut self.narrow {
@@ -484,7 +484,7 @@ mod tests {
         // Filtering a sine changes its level by the response.
         let mut s = sine(1000.0, 0.25, 0.5);
         let mut b = Biquad::peaking_octaves(1000.0, 1.0, 6.0, RATE);
-        for f in s.chunks_exact_mut(2) {
+        for f in s.as_chunks_mut::<2>().0 {
             b.process(f);
         }
         let tail = peak(&s[s.len() / 2..]);

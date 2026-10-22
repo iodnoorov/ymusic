@@ -420,7 +420,7 @@ mod tests {
         }
         producer.join().unwrap();
         let expected = |i: usize| [i as f32 / total as f32, -(i as f32) / total as f32];
-        assert!(got.chunks_exact(2).enumerate().all(|(i, f)| f == expected(i)));
+        assert!(got.as_chunks::<2>().0.iter().enumerate().all(|(i, f)| *f == expected(i)));
         assert_eq!(ring.handed(), total as u64);
     }
 }

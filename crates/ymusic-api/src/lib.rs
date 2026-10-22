@@ -349,10 +349,16 @@ impl From<&str> for ApiError {
     }
 }
 
-fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
-    match r {
-        Ok(resp) => Ok(resp.into_json()?),
-        Err(ureq::Error::Status(code, resp)) => {
+/// The outcome of a request; the error is boxed, being large.
+type Sent = std::result::Result<ureq::Response, Box<ureq::Error>>;
+
+fn handle(r: Sent) -> Result<Value> {
+    let e = match r {
+        Ok(resp) => return Ok(resp.into_json()?),
+        Err(e) => *e,
+    };
+    match e {
+        ureq::Error::Status(code, resp) => {
             let body = resp.into_string().unwrap_or_default();
             let msg = serde_json::from_str::<Value>(&body)
                 .ok()
@@ -374,7 +380,7 @@ fn handle(r: Result<ureq::Response, ureq::Error>) -> Result<Value> {
             }
             .into())
         }
-        Err(e) => Err(e.into()),
+        e => Err(e.into()),
     }
 }
 
@@ -415,10 +421,10 @@ impl Api {
     /// The answer itself: the mobile API wraps it in `{invocationInfo, result}`, the website API
     /// (asked with `X-Yandex-Music-Without-Invocation-Info`) does not.
     /// `send` makes the request; one turned away with 429 is made again after a pause.
-    fn result(&self, send: impl Fn() -> Result<ureq::Response, ureq::Error>) -> Result<Value> {
+    fn result(&self, send: impl Fn() -> Sent) -> Result<Value> {
         let mut r = send();
         for secs in RETRY_429_SECS {
-            if !matches!(r, Err(ureq::Error::Status(429, _))) {
+            if !matches!(&r, Err(e) if matches!(**e, ureq::Error::Status(429, _))) {
                 break;
             }
             std::thread::sleep(Duration::from_secs(secs));
@@ -429,16 +435,16 @@ impl Api {
     }
 
     fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.result(|| self.req("GET", path, query).call())
+        self.result(|| self.req("GET", path, query).call().map_err(Box::new))
     }
 
     fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<Value> {
-        self.result(|| self.req("POST", path, &[]).send_form(form))
+        self.result(|| self.req("POST", path, &[]).send_form(form).map_err(Box::new))
     }
 
     /// POST with the parameters in the query and no body, as the website sends most changes.
     fn post_query(&self, path: &str, query: &[(&str, &str)]) -> Result<Value> {
-        self.result(|| self.req("POST", path, query).call())
+        self.result(|| self.req("POST", path, query).call().map_err(Box::new))
     }
 
     /// A change: the website sends its parameters in the query, the mobile apps as a form.
@@ -451,7 +457,7 @@ impl Api {
     }
 
     fn post_json(&self, path: &str, query: &[(&str, &str)], body: Value) -> Result<Value> {
-        self.result(|| self.req("POST", path, query).send_json(body.clone()))
+        self.result(|| self.req("POST", path, query).send_json(body.clone()).map_err(Box::new))
     }
 
     // ---------------------------------------------------------------- account
@@ -781,7 +787,7 @@ impl Api {
         }
         let body = json!({"seeds": seeds, "includeTracksInResponse": true, "includeWaveModel": false, "interactive": true});
         let session = self
-            .result(|| self.rotor_req("/rotor/session/new").send_json(body.clone()))
+            .result(|| self.rotor_req("/rotor/session/new").send_json(body.clone()).map_err(Box::new))
             .and_then(|r| {
                 let id = r["radioSessionId"].as_str().ok_or_else(|| anyhow!("нет radioSessionId"))?.to_string();
                 let b = Self::parse_batch(&r, Some(id));
@@ -799,7 +805,9 @@ impl Api {
     pub fn wave_more(&self, station: &str, session: Option<&str>, queue: &[String]) -> Result<WaveBatch> {
         match session {
             Some(id) => {
-                let r = self.result(|| self.rotor_req(&format!("/rotor/session/{id}/tracks")).send_json(json!({"queue": queue})))?;
+                let r = self.result(|| {
+                    self.rotor_req(&format!("/rotor/session/{id}/tracks")).send_json(json!({"queue": queue})).map_err(Box::new)
+                })?;
                 Ok(Self::parse_batch(&r, Some(id.to_string())))
             }
             None => self.station_tracks(station, queue.last().map(String::as_str)),
@@ -1179,15 +1187,15 @@ mod tests {
 
     #[test]
     fn error_kinds() {
-        let e = handle(Err(ureq::Error::Status(401, ureq::Response::new(401, "Unauthorized", r#"{"error": {"name": "session-expired"}}"#).unwrap())))
-            .unwrap_err();
+        let refused = ureq::Response::new(401, "Unauthorized", r#"{"error": {"name": "session-expired"}}"#).unwrap();
+        let e = handle(Err(Box::new(ureq::Error::Status(401, refused)))).unwrap_err();
         let a = ApiError::from_anyhow(&e);
         assert!(a.is_unauthorized());
         assert_eq!(a.to_string(), "HTTP 401: токен недействителен, выполните `ymusic login` (session-expired)");
         // With what it happened in: the kind stays, the message tells both.
         let a = ApiError::from_anyhow(&e.context("плейлисты"));
         assert!(a.is_unauthorized() && a.to_string().starts_with("плейлисты: HTTP 401"));
-        let e = handle(Err(ureq::Error::Status(500, ureq::Response::new(500, "Oops", "boom").unwrap()))).unwrap_err();
+        let e = handle(Err(Box::new(ureq::Error::Status(500, ureq::Response::new(500, "Oops", "boom").unwrap())))).unwrap_err();
         assert_eq!(ApiError::from_anyhow(&e).kind, ErrorKind::Http(500));
         assert_eq!(ApiError::from_anyhow(&anyhow!("что-то")).kind, ErrorKind::Other);
         assert_eq!(ApiError::from("текст").to_string(), "текст");

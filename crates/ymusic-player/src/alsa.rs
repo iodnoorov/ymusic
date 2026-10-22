@@ -423,7 +423,7 @@ mod tests {
         let s = [0.0, 1.0, -1.0, 0.5, 2.0];
         let mut out = Vec::new();
         Format::S16.encode(&s, &mut out);
-        let v: Vec<i16> = out.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+        let v: Vec<i16> = out.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect();
         assert_eq!(v, [0, 32767, -32767, 16384, 32767]);
         out.clear();
         Format::S24In3.encode(&s[..4], &mut out);

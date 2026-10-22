@@ -522,7 +522,7 @@ impl Crossfade {
         scratch.clear();
         // A failing outgoing track just ends early.
         let got = self.from.read(frames, scratch).unwrap_or(0);
-        for (i, frame) in buf.chunks_exact_mut(2).enumerate() {
+        for (i, frame) in buf.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let (out, inc) = crossfade_gains((self.done + i as f64 / f64::from(RATE)) / self.len);
             let old = scratch.get(i * 2..i * 2 + 2).unwrap_or(&[0.0, 0.0]);
             frame[0] = frame[0] * inc + old[0] * out;
