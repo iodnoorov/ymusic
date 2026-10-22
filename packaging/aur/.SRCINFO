@@ -11,6 +11,6 @@ pkgbase = ymusic-cli
 	optdepends = pipewire-pulse: share the sound card with other programs (or pulseaudio; without them sound goes straight to ALSA)
 	options = !lto
 	source = ymusic-cli-3.1.1.tar.gz::https://github.com/iodnoorov/ymusic/archive/refs/tags/v3.1.1.tar.gz
-	sha256sums = SKIP
+	sha256sums = a2c2ae4c61ed10865e566725cbc3378c5c2b7576ea0649ddb098eefb0297e56c
 
 pkgname = ymusic-cli
