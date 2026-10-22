@@ -1,6 +1,7 @@
 //! Audio playback: the own player (`engine`) — download, decoding, processing and output to the
 //! sound server or an ALSA device.
 
+#[cfg(target_os = "linux")]
 mod alsa;
 mod decode;
 mod dsp;

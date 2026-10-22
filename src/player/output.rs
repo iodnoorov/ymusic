@@ -7,7 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use pulseaudio::protocol::{self, Command, TagStructRead, TagStructReader};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Cursor, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
@@ -173,6 +175,7 @@ impl Ring {
 
     /// For the ALSA output thread: moves up to `max` frames to `out`; returns the frames moved.
     /// When there are none, the thread is woken once some are pushed.
+    #[cfg(target_os = "linux")]
     pub(super) fn take_samples(&self, max: usize, out: &mut Vec<f32>) -> usize {
         let mut s = self.state.lock().unwrap();
         let frames = max.min(s.samples.len() / 2);
@@ -209,8 +212,10 @@ impl Ring {
 }
 
 /// An eventfd that wakes the output thread from its `poll`.
+#[cfg(target_os = "linux")]
 pub(super) struct Wake(OwnedFd);
 
+#[cfg(target_os = "linux")]
 impl Wake {
     pub(super) fn new() -> io::Result<Wake> {
         // SAFETY: plain syscall; the descriptor is owned from here on.
@@ -236,6 +241,37 @@ impl Wake {
         let mut buf = [0u8; 8];
         // SAFETY: reads at most 8 bytes into a live buffer from our own eventfd.
         unsafe { libc::read(self.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+    }
+}
+
+/// Elsewhere (macOS has no eventfd) a socket pair: a byte written to one end wakes the other.
+#[cfg(not(target_os = "linux"))]
+pub(super) struct Wake {
+    rx: UnixStream,
+    tx: UnixStream,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Wake {
+    pub(super) fn new() -> io::Result<Wake> {
+        let (rx, tx) = UnixStream::pair()?;
+        rx.set_nonblocking(true)?;
+        tx.set_nonblocking(true)?;
+        Ok(Wake { rx, tx })
+    }
+
+    pub(super) fn signal(&self) {
+        // A full buffer already holds a wake-up, so a failed write loses nothing.
+        let _ = (&self.tx).write(&[1]);
+    }
+
+    pub(super) fn fd(&self) -> i32 {
+        self.rx.as_raw_fd()
+    }
+
+    pub(super) fn reset(&self) {
+        let mut buf = [0u8; 64];
+        while matches!((&self.rx).read(&mut buf), Ok(n) if n > 0) {}
     }
 }
 
@@ -429,12 +465,16 @@ impl Drop for Pulse {
 /// `YMUSIC_OUTPUT=pulse` or `alsa` forces one of them.
 pub enum Output {
     Pulse(Pulse),
+    #[cfg(target_os = "linux")]
     Alsa(super::alsa::Alsa),
 }
 
 impl Output {
     pub fn open(ring: Arc<Ring>) -> Result<Output> {
+        #[cfg(target_os = "linux")]
         let alsa = |ring: Arc<Ring>| super::alsa::Alsa::open(ring).map(Output::Alsa);
+        #[cfg(not(target_os = "linux"))]
+        let alsa = |_: Arc<Ring>| -> Result<Output> { Err(anyhow!("ALSA is only on Linux")) };
         match crate::config::env_str("OUTPUT").as_deref() {
             Some("alsa") => alsa(ring),
             Some("pulse") => Pulse::open(ring).map(Output::Pulse),
@@ -445,6 +485,7 @@ impl Output {
     pub fn set_paused(&self, paused: bool) -> Result<()> {
         match self {
             Output::Pulse(p) => p.set_paused(paused),
+            #[cfg(target_os = "linux")]
             Output::Alsa(a) => a.set_paused(paused),
         }
     }
@@ -453,6 +494,7 @@ impl Output {
     pub fn flush(&self) -> Result<()> {
         match self {
             Output::Pulse(p) => p.flush(),
+            #[cfg(target_os = "linux")]
             Output::Alsa(a) => a.flush(),
         }
     }
@@ -461,11 +503,13 @@ impl Output {
     pub fn played(&self, ring: &Ring) -> Result<u64> {
         let delay = match self {
             Output::Pulse(p) => p.delay()?,
+            #[cfg(target_os = "linux")]
             Output::Alsa(a) => a.delay()?,
         };
         Ok(ring.handed().saturating_sub(delay))
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(irrefutable_let_patterns))]
     pub fn close(self) {
         if let Output::Pulse(p) = self {
             p.close();
@@ -513,7 +557,7 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
             let sock_events = libc::POLLIN | if out.is_empty() { 0 } else { libc::POLLOUT };
             let mut fds = [
                 libc::pollfd { fd: conn.sock.as_raw_fd(), events: sock_events, revents: 0 },
-                libc::pollfd { fd: wake.0.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: wake.fd(), events: libc::POLLIN, revents: 0 },
             ];
             // SAFETY: two valid pollfd entries of a live array.
             if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
