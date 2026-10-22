@@ -2207,7 +2207,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "ymusic-cli"
-version = "3.3.1"
+version = "3.4.0"
 dependencies = [
  "anyhow",
  "base64",
