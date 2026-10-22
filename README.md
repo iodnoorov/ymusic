@@ -86,7 +86,7 @@ PulseAudio, а если их нет — прямо в устройство ALSA.
 Есть сборки для x86_64 и aarch64 (ARM64); сборка для aarch64 проверена на Raspberry Pi 3 (Debian 13, 64-бит).
 
 ```bash
-V=3.2.0         # номер последнего релиза
+V=3.3.0         # номер последнего релиза
 A=$(uname -m)   # x86_64 или aarch64
 curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz
 curl -LO https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz.sha256
