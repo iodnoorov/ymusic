@@ -1,29 +1,28 @@
 # Formula of the tap iodnoorov/homebrew-tap (Formula/ymusic.rb there): the release binaries.
-# On a release: version, then the sha256 of each archive from its .sha256 file in the release.
+# On a release: the version in the four URLs, then the sha256 of each archive from its .sha256 file.
 class Ymusic < Formula
   desc "Terminal client for Yandex Music"
   homepage "https://github.com/iodnoorov/ymusic"
-  version "3.5.0"
   license all_of: ["MIT", "FDK-AAC"]
 
   on_macos do
     on_arm do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v#{version}/ymusic-#{version}-aarch64-macos.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.5.0/ymusic-3.5.0-aarch64-macos.tar.gz"
       sha256 "SHA256_AARCH64_MACOS"
     end
     on_intel do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v#{version}/ymusic-#{version}-x86_64-macos.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.5.0/ymusic-3.5.0-x86_64-macos.tar.gz"
       sha256 "SHA256_X86_64_MACOS"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v#{version}/ymusic-#{version}-aarch64-linux.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.5.0/ymusic-3.5.0-aarch64-linux.tar.gz"
       sha256 "SHA256_AARCH64_LINUX"
     end
     on_intel do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v#{version}/ymusic-#{version}-x86_64-linux.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.5.0/ymusic-3.5.0-x86_64-linux.tar.gz"
       sha256 "SHA256_X86_64_LINUX"
     end
   end
