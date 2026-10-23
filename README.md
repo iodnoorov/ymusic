@@ -141,8 +141,7 @@ cargo build --release && ./target/release/ymusic
 ### macOS
 
 Проще всего — через Homebrew (см. выше). Программа проверена на Mac с Intel (macOS 12): звук, «Исполняется»
-и медиаклавиши, вход через браузер, буфер обмена. Сборка для Apple Silicon проходит тесты в GitHub Actions, но на
-настоящем Mac с Apple Silicon пока не запускалась.
+и медиаклавиши, вход через браузер, буфер обмена, — и на Mac с Apple Silicon.
 Готовые архивы для macOS (`ymusic-X.Y.Z-x86_64-macos.tar.gz`, `…-aarch64-macos.tar.gz`) лежат и в
 [релизах](https://github.com/iodnoorov/ymusic/releases/latest). Бинарник не подписан, поэтому после скачивания
 браузером с него нужно снять карантин: `xattr -d com.apple.quarantine ymusic` (Homebrew делать этого не требует).
