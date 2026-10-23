@@ -81,6 +81,39 @@ objc2-media-player = { version = "0.3", default-features = false, features = ["s
 [lints]
 workspace = true
 
+# deb and rpm packages of the static release binary (packaging/packages.sh):
+# `cargo deb` / `cargo generate-rpm` with `--target <arch>-unknown-linux-musl`.
+[package.metadata.deb]
+name = "ymusic-cli"
+maintainer = "Ivan Odnoorov <elcheshirecat@yandex.ru>"
+license-file = "LICENSE"
+extended-description = "Terminal client for Yandex Music: My Wave, stations, likes, search, playlists, its own player."
+section = "sound"
+# A static binary: nothing to depend on.
+depends = ""
+recommends = "pipewire-pulse | pulseaudio"
+assets = [
+    ["target/release/ymusic", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/ymusic-cli/", "644"],
+    ["LICENSE-FDK-AAC", "usr/share/doc/ymusic-cli/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "ymusic-cli"
+summary = "Terminal client for Yandex Music"
+# The FDK AAC decoder is built in.
+license = "MIT AND FDK-AAC"
+auto-req = "no"
+assets = [
+    { source = "target/release/ymusic", dest = "/usr/bin/ymusic", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/ymusic-cli/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/ymusic-cli/LICENSE", mode = "644", doc = true },
+    { source = "LICENSE-FDK-AAC", dest = "/usr/share/licenses/ymusic-cli/LICENSE-FDK-AAC", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.recommends]
+pipewire-pulseaudio = "*"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -79,6 +79,25 @@ yay -S ymusic-cli       # сборка из исходников
 yay -S ymusic-cli-bin   # готовый статический бинарник из релиза GitHub
 ```
 
+### Debian, Ubuntu, Fedora и другие (deb, rpm)
+
+Пакеты `.deb` и `.rpm` для x86_64 и aarch64 лежат в [релизах](https://github.com/iodnoorov/ymusic/releases/latest).
+Внутри тот же статический бинарник, поэтому зависимостей нет (рекомендуется PipeWire или PulseAudio). Обновлений
+через `apt upgrade` / `dnf upgrade` нет: новую версию ставят так же, из релиза.
+
+```bash
+sudo apt install ./ymusic-cli_*_amd64.deb      # Debian, Ubuntu (на ARM64 — *_arm64.deb)
+sudo dnf install ./ymusic-cli-*.x86_64.rpm     # Fedora (на ARM64 — *.aarch64.rpm)
+```
+
+### Homebrew (macOS и Linux)
+
+```bash
+brew install iodnoorov/tap/ymusic
+```
+
+Ставится готовый бинарник из релиза: на macOS — для Intel или Apple Silicon, на Linux — статический.
+
 ### Готовый бинарник
 
 Статически собранный `ymusic` для Linux лежит в [релизах](https://github.com/iodnoorov/ymusic/releases/latest) —
@@ -121,11 +140,12 @@ cargo build --release && ./target/release/ymusic
 
 ### macOS
 
-Сборка для macOS (Apple Silicon и Intel) проверяется в GitHub Actions, программа проверена на Mac с Intel (macOS 12):
-звук, «Исполняется» и медиаклавиши, вход через браузер, буфер обмена. На Apple Silicon пока не запускалась.
-Готовые архивы для macOS лежат в артефактах последней сборки на вкладке
-[Actions](https://github.com/iodnoorov/ymusic/actions/workflows/macos.yml) (нужен вход в GitHub). Бинарник не подписан,
-поэтому после скачивания с него нужно снять карантин: `xattr -d com.apple.quarantine ymusic`.
+Проще всего — через Homebrew (см. выше). Программа проверена на Mac с Intel (macOS 12): звук, «Исполняется»
+и медиаклавиши, вход через браузер, буфер обмена. Сборка для Apple Silicon проходит тесты в GitHub Actions, но на
+настоящем Mac с Apple Silicon пока не запускалась.
+Готовые архивы для macOS (`ymusic-X.Y.Z-x86_64-macos.tar.gz`, `…-aarch64-macos.tar.gz`) лежат и в
+[релизах](https://github.com/iodnoorov/ymusic/releases/latest). Бинарник не подписан, поэтому после скачивания
+браузером с него нужно снять карантин: `xattr -d com.apple.quarantine ymusic` (Homebrew делать этого не требует).
 
 Из исходников — как выше через Cargo, нужны Command Line Tools (`xcode-select --install`). Звук идёт в Core Audio
 (в настройках «Вывод звука» можно выбрать PulseAudio, если он стоит), буфер обмена — через `pbcopy`/`pbpaste`, браузер для входа
