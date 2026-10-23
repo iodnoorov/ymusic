@@ -425,6 +425,45 @@ fn rgb(c: Color) -> (u8, u8, u8) {
     }
 }
 
+/// Whether the terminal takes 24-bit colours. Apple's Terminal (at least up to macOS 12) reads
+/// `38;2;r;g;b` as separate attributes and shows basic colours, but has the 256-colour palette.
+pub fn truecolor() -> bool {
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+    matches!(colorterm.as_str(), "truecolor" | "24bit") || std::env::var("TERM_PROGRAM").as_deref() != Ok("Apple_Terminal")
+}
+
+/// Replaces the 24-bit colours of a drawn frame (cover halfblocks included) with the nearest of
+/// the 256-colour palette.
+pub fn to_256(buf: &mut Buffer) {
+    for cell in &mut buf.content {
+        if let Color::Rgb(r, g, b) = cell.fg {
+            cell.fg = Color::Indexed(indexed(r, g, b));
+        }
+        if let Color::Rgb(r, g, b) = cell.bg {
+            cell.bg = Color::Indexed(indexed(r, g, b));
+        }
+    }
+}
+
+/// The nearest xterm palette entry: the 6×6×6 cube (16–231) or the grey ramp (232–255).
+fn indexed(r: u8, g: u8, b: u8) -> u8 {
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let level = |v: u8| (0..6).min_by_key(|&i| LEVELS[i].abs_diff(v)).unwrap_or(0);
+    let dist = |(x, y, z): (u8, u8, u8)| {
+        [(x, r), (y, g), (z, b)].iter().map(|&(a, c)| u32::from(a.abs_diff(c)).pow(2)).sum::<u32>()
+    };
+    let (ri, gi, bi) = (level(r), level(g), level(b));
+    let cube = (LEVELS[ri], LEVELS[gi], LEVELS[bi]);
+    let avg = (u16::from(r) + u16::from(g) + u16::from(b)) / 3;
+    let step = (avg.saturating_sub(3) / 10).min(23) as u8;
+    let grey = 8 + 10 * step;
+    if dist((grey, grey, grey)) < dist(cube) {
+        232 + step
+    } else {
+        16 + 36 * ri as u8 + 6 * gi as u8 + bi as u8
+    }
+}
+
 // ---------------------------------------------------------------- track tables
 
 /// Renders a track table building only the visible rows (lists can hold thousands of tracks).
@@ -1239,6 +1278,24 @@ mod tests {
         let mut buf = Buffer::empty(area);
         super::draw_spectrum(&mut buf, area, &[1.0, 1.0, 1.0]);
         assert_eq!((buf[(0, 0)].symbol(), buf[(1, 0)].symbol()), ("█", "█"));
+    }
+
+    #[test]
+    fn palette_256() {
+        use ratatui::style::Color;
+        assert_eq!(super::indexed(0, 0, 0), 16);
+        assert_eq!(super::indexed(255, 0, 0), 196);
+        assert_eq!(super::indexed(255, 255, 255), 231);
+        assert_eq!(super::indexed(128, 128, 128), 244);
+        // ACCENT and SEL_BG.
+        assert_eq!(super::indexed(255, 219, 77), 221);
+        assert_eq!(super::indexed(42, 42, 56), 236);
+        let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 2, 1));
+        buf[(0, 0)].set_fg(Color::Rgb(255, 0, 0)).set_bg(Color::Rgb(0, 0, 0));
+        buf[(1, 0)].set_fg(Color::Yellow);
+        super::to_256(&mut buf);
+        assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (Color::Indexed(196), Color::Indexed(16)));
+        assert_eq!(buf[(1, 0)].fg, Color::Yellow);
     }
     use ratatui::{backend::TestBackend, Terminal};
 

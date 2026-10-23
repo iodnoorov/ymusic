@@ -636,14 +636,27 @@ fn bidi_capture(stderr: std::process::ChildStderr, url: &str, child: &mut Child,
             }
         }
     };
-    ws_send(&mut ws, json!({"id": 4, "method": "browsingContext.navigate", "params": {"context": context, "url": url}}))?;
+    let navigate = json!({"id": 4, "method": "browsingContext.navigate", "params": {"context": context, "url": url}});
+    ws_send(&mut ws, navigate.clone())?;
 
     let mut id = 100;
     let tick = || {
         id += 1;
         json!({"id": id, "method": "browsingContext.getTree", "params": {}})
     };
-    wait_token(&mut ws, child, deadline, tick, |_| None)
+    // The browser's own start-up load of about:blank may still be under way and abort the
+    // navigation (NS_BINDING_ABORTED, seen on a slow machine): repeat it.
+    let mut retries = 0;
+    let react = |text: &str| {
+        let v: Value = serde_json::from_str(text).ok()?;
+        if v["id"] != 4 || v["type"] != "error" || retries >= 5 {
+            return None;
+        }
+        retries += 1;
+        std::thread::sleep(Duration::from_millis(300));
+        Some(navigate.clone())
+    };
+    wait_token(&mut ws, child, deadline, tick, react)
 }
 
 /// Chromium-based browsers: Chrome DevTools Protocol over the pipes. The browser has opened the

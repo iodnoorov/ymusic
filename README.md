@@ -120,7 +120,8 @@ cargo build --release && ./target/release/ymusic
 
 ### macOS
 
-Сборка для macOS (Apple Silicon и Intel) проверяется в GitHub Actions; на настоящем Mac программа пока не проверялась.
+Сборка для macOS (Apple Silicon и Intel) проверяется в GitHub Actions, программа проверена на Mac с Intel (macOS 12):
+звук, «Исполняется» и медиаклавиши, вход через браузер, буфер обмена. На Apple Silicon пока не запускалась.
 Готовые архивы для macOS лежат в артефактах последней сборки на вкладке
 [Actions](https://github.com/iodnoorov/ymusic/actions/workflows/macos.yml) (нужен вход в GitHub). Бинарник не подписан,
 поэтому после скачивания с него нужно снять карантин: `xattr -d com.apple.quarantine ymusic`.
@@ -128,7 +129,8 @@ cargo build --release && ./target/release/ymusic
 Из исходников — как выше через Cargo, нужны Command Line Tools (`xcode-select --install`). Звук идёт в Core Audio
 (`YMUSIC_OUTPUT=pulse` — в PulseAudio, если он стоит), буфер обмена — через `pbcopy`/`pbpaste`, браузер для входа
 берётся браузер по умолчанию или найденный в `/Applications`. Картинки и физические клавиши работают в терминалах,
-которые их поддерживают (kitty, WezTerm, Ghostty, iTerm2), в Terminal.app — нет.
+которые их поддерживают (kitty, WezTerm, Ghostty, iTerm2), в Terminal.app — нет: там обложка рисуется крупными
+блоками, а цвета берутся из 256-цветной палитры (24-битного цвета в нём нет).
 
 ## Вход
 

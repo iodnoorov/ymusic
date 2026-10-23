@@ -150,6 +150,9 @@ fn main() -> Result<()> {
     input::Reader::new().spawn(move |i| {
         let _ = input_tx.send(app::Msg::Input(i));
     });
+    // A terminal that does not know a query may print part of it (Apple's Terminal shows the
+    // kitty graphics one as text), and the first frame only writes cells that are not blank.
+    terminal.clear()?;
     let mut kitty = false;
     // Media keys and desktop player widgets; their commands come back as messages.
     let mut media = media::Media::start(move |r| {
@@ -159,6 +162,7 @@ fn main() -> Result<()> {
         // Redraw only when something changed: at once on input and messages, otherwise at
         // 12.5 fps while the spectrum moves, 5 fps while something animates and 1 fps when idle.
         // In between the loop sleeps until a message comes.
+        let truecolor = ui::truecolor();
         let mut dirty = true;
         let mut last_draw = Instant::now();
         let mut last_input = Instant::now();
@@ -176,7 +180,12 @@ fn main() -> Result<()> {
                 _ => 1000,
             });
             if dirty || last_draw.elapsed() >= frame {
-                terminal.draw(|f| ui::draw(f, &mut app))?;
+                terminal.draw(|f| {
+                    ui::draw(f, &mut app);
+                    if !truecolor {
+                        ui::to_256(f.buffer_mut());
+                    }
+                })?;
                 last_draw = Instant::now();
                 dirty = false;
             }
