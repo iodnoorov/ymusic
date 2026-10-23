@@ -1,5 +1,5 @@
 use crate::api::{quality_index, Quality, QUALITIES};
-use crate::app::Art;
+use crate::app::{Art, Output};
 use crate::eq::{index as eq_index, Preset, PRESETS};
 use crate::queue::Repeat;
 use anyhow::{Context, Result};
@@ -50,6 +50,10 @@ pub struct Settings {
     pub repeat: Repeat,
     /// Requests go to the API of the music.yandex.ru website instead of the mobile one.
     pub web_api: bool,
+    #[serde(deserialize_with = "lenient")]
+    pub output: Output,
+    /// The header shows no login and no Plus badge.
+    pub hide_account: bool,
 }
 
 impl Default for Settings {
@@ -64,6 +68,8 @@ impl Default for Settings {
             finish_track: false,
             repeat: Repeat::Off,
             web_api: false,
+            output: Output::Auto,
+            hide_account: false,
         }
     }
 }
@@ -208,21 +214,24 @@ mod tests {
         use crate::queue::Repeat;
         let cfg: Config = serde_json::from_str(
             r#"{"token": "t", "volume": 40, "art": "spectrum", "eq": "laptop", "quality": "lq", "repeat": "one",
-                "crossfade": 5, "finish_track": true, "web_api": true, "icons": false}"#,
+                "crossfade": 5, "finish_track": true, "web_api": true, "icons": false, "output": "pulse",
+                "hide_account": true}"#,
         )
         .unwrap();
         let s = &cfg.settings;
         assert_eq!((s.volume, s.art, s.eq.id, s.quality.id, s.repeat), (40, Some(Art::Spectrum), "laptop", "lq", Repeat::One));
-        assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5);
+        assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5 && s.hide_account);
+        assert_eq!(s.output, crate::app::Output::Pulse);
         let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back["art"], "spectrum");
         assert_eq!(back["eq"], "laptop");
         assert_eq!(back["quality"], "lq");
         assert_eq!(back["repeat"], "one");
+        assert_eq!(back["output"], "pulse");
 
         // Stale or empty values, as older versions wrote them: defaults, the token stays.
         let cfg: Config =
-            serde_json::from_str(r#"{"token": "t", "art": "", "eq": "gone", "quality": 5, "repeat": "", "covers": false}"#).unwrap();
+            serde_json::from_str(r#"{"token": "t", "art": "", "eq": "gone", "quality": 5, "repeat": "", "output": "jack", "covers": false}"#).unwrap();
         assert_eq!(cfg.token.as_deref(), Some("t"));
         assert!(cfg.settings == Settings::default());
         assert!(!cfg.covers, "the old switch is still read");

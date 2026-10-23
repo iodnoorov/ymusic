@@ -148,6 +148,8 @@ pub enum Modal {
     ConfirmRemove { pl: Playlist, index: usize, track: Track },
     ConfirmDelete { pl: Playlist },
     Rename { pl: Playlist, input: String },
+    /// Name of a new playlist; `track` is added to it once created.
+    NewPlaylist { input: String, track: Option<Track> },
     /// Link to a track to play.
     OpenLink { input: String },
     /// Settings window; `sel` is an index into `Setting::ALL`.
@@ -161,27 +163,31 @@ pub enum Setting {
     Quality,
     Equalizer,
     Crossfade,
+    Output,
     FinishTrack,
     Repeat,
     LessAi,
     Api,
     Art,
     Icons,
+    HideAccount,
     About,
     Logout,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 11] = [
+    pub const ALL: [Setting; 13] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
+        Setting::Output,
         Setting::FinishTrack,
         Setting::Repeat,
         Setting::LessAi,
         Setting::Api,
         Setting::Art,
         Setting::Icons,
+        Setting::HideAccount,
         Setting::About,
         Setting::Logout,
     ];
@@ -210,6 +216,55 @@ impl Art {
             Art::Spectrum => "спектр",
             Art::None => "ничего",
         }
+    }
+}
+
+/// Where the sound goes. Stored in the config as `auto`, `pulse` or `alsa`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Output {
+    /// Linux: PulseAudio or PipeWire, ALSA without a sound server. macOS: Core Audio.
+    #[default]
+    Auto,
+    /// The PulseAudio protocol: PulseAudio itself or PipeWire's pulse server.
+    Pulse,
+    /// Straight into the sound card, Linux only.
+    Alsa,
+}
+
+impl Output {
+    #[cfg(target_os = "linux")]
+    pub const ALL: &[Output] = &[Output::Auto, Output::Pulse, Output::Alsa];
+    #[cfg(not(target_os = "linux"))]
+    pub const ALL: &[Output] = &[Output::Auto, Output::Pulse];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Output::Auto if cfg!(target_os = "macos") => "Core Audio",
+            Output::Auto => "авто",
+            Output::Pulse if cfg!(target_os = "macos") => "PulseAudio",
+            Output::Pulse => "PulseAudio/PipeWire",
+            Output::Alsa => "ALSA",
+        }
+    }
+
+    /// As the player names it (`player::Options::output`).
+    pub fn id(self) -> Option<String> {
+        match self {
+            Output::Auto => None,
+            Output::Pulse => Some("pulse".into()),
+            Output::Alsa => Some("alsa".into()),
+        }
+    }
+
+    /// From the player's name (or `YMUSIC_OUTPUT`); one not available here is the usual one.
+    pub fn from_id(id: Option<&str>) -> Output {
+        let o = match id {
+            Some("pulse") => Output::Pulse,
+            Some("alsa") => Output::Alsa,
+            _ => Output::Auto,
+        };
+        if Output::ALL.contains(&o) { o } else { Output::Auto }
     }
 }
 
@@ -298,6 +353,9 @@ pub struct App {
     pub icons: bool,
     /// What «Сейчас играет» shows above the track; covers are downloaded only for `Art::Cover`.
     pub art: Art,
+    pub output: Output,
+    /// The header shows no login and no Plus badge.
+    pub hide_account: bool,
     /// Spectrum bars, 0..1 per band, low to high.
     pub spectrum: Vec<f32>,
     spectrum_asked: Instant,
@@ -389,6 +447,8 @@ impl App {
             finish_track: false,
             icons: true,
             art: Art::Cover,
+            output: Output::Auto,
+            hide_account: false,
             spectrum: vec![0.0; crate::player::SPECTRUM_BANDS],
             spectrum_asked: Instant::now(),
             clear_images: false,
@@ -494,7 +554,7 @@ impl App {
         (self.queue.pos().is_some() && !self.paused)
             || self.loading_track
             || self.search.editing
-            || matches!(self.modal, Some(Modal::Rename { .. } | Modal::OpenLink { .. }))
+            || matches!(self.modal, Some(Modal::Rename { .. } | Modal::NewPlaylist { .. } | Modal::OpenLink { .. }))
             || self.search.loading()
             || self.likes.loading()
             || self.wave.as_ref().is_some_and(|w| w.fetching)
@@ -1001,7 +1061,15 @@ impl App {
 
     /// Cover of the current track, if it is loaded.
     pub fn current_cover(&mut self) -> Option<&mut StatefulProtocol> {
-        let want = self.current()?.cover.clone()?;
+        let want = self.current().and_then(|t| t.cover.clone());
+        let Some(want) = want.filter(|w| self.covers.iter().any(|(u, _)| u == w)) else {
+            // No cover (or not loaded yet): a kitty or sixel image of the previous one would stay
+            // on the terminal over the placeholder until erased.
+            if self.shown_cover.take().is_some() {
+                self.clear_images = true;
+            }
+            return None;
+        };
         if self.shown_cover.as_ref().is_none_or(|(u, _)| *u != want) {
             let img = self.covers.iter().find(|(u, _)| *u == want)?.1.clone();
             self.shown_cover = Some((want, self.picker.as_ref()?.new_resize_protocol(img)));
@@ -1121,6 +1189,10 @@ impl App {
                 PlayerEvent::Error(e) => {
                     self.set_error(format!("Ошибка воспроизведения: {e}"));
                     self.on_track_error();
+                }
+                PlayerEvent::OutputFailed { kept, error } => {
+                    self.output = Output::from_id(kept.as_deref());
+                    self.set_error(format!("Не удалось переключить вывод звука: {error}"));
                 }
                 PlayerEvent::Died(msg) => {
                     self.exit_error = Some(msg);
@@ -1390,7 +1462,9 @@ impl App {
     pub fn on_paste(&mut self, text: &str) {
         let text: String = text.trim().chars().filter(|c| !c.is_control()).collect();
         match &mut self.modal {
-            Some(Modal::Rename { input, .. } | Modal::OpenLink { input }) => input.push_str(&text),
+            Some(Modal::Rename { input, .. } | Modal::NewPlaylist { input, .. } | Modal::OpenLink { input }) => {
+                input.push_str(&text)
+            }
             Some(_) => {}
             None if self.search.editing => self.search.input.push_str(&text),
             None if self.show_help || self.show_about => {}
@@ -1498,6 +1572,7 @@ impl App {
             Action::Remove if open => self.ask_remove_from_playlist(),
             Action::Remove if playlists => self.ask_delete_playlist(),
             Action::Rename if playlists => self.ask_rename_playlist(),
+            Action::NewPlaylist => self.modal = Some(Modal::NewPlaylist { input: String::new(), track: None }),
             Action::Back if playlists => self.playlists.open = None,
             Action::EditSearch | Action::Remove | Action::Rename | Action::Back => {}
         }
@@ -1635,6 +1710,8 @@ impl App {
             Setting::Api => if self.api.web { "сайт" } else { "мобильный" }.to_string(),
             Setting::Art => self.art.name().to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
+            Setting::Output => self.output.name().to_string(),
+            Setting::HideAccount => if self.hide_account { "вкл" } else { "выкл" }.to_string(),
             Setting::About | Setting::Logout => return None,
         })
     }
@@ -1681,6 +1758,12 @@ impl App {
                 self.set_art(Art::ALL[cycle(i, Art::ALL.len())]);
             }
             Setting::Icons => self.set_icons(!self.icons),
+            Setting::Output => {
+                let i = Output::ALL.iter().position(|o| *o == self.output).unwrap_or(0);
+                self.output = Output::ALL[cycle(i, Output::ALL.len())];
+                self.play(PlayerCmd::Output(self.output.id()));
+            }
+            Setting::HideAccount => self.hide_account = !self.hide_account,
             Setting::About | Setting::Logout => {}
         }
     }
@@ -1808,8 +1891,8 @@ impl App {
             return;
         };
         let choices = self.own_playlists();
-        if choices.is_empty() {
-            self.set_status(if self.playlists.loading() { "Плейлисты ещё загружаются…" } else { "Нет своих плейлистов" });
+        if choices.is_empty() && self.playlists.loading() {
+            self.set_status("Плейлисты ещё загружаются…");
             return;
         }
         self.modal = Some(Modal::AddTo { track, choices, sel: 0 });
@@ -1849,7 +1932,7 @@ impl App {
         let key = press.typed;
         // Text input gets characters as typed; elsewhere keys go by the physical key.
         let code = match &modal {
-            Modal::Rename { .. } | Modal::OpenLink { .. } => key.code,
+            Modal::Rename { .. } | Modal::NewPlaylist { .. } | Modal::OpenLink { .. } => key.code,
             _ => press.hotkey.code,
         };
         let clear = is_ctrl(&press.hotkey, 'u');
@@ -1857,12 +1940,16 @@ impl App {
             Modal::AddTo { track, choices, mut sel } => match code {
                 KeyCode::Esc | KeyCode::Char('q') => {}
                 KeyCode::Down | KeyCode::Char('j') => {
-                    sel = (sel + 1).min(choices.len() - 1);
+                    // The row after the playlists is «+ Новый плейлист».
+                    sel = (sel + 1).min(choices.len());
                     self.modal = Some(Modal::AddTo { track, choices, sel });
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     sel = sel.saturating_sub(1);
                     self.modal = Some(Modal::AddTo { track, choices, sel });
+                }
+                KeyCode::Enter if sel == choices.len() => {
+                    self.modal = Some(Modal::NewPlaylist { input: String::new(), track: Some(track) });
                 }
                 KeyCode::Enter => {
                     let pl = choices[sel].clone();
@@ -1934,6 +2021,28 @@ impl App {
                     self.modal = Some(Modal::Rename { pl, input });
                 }
                 _ => self.modal = Some(Modal::Rename { pl, input }),
+            },
+            Modal::NewPlaylist { mut input, track } => match code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    let title = input.trim().to_string();
+                    if title.is_empty() {
+                        self.modal = Some(Modal::NewPlaylist { input, track });
+                        return;
+                    }
+                    self.set_status(format!("Создание плейлиста «{title}»…"));
+                    self.task(Task::CreatePlaylist { title, track });
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    self.modal = Some(Modal::NewPlaylist { input, track });
+                }
+                _ if clear => self.modal = Some(Modal::NewPlaylist { input: String::new(), track }),
+                KeyCode::Char(c) if is_typed(&key) => {
+                    input.push(c);
+                    self.modal = Some(Modal::NewPlaylist { input, track });
+                }
+                _ => self.modal = Some(Modal::NewPlaylist { input, track }),
             },
             Modal::OpenLink { mut input } => match code {
                 KeyCode::Esc => {}
@@ -2096,12 +2205,35 @@ mod tests {
         for _ in 0..5 {
             app.on_key(key(KeyCode::Char('j')));
         }
-        assert!(matches!(app.modal, Some(Modal::AddTo { sel: 1, .. })));
-        app.on_key(key(KeyCode::Char('k')));
-        app.on_key(key(KeyCode::Char('k')));
+        // The last row is «+ Новый плейлист».
+        assert!(matches!(app.modal, Some(Modal::AddTo { sel: 2, .. })));
+        for _ in 0..3 {
+            app.on_key(key(KeyCode::Char('k')));
+        }
         assert!(matches!(app.modal, Some(Modal::AddTo { sel: 0, .. })));
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
+
+        // A new playlist from that row: an empty name is not accepted, the track goes along.
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(key(KeyCode::End));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&app.modal, Some(Modal::NewPlaylist { track: Some(t), .. }) if t.id == "7"));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.modal.is_some() && app.take_tasks().is_empty());
+        for c in "Новый".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert!(matches!(&app.take_tasks()[..], [Task::CreatePlaylist { title, track: Some(_) }] if title == "Новый"));
+        // `N` (by the physical key, also as `Т`): a playlist without a track.
+        app.on_key(key(KeyCode::Char('Т')));
+        app.on_paste("Ещё");
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(&app.take_tasks()[..], [Task::CreatePlaylist { title, track: None }] if title == "Ещё"));
 
         // Rename: Russian letters are typed as is (no layout mapping), Esc cancels.
         app.tab = Tab::Playlists;
@@ -2175,6 +2307,8 @@ mod tests {
         app.crossfade = 7;
         app.on_key(key(KeyCode::Left));
         assert_eq!(app.crossfade, 5, "a config value between steps snaps to the nearest one");
+        // «Вывод звука»: see `output_and_account_settings`.
+        app.on_key(key(KeyCode::Char('j')));
 
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
@@ -2238,6 +2372,8 @@ mod tests {
         assert!(!app.icons);
         app.on_key(key(KeyCode::Right));
         assert!(app.icons);
+        // «Скрыть аккаунт».
+        app.on_key(key(KeyCode::Char('j')));
 
         // «О программе» opens from the settings and returns there.
         app.on_key(key(KeyCode::Char('j')));
@@ -2245,19 +2381,19 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 9 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 11 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 10 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 12 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
         app.on_key(key(KeyCode::Char('o')));
-        for _ in 0..10 {
+        for _ in 0..12 {
             app.on_key(key(KeyCode::Char('j')));
         }
         app.on_key(key(KeyCode::Enter));
@@ -2266,6 +2402,64 @@ mod tests {
     }
 
     /// «Доигрывать трек»: a new list goes after the playing track.
+    /// Moving to a track without a loaded cover erases the image of the previous one.
+    #[test]
+    fn cover_cleared() {
+        use super::*;
+        let mut app = App::for_test();
+        app.picker = Some(Picker::from_fontsize((8, 16)));
+        let t = |id: &str, cover: Option<&str>| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: cover.map(String::from),
+            batch: None,
+        };
+        app.queue.replace(Source::Wave, vec![t("a", Some("http://x/a")), t("b", None), t("c", Some("http://x/c"))]);
+        app.covers.push(("http://x/a".into(), image::DynamicImage::new_rgb8(2, 2)));
+        app.queue.select(0);
+        assert!(app.current_cover().is_some());
+        app.queue.select(1);
+        assert!(app.current_cover().is_none() && std::mem::take(&mut app.clear_images));
+        // Nothing shown any more: no further erasing.
+        assert!(app.current_cover().is_none() && !app.clear_images);
+        app.queue.select(0);
+        assert!(app.current_cover().is_some());
+        // The next cover is still loading.
+        app.queue.select(2);
+        assert!(app.current_cover().is_none() && app.clear_images);
+    }
+
+    /// «Вывод звука» moves the sound at once; an output that fails to open is reported and the
+    /// setting shows the one still in use. «Скрыть аккаунт» is a plain switch.
+    #[test]
+    fn output_and_account_settings() {
+        use super::*;
+        use ratatui::crossterm::event::KeyEvent;
+        let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        let mut app = App::for_test();
+        app.modal = Some(Modal::Settings { sel: Setting::Output.index() });
+        app.on_key(key(KeyCode::Right));
+        assert_eq!((app.output, app.take_player()), (Output::Pulse, vec!["output pulse".to_string()]));
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Left));
+        let last = *Output::ALL.last().unwrap();
+        assert_eq!(app.output, last);
+        assert_eq!(app.take_player().last().map(String::as_str), Some(format!("output {}", last.id().unwrap()).as_str()));
+        app.on_msg(Msg::Player(PlayerEvent::OutputFailed { kept: Some("pulse".into()), error: "занято".into() }));
+        assert_eq!(app.output, Output::Pulse);
+        assert!(app.status_error);
+        app.modal = Some(Modal::Settings { sel: Setting::HideAccount.index() });
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.hide_account);
+        assert_eq!(Output::from_id(Some("jack")), Output::Auto);
+    }
+
     #[test]
     fn finish_track() {
         use super::*;

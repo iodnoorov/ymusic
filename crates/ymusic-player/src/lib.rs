@@ -56,6 +56,8 @@ pub enum PlayerEvent {
     Died(String),
     /// Levels of the spectrum bands (`SPECTRUM_BANDS`), dB, low to high.
     Spectrum(Vec<f32>),
+    /// The output asked for by `PlayerCmd::Output` did not open; `kept` is the one still in use.
+    OutputFailed { kept: Option<String>, error: String },
 }
 
 /// Bands of the spectrum visualizer: log-spaced from `SPECTRUM_LOW` to `SPECTRUM_HIGH` Hz.
@@ -104,6 +106,8 @@ pub enum PlayerCmd {
     Spectrum(bool),
     /// Asks for the current band levels: they come as `PlayerEvent::Spectrum`.
     RequestSpectrum,
+    /// Moves the sound to another output (as `Options::output`).
+    Output(Option<String>),
     Stop,
 }
 
@@ -124,6 +128,7 @@ impl std::fmt::Display for PlayerCmd {
             PlayerCmd::Fade(secs) => write!(f, "fade {secs}"),
             PlayerCmd::Spectrum(on) => write!(f, "spectrum {on}"),
             PlayerCmd::RequestSpectrum => write!(f, "spectrum?"),
+            PlayerCmd::Output(o) => write!(f, "output {}", o.as_deref().unwrap_or("auto")),
             PlayerCmd::Stop => write!(f, "stop"),
         }
     }

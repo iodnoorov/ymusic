@@ -99,8 +99,11 @@ fn main() -> Result<()> {
     let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
+    // `YMUSIC_OUTPUT` applies to this run only, as `--no-icons` below.
+    let output_env = config::env_str("OUTPUT").map(|o| app::Output::from_id(Some(&o)));
+    let output = output_env.unwrap_or(cfg.settings.output);
     let options = player::Options {
-        output: config::env_str("OUTPUT"),
+        output: output.id(),
         alsa_device: config::env_str("ALSA_DEVICE"),
         tls: api::tls_config(),
     };
@@ -114,11 +117,14 @@ fn main() -> Result<()> {
     app.set_crossfade(s.crossfade);
     app.set_art(s.art.unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None }));
     app.finish_track = s.finish_track;
+    app.output = output;
+    app.hide_account = s.hide_account;
     app.queue.set_repeat(s.repeat);
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
-    let icons = s.icons && !cli.no_icons && config::env("NO_ICONS").is_none();
-    app.set_icons(icons);
+    let no_icons = cli.no_icons || config::env("NO_ICONS").is_some();
+    app.set_icons(s.icons && !no_icons);
+    let run = RunOnly { icons: no_icons.then_some(false), output: output_env };
     app.quality = api::quality_index(s.quality.id);
     if let Some(id) = cli.station {
         app.start_station_id(&id);
@@ -236,7 +242,7 @@ fn main() -> Result<()> {
             // survive a crash or kill; not on every volume step.
             if unsaved && last_input.elapsed() >= SAVE_AFTER {
                 unsaved = false;
-                if sync_settings(&mut cfg, &app, icons) {
+                if sync_settings(&mut cfg, &app, run) {
                     let _ = cfg.save();
                 }
             }
@@ -265,7 +271,7 @@ fn main() -> Result<()> {
         let _ = done_rx.recv_timeout(Duration::from_secs(2));
     }
 
-    sync_settings(&mut cfg, &app, icons);
+    sync_settings(&mut cfg, &app, run);
     if app.logout {
         cfg.token = None;
     }
@@ -320,12 +326,24 @@ fn delete_images(picker: Option<&ratatui_image::picker::Picker>) {
     let _ = out.flush();
 }
 
-/// The settings as they are in the program now. `icons`: the value this run started with (the
-/// saved one stays unless icons are switched by hand: `--no-icons` is not saved).
-fn settings_of(app: &app::App, saved: &config::Settings, icons: bool) -> config::Settings {
+/// Values the command line or the environment set for this run only (`--no-icons`,
+/// `YMUSIC_OUTPUT`): while the program keeps them, the config keeps its own.
+#[derive(Clone, Copy)]
+struct RunOnly {
+    icons: Option<bool>,
+    output: Option<app::Output>,
+}
+
+/// The value to save: the program's, unless it is still the one set for this run only.
+fn own<T: PartialEq>(now: T, run_only: Option<T>, saved: T) -> T {
+    if run_only.is_some_and(|r| r == now) { saved } else { now }
+}
+
+/// The settings as they are in the program now.
+fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config::Settings {
     config::Settings {
         volume: app.save_volume(),
-        icons: if app.icons != icons { app.icons } else { saved.icons },
+        icons: own(app.icons, run.icons, saved.icons),
         art: Some(app.art),
         eq: &eq::PRESETS[app.eq],
         quality: &api::QUALITIES[app.quality],
@@ -333,12 +351,14 @@ fn settings_of(app: &app::App, saved: &config::Settings, icons: bool) -> config:
         finish_track: app.finish_track,
         repeat: app.queue.repeat(),
         web_api: app.api.web,
+        output: own(app.output, run.output, saved.output),
+        hide_account: app.hide_account,
     }
 }
 
 /// Copies the settings changed in the program into the config; true if any of them changed.
-fn sync_settings(cfg: &mut Config, app: &app::App, icons: bool) -> bool {
-    let now = settings_of(app, &cfg.settings, icons);
+fn sync_settings(cfg: &mut Config, app: &app::App, run: RunOnly) -> bool {
+    let now = settings_of(app, &cfg.settings, run);
     let changed = now != cfg.settings;
     cfg.settings = now;
     changed

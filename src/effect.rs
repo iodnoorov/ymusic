@@ -48,6 +48,8 @@ pub enum Task {
     RemoveFromPlaylist { pl: Playlist, index: usize, track: Track },
     DeletePlaylist(Playlist),
     RenamePlaylist { pl: Playlist, title: String },
+    /// A new playlist, with `track` added to it.
+    CreatePlaylist { title: String, track: Option<Track> },
     Artist { intent: u64, id: String, name: String },
     /// An album; `fallback` names it if the server gives no title.
     Album { intent: u64, id: String, fallback: String },
@@ -154,6 +156,19 @@ impl Task {
                 let result = api.rename_playlist(&pl, &title).map(|()| format!("Плейлист переименован: «{title}»")).map_err(text);
                 Msg::PlaylistEdited { key: pl.key(), result }
             }
+            Task::CreatePlaylist { title, track } => match api.create_playlist(&title) {
+                Ok(pl) => {
+                    let result = match &track {
+                        Some(t) => api
+                            .add_to_playlist(&pl, t)
+                            .map(|()| format!("Создан плейлист «{title}», добавлено: {}", t.title))
+                            .map_err(|e| text(e.context(format!("плейлист «{title}» создан, но трек не добавлен")))),
+                        None => Ok(format!("Создан плейлист «{title}»")),
+                    };
+                    Msg::PlaylistEdited { key: pl.key(), result }
+                }
+                Err(e) => Msg::PlaylistEdited { key: String::new(), result: Err(text(e)) },
+            },
             Task::Artist { intent, id, name } => {
                 let result = api.artist_tracks(&id).map_err(text);
                 let context = PlayContext::new("artist", id);

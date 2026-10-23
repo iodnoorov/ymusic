@@ -47,6 +47,7 @@ pub enum Action {
     /// The track from the open playlist, or the selected playlist.
     Remove,
     Rename,
+    NewPlaylist,
     /// Out of the open playlist.
     Back,
 }
@@ -168,6 +169,7 @@ pub const ROWS: &[Row] = &[
     ),
     row(Section::Playlists, "удалить трек / плейлист", &[(C('x'), A::Remove)]),
     row(Section::Playlists, "переименовать плейлист", &[(C('E'), A::Rename)]),
+    row(Section::Playlists, "новый плейлист", &[(C('N'), A::NewPlaylist)]),
 ];
 
 /// What `code` does on the main screen.

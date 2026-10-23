@@ -120,6 +120,7 @@ enum Cmd {
     Seek(f64),
     Volume(f64),
     RequestSpectrum,
+    Output(Option<String>),
     Stop,
 }
 
@@ -196,6 +197,7 @@ impl Player {
             PlayerCmd::Fade(secs) => self.shared.change(|s| s.fade = secs.max(0.0)),
             PlayerCmd::Spectrum(on) => self.shared.change(|s| s.spectrum = on),
             PlayerCmd::RequestSpectrum => self.send(Cmd::RequestSpectrum),
+            PlayerCmd::Output(output) => self.send(Cmd::Output(output)),
             PlayerCmd::Stop => self.send(Cmd::Stop),
         }
     }
@@ -246,7 +248,7 @@ impl Control {
                 // The sound server went away (or restarted): connect again once.
                 // Dropped: closed.
                 self.output = None;
-                match Output::open(self.shared.ring.clone(), &self.options).and_then(|o| o.set_paused(self.paused).map(|()| o)) {
+                match self.open_output() {
                     Ok(o) => self.output = Some(o),
                     Err(e2) => {
                         let msg = format!("звук пропал: {e:#}; переподключиться не удалось: {e2:#}");
@@ -330,9 +332,30 @@ impl Control {
                     events.push(PlayerEvent::Spectrum(levels));
                 }
             }
+            Cmd::Output(output) if output != self.options.output => {
+                let kept = std::mem::replace(&mut self.options.output, output);
+                // The old one is closed first: it may hold the device the new one needs (ALSA).
+                self.output = None;
+                match self.open_output() {
+                    Ok(o) => self.output = Some(o),
+                    Err(e) => {
+                        events.push(PlayerEvent::OutputFailed { kept: kept.clone(), error: format!("{e:#}") });
+                        self.options.output = kept;
+                        self.output = Some(self.open_output()?);
+                    }
+                }
+            }
+            Cmd::Output(_) => {}
             Cmd::Stop => self.reset()?,
         }
         Ok(())
+    }
+
+    /// Opens the output of `options`, paused or not as the player is.
+    fn open_output(&self) -> Result<Output> {
+        let output = Output::open(self.shared.ring.clone(), &self.options)?;
+        output.set_paused(self.paused)?;
+        Ok(output)
     }
 
     fn set_paused(&mut self, paused: bool, events: &mut Vec<PlayerEvent>) -> Result<()> {

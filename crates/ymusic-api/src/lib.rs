@@ -624,6 +624,13 @@ impl Api {
         Ok((title, self.tracks(&ids)?))
     }
 
+    /// Creates an empty private playlist of the current user.
+    pub fn create_playlist(&self, title: &str) -> Result<Playlist> {
+        let r = self.post_change(&format!("/users/{}/playlists/create", self.uid), &[("title", title), ("visibility", "private")])?;
+        let kind = id_str(&r["kind"]).context("сервер не сообщил номер плейлиста")?;
+        Ok(Playlist { owner: self.uid.clone(), kind, title: title.to_string(), track_count: 0 })
+    }
+
     pub fn rename_playlist(&self, pl: &Playlist, title: &str) -> Result<()> {
         self.post_change(&format!("{}/name", Self::playlist_path(pl)), &[("value", title)])?;
         Ok(())
@@ -1437,11 +1444,7 @@ mod tests {
     }
 
     fn playlist_edit_with(api: &Api) {
-        let path = format!("/users/{}/playlists/create", api.uid);
-        let form = [("title", "ymusic-test"), ("visibility", "private")];
-        let r = api.post_change(&path, &form);
-        let kind = id_str(&r.unwrap()["kind"]).expect("kind");
-        let pl = Playlist { owner: api.uid.clone(), kind, title: "ymusic-test".into(), track_count: 0 };
+        let pl = api.create_playlist("ymusic-test").unwrap();
         // Delete the playlist whatever happens below.
         struct Cleanup<'a>(&'a Api, Playlist);
         impl Drop for Cleanup<'_> {

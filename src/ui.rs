@@ -239,6 +239,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         }
         spans.push(Span::raw(" "));
     }
+    if app.hide_account {
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     let who = if app.account.login.is_empty() { app.account.name.clone() } else { app.account.login.clone() };
     let mut right = vec![Span::styled(format!("{} {who}", i.user), Style::new().fg(SUB))];
     if app.account.has_plus {
@@ -876,6 +880,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
             Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => &[("Enter", "удалить"), ("Esc", "отмена")],
             Modal::Rename { .. } => &[("Enter", "сохранить"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
+            Modal::NewPlaylist { .. } => &[("Enter", "создать"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
             Modal::OpenLink { .. } => &[("Enter", "играть"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
             Modal::Settings { .. } => &[("↑↓", "выбор"), ("←→", "изменить"), ("Enter", "открыть"), ("Esc", "закрыть")],
             Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
@@ -903,6 +908,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
                 ],
                 Tab::Playlists => &[
                     (&[A::Activate], "открыть"),
+                    (&[A::NewPlaylist], "новый"),
                     (&[A::Shuffle], "в случайном порядке"),
                     (&[A::Rename], "переименовать"),
                     (&[A::Remove], "удалить"),
@@ -1097,6 +1103,8 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Api => "API",
         Setting::Art => "Картинка",
         Setting::Icons => "Иконки Nerd Font",
+        Setting::Output => "Вывод звука",
+        Setting::HideAccount => "Скрыть аккаунт",
         Setting::About => "О программе",
         Setting::Logout => "Выйти из аккаунта",
     }
@@ -1114,6 +1122,9 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Api => "Запасной вариант — API сайта music.yandex.ru".into(),
         Setting::Art => "Над треком в «Сейчас играет»: обложка альбома или спектр".into(),
         Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
+        Setting::Output if cfg!(target_os = "macos") => "Системный вывод или PulseAudio, если он установлен".into(),
+        Setting::Output => "Авто: PipeWire или PulseAudio, без них — прямо в ALSA".into(),
+        Setting::HideAccount => "Без логина и значка Плюса в заголовке".into(),
         Setting::About => "Версия и ссылки на проект".into(),
         Setting::Logout => "Токен будет удалён, программа закроется".into(),
     }
@@ -1141,7 +1152,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
     let Some(modal) = &app.modal else { return };
     match modal {
         Modal::AddTo { track, choices, sel } => {
-            let visible = choices.len().min(12);
+            let visible = (choices.len() + 1).min(12);
             let inner = popup(f, i.queue, "Добавить в плейлист", 48, visible as u16 + 2);
             let [head, _, list] =
                 Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(inner);
@@ -1157,6 +1168,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
                         Span::styled(format!("  {} {}", p.track_count, i.note), Style::new().fg(MUTED)),
                     ]))
                 })
+                .chain([ListItem::new(Span::styled("+ Новый плейлист", Style::new().fg(ACCENT)))])
                 .collect();
             let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
             let widget = List::new(items)
@@ -1239,6 +1251,21 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), inner);
+        }
+        Modal::NewPlaylist { input, track } => {
+            let inner = popup(f, i.queue, "Новый плейлист", 48, if track.is_some() { 3 } else { 1 });
+            let mut spans = vec![Span::styled(input.clone(), Style::new().fg(Color::Reset).bold())];
+            if input.is_empty() {
+                spans.push(Span::styled("Название", Style::new().fg(MUTED)));
+            } else if (app.tick / 2).is_multiple_of(2) {
+                spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+            }
+            let mut lines = vec![Line::from(spans)];
+            if let Some(t) = track {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(format!("и добавить: {} — {}", t.title, t.artists), Style::new().fg(SUB))));
+            }
+            f.render_widget(Paragraph::new(lines), inner);
         }
         Modal::OpenLink { input } => {
             let inner = popup(f, i.link, "Играть по ссылке", 64, 1);
