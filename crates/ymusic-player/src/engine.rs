@@ -272,6 +272,9 @@ impl Control {
     }
 
     fn command(&mut self, cmd: Cmd, events: &mut Vec<PlayerEvent>) -> Result<()> {
+        if matches!(cmd, Cmd::Load(_) | Cmd::Next | Cmd::Stop) {
+            events.push(PlayerEvent::Cleared);
+        }
         match cmd {
             Cmd::Load(file) => {
                 self.reset()?;
@@ -411,12 +414,12 @@ impl Control {
                     // Also tells the app that the track has started (0 — the length is unknown).
                     events.push(PlayerEvent::Duration(duration.unwrap_or(0.0)));
                 }
-                Mark::End | Mark::Error(_) => {
+                Mark::End | Mark::Error { .. } => {
                     if let Some(c) = self.cur.take() {
                         self.live.retain(|j| j.id > c.job);
                     }
                     events.push(match mark {
-                        Mark::Error(e) => PlayerEvent::Error(e),
+                        Mark::Error { message, network } => PlayerEvent::Error { message, network },
                         _ => PlayerEvent::Eof,
                     });
                 }
@@ -564,7 +567,7 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
     ring.begin(job.id);
     let fail = |job: &Job, e: anyhow::Error| {
         if !job.cancelled() {
-            ring.mark(Mark::Error(format!("{e:#}")));
+            ring.mark(Mark::Error { message: format!("{e:#}"), network: job.download.failed() });
         }
         None
     };

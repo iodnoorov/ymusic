@@ -326,6 +326,11 @@ impl ApiError {
     pub fn is_unauthorized(&self) -> bool {
         self.kind == ErrorKind::Unauthorized
     }
+
+    /// The server could not be reached or could not answer now: worth trying again later.
+    pub fn is_network(&self) -> bool {
+        matches!(self.kind, ErrorKind::Network | ErrorKind::RateLimited | ErrorKind::Http(500..=599))
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -910,7 +915,12 @@ impl Api {
             Ok(info) => Ok(info.url),
             // A refused token is told as it is: the other method is refused too.
             Err(e) if ApiError::from_anyhow(&e).is_unauthorized() => Err(e),
-            Err(e) => self.download_info(track_id, low).map(|i| i.url).map_err(|e2| anyhow!("{e:#}; {e2:#}")),
+            Err(e) => self.download_info(track_id, low).map(|i| i.url).map_err(|e2| {
+                // Both messages, and the kind that tells whether to try again later.
+                let (first, second) = (ApiError::from_anyhow(&e), ApiError::from_anyhow(&e2));
+                let kind = if first.is_network() { first.kind } else { second.kind };
+                ApiError::new(kind, format!("{e:#}; {e2:#}")).into()
+            }),
         }
     }
 

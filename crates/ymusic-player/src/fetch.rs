@@ -64,6 +64,11 @@ impl Download {
         self.0.update(|s| s.cancelled = true);
     }
 
+    /// The download gave up: the connection could not be made or kept.
+    pub fn failed(&self) -> bool {
+        self.0.state.locked().error.is_some()
+    }
+
     pub fn reader(&self) -> Reader {
         Reader { shared: self.0.clone(), pos: 0 }
     }

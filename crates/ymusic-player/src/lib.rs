@@ -51,7 +51,12 @@ pub enum PlayerEvent {
     Volume(f64),
     Mute(bool),
     Eof,
-    Error(String),
+    /// The track failed; `network` — its download did (no connection, the server stopped
+    /// answering), not the file itself.
+    Error { message: String, network: bool },
+    /// `Load`, `Next` or `Stop` has been carried out: what played before is dropped. Events sent
+    /// before this one are about it.
+    Cleared,
     /// The player is gone for good; the program exits with this message.
     Died(String),
     /// Levels of the spectrum bands (`SPECTRUM_BANDS`), dB, low to high.

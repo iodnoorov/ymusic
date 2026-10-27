@@ -131,7 +131,7 @@ fn main() -> Result<()> {
     } else if cli.wave {
         app.start_station_id(api::MY_WAVE);
     }
-    runtime.run(app.take_effects(), &app.task_api());
+    runtime.run(app.take_effects(), &app.task_api(), app.generation());
 
     // A changed window size and SIGTERM wake the loop: the screen is redrawn at once; SIGTERM ends
     // the loop like `q` (the sound stops, settings are saved). SIGHUP keeps its default action:
@@ -248,7 +248,7 @@ fn main() -> Result<()> {
             }
             app.tick();
             // What the keys and messages above asked for.
-            runtime.run(app.take_effects(), &app.task_api());
+            runtime.run(app.take_effects(), &app.task_api(), app.generation());
             let (state, position) = app.media_state();
             media.sync(state, position);
         }

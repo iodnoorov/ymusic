@@ -36,7 +36,8 @@ pub enum Mark {
     /// A track (`job`) starts at `at` seconds into it; `gapless` — right after the previous one.
     Start { job: u64, at: f64, duration: Option<f64>, gapless: bool },
     End,
-    Error(String),
+    /// `network` — see `PlayerEvent::Error`.
+    Error { message: String, network: bool },
 }
 
 /// What the producer and the control thread share.

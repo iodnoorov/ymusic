@@ -286,6 +286,11 @@ const MAX_VOLUME: f64 = 130.0;
 /// A track normally starts within a few seconds. A bit longer than the player's own network
 /// timeout (10 s), so that a connection it can detect as dead fails there first.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(12);
+/// Tries of a track that does not come because of the network (no connection, the server does
+/// not answer) before the next one is played; other failures get one more try.
+const NETWORK_TRIES: u32 = 3;
+/// A moment for the connection to come back before the track is tried again.
+const RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Fade lengths offered in the settings window, seconds (0 — off).
 pub const CROSSFADE_STEPS: [u8; 6] = [0, 3, 5, 8, 12, 15];
@@ -392,8 +397,13 @@ pub struct App {
     preload_pending: bool,
     /// The player is loading the current track: if it has not started playing by then, it is restarted.
     load_deadline: Option<Instant>,
-    /// The current track has already been restarted with a fresh link (after an error or a stall).
-    retried: bool,
+    /// Failed tries of the current track (errors, stalls); each next one gets a fresh link.
+    failures: u32,
+    /// The current track is to be tried again then, from this position (seconds).
+    retry_at: Option<(Instant, f64)>,
+    /// `Load`, `Next` and `Stop` sent that the player has not confirmed yet (`PlayerEvent::Cleared`):
+    /// until it has, what it reports is about the track played before.
+    player_behind: u32,
     /// Where the restarted track is to go on from, seconds.
     resume_at: Option<f64>,
     /// Playback was stopped (the queue ran out, the wave is loading, too many errors).
@@ -469,7 +479,9 @@ impl App {
             preload: None,
             preload_pending: false,
             load_deadline: None,
-            retried: false,
+            failures: 0,
+            retry_at: None,
+            player_behind: 0,
             resume_at: None,
             stopped: false,
             context: PlayContext::default(),
@@ -518,6 +530,8 @@ impl App {
     #[cfg(test)]
     pub fn take_player(&mut self) -> Vec<String> {
         self.log_effects();
+        // The player has carried them out.
+        self.player_behind = 0;
         std::mem::take(&mut self.player_log)
     }
 
@@ -604,6 +618,9 @@ impl App {
     }
 
     fn play(&mut self, cmd: PlayerCmd) {
+        if matches!(cmd, PlayerCmd::Load(_) | PlayerCmd::Next | PlayerCmd::Stop) {
+            self.player_behind += 1;
+        }
         self.effects.push(Effect::Player(cmd));
     }
 
@@ -614,6 +631,11 @@ impl App {
     /// What the logic has asked for since the last call, for `Runtime` to carry out.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
+    }
+
+    /// Bumped with every new current track: links asked for older ones are not needed any more.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The API as the tasks use it: with the account's «Меньше ИИ-музыки».
@@ -861,6 +883,9 @@ impl App {
         if !self.begin_track(idx, false) {
             return;
         }
+        // The previous track stops at once rather than plays on under the new title until the
+        // link comes (seconds on a slow connection).
+        self.play(PlayerCmd::Stop);
         let generation = self.generation;
         let id = self.queue.tracks()[idx].full_id();
         let q = QUALITIES[self.quality].id;
@@ -880,7 +905,8 @@ impl App {
         self.preload = None;
         self.preload_pending = false;
         self.load_deadline = preloaded.then(|| Instant::now() + LOAD_TIMEOUT);
-        self.retried = false;
+        self.failures = 0;
+        self.retry_at = None;
         self.resume_at = None;
         self.stopped = false;
         self.load_cover(track.cover.clone());
@@ -1151,6 +1177,14 @@ impl App {
         match msg {
             Msg::Remote(r) => self.on_remote(r),
             Msg::Player(ev) => match ev {
+                PlayerEvent::Cleared => self.player_behind = self.player_behind.saturating_sub(1),
+                // About the track played before: its end or failure must not move the queue on.
+                PlayerEvent::TimePos(_)
+                | PlayerEvent::Duration(_)
+                | PlayerEvent::Eof
+                | PlayerEvent::Error { .. }
+                | PlayerEvent::Spectrum(_)
+                    if self.player_behind > 0 => {}
                 PlayerEvent::TimePos(_) if self.awaiting_start => {}
                 PlayerEvent::TimePos(t) => {
                     self.time_pos = t;
@@ -1186,9 +1220,9 @@ impl App {
                         self.next(End::Eof);
                     }
                 }
-                PlayerEvent::Error(e) => {
-                    self.set_error(format!("Ошибка воспроизведения: {e}"));
-                    self.on_track_error();
+                PlayerEvent::Error { message, network } => {
+                    self.set_error(format!("Ошибка воспроизведения: {message}"));
+                    self.on_track_error(network);
                 }
                 PlayerEvent::OutputFailed { kept, error } => {
                     self.output = Output::from_id(kept.as_deref());
@@ -1212,7 +1246,7 @@ impl App {
                     }
                     Err(e) => {
                         self.set_error(format!("Не удалось получить трек: {e}"));
-                        self.on_track_error();
+                        self.on_track_error(e.is_network());
                     }
                 }
             }
@@ -1407,10 +1441,18 @@ impl App {
     }
 
     /// Treats a track that has been loading for too long as failed (so it is restarted with a
-    /// fresh link once): a server that sends the headers and then stalls makes the player reconnect
-    /// forever without an error, and switching away and back used to be the only cure.
+    /// fresh link): a server that sends the headers and then stalls makes the player reconnect
+    /// forever without an error, and switching away and back used to be the only cure. Also
+    /// tries a failed track again when its time comes.
     pub fn tick(&mut self) {
         self.tick_spectrum();
+        if let Some((at, from)) = self.retry_at
+            && Instant::now() >= at
+            && let Some(p) = self.queue.pos()
+        {
+            self.restart(p, from);
+            return;
+        }
         let Some(deadline) = self.load_deadline else { return };
         if self.paused {
             // A paused track is not expected to start: count from the moment it is resumed.
@@ -1420,13 +1462,14 @@ impl App {
         if Instant::now() < deadline {
             return;
         }
-        if self.retried {
-            self.set_error("Трек не загрузился: сервер не отвечает");
-        }
-        self.on_track_error();
+        self.set_error("Трек не загружается: сервер не отвечает");
+        self.on_track_error(true);
     }
 
-    fn on_track_error(&mut self) {
+    /// The current track failed. `network`: it did not come (no connection, the server does not
+    /// answer): it is tried `NETWORK_TRIES` times, a while apart, before the next one is played;
+    /// a track failing otherwise is tried once more (its link could have expired).
+    fn on_track_error(&mut self, network: bool) {
         self.load_deadline = None;
         // Without a valid token no track plays: no use trying the next ones.
         if self.unauthorized {
@@ -1435,15 +1478,24 @@ impl App {
             self.stopped = true;
             return;
         }
-        // The link could have expired (a preloaded one after a long pause) or the connection
-        // stalled: retry once with a fresh one.
-        if let Some(p) = self.queue.pos().filter(|_| !self.retried) {
+        self.failures += 1;
+        let tries = if network { NETWORK_TRIES } else { 2 };
+        if self.queue.pos().is_some() && self.failures < tries {
             // A download broken off midway goes on from there.
-            let at = self.time_pos;
-            self.play_index(p);
-            self.resume_at = (at > 1.0).then_some(at);
-            self.retried = true;
+            let from = self.time_pos;
+            if network {
+                // Nothing is heard meanwhile: the stalled download is dropped.
+                self.play(PlayerCmd::Stop);
+                self.loading_track = true;
+                self.retry_at = Some((Instant::now() + RETRY_DELAY, from));
+                self.set_error(format!("Нет связи с сервером: повтор {} из {}…", self.failures, tries - 1));
+            } else if let Some(p) = self.queue.pos() {
+                self.restart(p, from);
+            }
             return;
+        }
+        if network {
+            self.set_error(format!("Трек не загрузился за {tries} попытки: нет связи с сервером"));
         }
         self.loading_track = false;
         self.errors_in_row += 1;
@@ -1453,6 +1505,16 @@ impl App {
             self.play(PlayerCmd::Stop);
             self.stopped = true;
         }
+    }
+
+    /// Plays track `p` again with a fresh link, from `from` seconds; the failures so far count.
+    fn restart(&mut self, p: usize, from: f64) {
+        let failures = self.failures;
+        self.play_index(p);
+        self.failures = failures;
+        self.resume_at = (from > 1.0).then_some(from);
+        // Shown until it goes on, and kept for one more try if this one fails too.
+        self.time_pos = from;
     }
 
     // ------------------------------------------------------------ keys
@@ -2556,6 +2618,7 @@ mod tests {
             "{tasks:?}"
         );
         // Once it plays, the next track's link is asked for.
+        app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
         let tasks = app.take_tasks();
@@ -2593,18 +2656,82 @@ mod tests {
         let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
         app.play_list("test", PlayContext::default(), vec![t("1"), t("2")], 0);
         app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/1".into()) });
-        assert_eq!(app.take_player(), ["load http://x/1"]);
+        assert_eq!(app.take_player(), ["stop", "load http://x/1"]);
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(40.0)));
         app.take_tasks();
-        app.on_msg(Msg::Player(PlayerEvent::Error("соединение оборвалось".into())));
+        let error = PlayerEvent::Error { message: "соединение оборвалось".into(), network: true };
+        app.on_msg(Msg::Player(error));
+        // A moment for the connection to come back, in silence.
+        assert!(app.take_tasks().is_empty());
+        assert_eq!(app.take_player(), ["stop"]);
+        assert!(app.loading_track && app.status.contains("повтор 1 из 2"));
+        app.tick();
+        assert!(app.take_tasks().is_empty(), "not yet");
+        app.retry_at = app.retry_at.map(|(_, from)| (Instant::now(), from));
+        app.tick();
         assert!(matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1"));
+        assert_eq!(app.take_player(), ["stop"]);
         app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/1b".into()) });
         // With the length from the catalogue, for a file that does not tell its own.
         let [Effect::Player(PlayerCmd::Load(file))] = &app.effects[..] else { panic!("no load") };
         assert_eq!((file.start, file.length), (40.0, Some(200.0)));
         assert_eq!(app.take_player(), ["load http://x/1b from 40"]);
+        assert_eq!(app.failures, 1);
+        // Failing again before it goes on: still from there.
+        app.on_msg(Msg::Player(PlayerEvent::Error { message: "нет сети".into(), network: true }));
+        assert_eq!(app.retry_at.map(|(_, from)| from), Some(40.0));
         assert_eq!(app.queue.pos(), Some(0));
+    }
+
+    /// `n` on a slow connection: the old track stops at once, and its end or failure reported
+    /// before the player has dropped it does not move the queue past the chosen track.
+    #[test]
+    fn switch_while_link_comes() {
+        use super::*;
+        let mut app = App::for_test();
+        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
+        app.play_list("test", PlayContext::default(), vec![t("1"), t("2"), t("3")], 0);
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/1".into()) });
+        app.take_player();
+        app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(199.5)));
+        app.on_key(KeyCode::Char('n'));
+        assert_eq!(app.take_player(), ["stop"]);
+        // Sent by the player before the stop reached it.
+        app.player_behind = 1;
+        app.on_msg(Msg::Player(PlayerEvent::Eof));
+        app.on_msg(Msg::Player(PlayerEvent::Error { message: "обрыв".into(), network: true }));
+        assert_eq!((app.queue.pos(), app.failures, app.retry_at.is_none()), (Some(1), 0, true));
+        app.on_msg(Msg::Player(PlayerEvent::Cleared));
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/2".into()) });
+        assert_eq!(app.take_player(), ["load http://x/2"]);
+        app.on_msg(Msg::Player(PlayerEvent::Cleared));
+        // Now the player speaks of «2».
+        app.on_msg(Msg::Player(PlayerEvent::Eof));
+        assert_eq!(app.queue.pos(), Some(2));
+    }
+
+    /// A track that fails not because of the network is tried once more, then skipped.
+    #[test]
+    fn broken_track() {
+        use super::*;
+        let mut app = App::for_test();
+        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "available": true})).unwrap();
+        app.play_list("test", PlayContext::default(), vec![t("1"), t("2")], 0);
+        app.take_player();
+        app.take_tasks();
+        let broken = || Msg::Player(PlayerEvent::Error { message: "не тот формат".into(), network: false });
+        app.on_msg(broken());
+        assert!(app.retry_at.is_none(), "at once");
+        assert!(matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1"));
+        app.take_player();
+        app.on_msg(broken());
+        assert_eq!(app.queue.pos(), Some(1));
+        // A link that does not come because of the server is waited for.
+        let busy = ApiError::new(crate::api::ErrorKind::Http(503), "HTTP 503");
+        app.on_msg(Msg::Url { generation: app.generation, result: Err(busy) });
+        assert_eq!((app.queue.pos(), app.failures, app.retry_at.is_some()), (Some(1), 1, true));
     }
 
     /// A refused token stops playback at once instead of trying track after track.
@@ -2616,7 +2743,7 @@ mod tests {
         app.play_list("test", PlayContext::default(), vec![t("1"), t("2"), t("3")], 0);
         // An ordinary failure: the link is asked for again.
         app.on_msg(Msg::Url { generation: app.generation, result: Err("нет сети".into()) });
-        assert!(!app.stopped && app.retried);
+        assert!(!app.stopped && app.failures == 1);
         let refused = ApiError::new(crate::api::ErrorKind::Unauthorized, "HTTP 401: токен недействителен, выполните `ymusic login` (x)");
         app.take_player();
         app.on_msg(Msg::Url { generation: app.generation, result: Err(refused) });
@@ -2660,7 +2787,7 @@ mod tests {
         app.take_tasks();
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.queue.pos(), Some(1));
-        assert!(!app.retried && app.preload.is_none());
+        assert!(app.failures == 0 && app.preload.is_none());
         assert!(app.take_player().is_empty());
         assert!(!app.take_tasks().iter().any(|t| matches!(t, Task::TrackUrl { .. })));
 
@@ -2672,9 +2799,9 @@ mod tests {
         assert_eq!(app.take_player(), ["append http://x/c", "next"]);
 
         // Error on a preloaded track retries the same track with a fresh URL.
-        app.on_track_error();
+        app.on_track_error(false);
         assert_eq!(app.queue.pos(), Some(2));
-        assert!(app.retried);
+        assert_eq!(app.failures, 1);
     }
 
     #[test]
@@ -2816,24 +2943,28 @@ mod tests {
         assert!(app.load_deadline.is_some_and(|d| d > Instant::now()));
         app.paused = false;
 
-        // First stall: the same track is requested again (fresh link).
-        let generation = app.generation;
-        app.load_deadline = past();
-        app.tick();
-        assert_eq!((app.queue.pos(), app.generation, app.retried), (Some(0), generation + 1, true));
-        assert!(!app.status_error);
-        assert!(app.load_deadline.is_none());
+        // Two stalls: each time, a while later, the same track is requested again (fresh link).
+        for n in 1..=2 {
+            let generation = app.generation;
+            app.load_deadline = past();
+            app.tick();
+            assert!(app.status_error && app.load_deadline.is_none() && app.retry_at.is_some());
+            app.retry_at = app.retry_at.map(|(_, from)| (Instant::now(), from));
+            app.tick();
+            assert_eq!((app.queue.pos(), app.generation, app.failures), (Some(0), generation + 1, n));
+            app.on_msg(Msg::Url { generation: app.generation, result: Ok(format!("http://x/a{n}")) });
+        }
 
-        // Second stall: an error, then the next track.
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/a2".into()) });
+        // The third one: the next track.
         app.load_deadline = past();
         app.tick();
         assert_eq!(app.queue.pos(), Some(1));
-        assert!(app.status_error);
-        assert!(!app.retried && app.load_deadline.is_none());
+        assert!(app.status_error && app.status.contains("3 попытки"));
+        assert!(app.failures == 0 && app.retry_at.is_none() && app.load_deadline.is_none());
 
         // Once playback starts, the watchdog is off.
         app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/b".into()) });
+        app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
         assert!(app.load_deadline.is_none());
@@ -2923,11 +3054,17 @@ mod tests {
             batch: None,
         };
         app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a"), t("b")], 0);
+        app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(180.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(120.0)));
         assert_eq!((app.time_pos, app.loading_track), (120.0, false));
         app.on_key(KeyEvent::from(KeyCode::Char('n')));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(120.5)));
+        assert_eq!((app.time_pos, app.loading_track), (0.0, true));
+        // The old track still plays until the player has dropped it (before the link to «b»
+        // comes: `awaiting_start` covers a player that is late with it).
+        app.on_msg(Msg::Player(PlayerEvent::Cleared));
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(121.0)));
         assert_eq!((app.time_pos, app.loading_track), (0.0, true));
         // «b» starts; its length is unknown to the player, the one from the API stays.
         app.on_msg(Msg::Player(PlayerEvent::Duration(0.0)));
@@ -2954,6 +3091,7 @@ mod tests {
         };
         // The player reports the start of a track (`Duration`) before its positions.
         let pos = |app: &mut App, t: f64| {
+            app.take_player();
             app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
             app.on_msg(Msg::Player(PlayerEvent::TimePos(t)));
         };
@@ -2991,10 +3129,11 @@ mod tests {
 
         // A restart of the same track after an error goes on with its playback.
         pos(&mut app, 1.0);
-        app.on_track_error();
+        app.on_track_error(false);
         assert_eq!(app.plays_sent().len(), 5);
 
         // The end of the file, then back to the previous track.
+        app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.plays_sent()[5].reason, Some("finish"));
         assert_eq!(app.plays_sent()[6].track.id, "c");

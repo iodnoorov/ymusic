@@ -8,7 +8,9 @@ use crate::app::Msg;
 use crate::player::{Player, PlayerCmd};
 use crate::Lock;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 pub enum Effect {
     Player(PlayerCmd),
@@ -238,6 +240,12 @@ impl Task {
                 | Task::Link { .. }
         )
     }
+
+    /// A link asked for a track the user has already moved away from (`generation` is the app's
+    /// current one): not worth a request, which on a slow connection would hold up the new one.
+    fn stale(&self, generation: u64) -> bool {
+        matches!(self, Task::TrackUrl { generation: g, .. } | Task::Preload { generation: g, .. } if *g != generation)
+    }
 }
 
 /// Carries out the effects: player commands at once, tasks in the `Pool`.
@@ -245,22 +253,29 @@ pub struct Runtime {
     pub player: Player,
     tx: Sender<Msg>,
     pool: Pool,
+    /// The app's track generation, as of the last `run`.
+    generation: Arc<AtomicU64>,
 }
 
 impl Runtime {
     pub fn new(player: Player, tx: Sender<Msg>) -> Runtime {
-        Runtime { player, tx, pool: Pool::new(WORKERS, WORKERS - 1) }
+        Runtime { player, tx, pool: Pool::new(WORKERS, WORKERS - 1), generation: Arc::default() }
     }
 
-    /// `api`: as the tasks are to use it (the app's settings applied).
-    pub fn run(&mut self, effects: Vec<Effect>, api: &Api) {
+    /// `api`: as the tasks are to use it (the app's settings applied); `generation`: the app's
+    /// current track generation (`App::generation`).
+    pub fn run(&mut self, effects: Vec<Effect>, api: &Api, generation: u64) {
+        self.generation.store(generation, Ordering::Relaxed);
         for effect in effects {
             match effect {
                 Effect::Player(cmd) => self.player.apply(cmd),
                 Effect::Task(task) => {
                     let (api, tx) = (api.clone(), self.tx.clone());
-                    let urgent = task.urgent();
+                    let (urgent, current) = (task.urgent(), self.generation.clone());
                     self.pool.run(urgent, move || {
+                        if task.stale(current.load(Ordering::Relaxed)) {
+                            return;
+                        }
                         task.run(&api, |m| {
                             let _ = tx.send(m);
                         });
@@ -357,6 +372,15 @@ mod tests {
     use super::Pool;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    /// Links to tracks the user has moved away from are not asked for.
+    #[test]
+    fn stale_links() {
+        use super::Task;
+        let url = Task::TrackUrl { generation: 2, full_id: "1".into(), quality: "nq" };
+        assert!(url.stale(3) && !url.stale(2));
+        assert!(!Task::Stations.stale(3));
+    }
 
     /// Slow background jobs never take the last thread: an urgent one gets through, and a fourth
     /// background job waits for a slot.
