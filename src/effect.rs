@@ -1,8 +1,9 @@
 //! What the app's logic asks of the world outside: commands to the player and background tasks
-//! (requests to Yandex, the clipboard). The logic only lists them (`App::take_effects`); the main
+//! (requests to Yandex and Last.fm, the clipboard). The logic only lists them (`App::take_effects`); the main
 //! loop carries them out (`Runtime`). So every request the program makes is listed here, and
 //! tests see what was asked for without a network or sound.
 
+use crate::api::lastfm::{self, Scrobble};
 use crate::api::{Api, ApiError, Link, PlayContext, PlayReport, Playlist, Track};
 use crate::app::Msg;
 use crate::player::{Player, PlayerCmd};
@@ -60,6 +61,13 @@ pub enum Task {
     CopyWithTool(String),
     /// Looks for a Yandex Music link in the clipboard.
     ReadClipboard,
+    /// Opens a link in the browser.
+    OpenUrl(String),
+    LastfmToken,
+    /// Whether the user has confirmed the token yet.
+    LastfmSession(String),
+    LastfmNowPlaying { session: String, track: Scrobble },
+    LastfmScrobble { session: String, tracks: Vec<Scrobble> },
 }
 
 fn text(e: anyhow::Error) -> ApiError {
@@ -193,9 +201,40 @@ impl Task {
                     None => return,
                 }
             }
+            Task::OpenUrl(url) => Msg::Opened { ok: open_url(&url), url },
+            Task::LastfmToken => Msg::LastfmToken(lastfm::token()),
+            Task::LastfmSession(token) => Msg::LastfmSession { result: lastfm::session(&token), token },
+            Task::LastfmNowPlaying { session, track } => {
+                let result = lastfm::now_playing(&session, &track);
+                Msg::LastfmSent { session, tracks: Vec::new(), result }
+            }
+            Task::LastfmScrobble { session, tracks } => {
+                let result = lastfm::scrobble(&session, &tracks);
+                Msg::LastfmSent { session, tracks, result }
+            }
         };
         send(msg);
     }
+}
+
+/// Opens `url` with the desktop's browser; false if that cannot be done. The opener usually
+/// returns at once; one that keeps running (it may wait for the browser) is left to it.
+fn open_url(url: &str) -> bool {
+    use std::process::{Command, Stdio};
+    let bin = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let Ok(mut child) = Command::new(bin).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    else {
+        return false;
+    };
+    for _ in 0..30 {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(_) => return false,
+        }
+    }
+    std::thread::spawn(move || child.wait());
+    true
 }
 
 /// A track, album or playlist from a Yandex Music link, to be played.

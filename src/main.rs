@@ -119,6 +119,10 @@ fn main() -> Result<()> {
     app.finish_track = s.finish_track;
     app.output = output;
     app.hide_account = s.hide_account;
+    app.remaining_time = s.remaining_time;
+    if let Some(session) = &s.lastfm {
+        app.lastfm = app::Lastfm::On(session.clone());
+    }
     app.queue.set_repeat(s.repeat);
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
@@ -160,6 +164,9 @@ fn main() -> Result<()> {
     // kitty graphics one as text), and the first frame only writes cells that are not blank.
     terminal.clear()?;
     let mut kitty = false;
+    // The terminal's own title comes back on exit (where it keeps a stack of titles).
+    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print("\x1b[22;0t"));
+    let mut title = String::new();
     // Media keys and desktop player widgets; their commands come back as messages.
     let mut media = media::Media::start(move |r| {
         let _ = remote.send(app::Msg::Remote(r));
@@ -185,6 +192,11 @@ fn main() -> Result<()> {
                 _ if app.is_animating() => 200,
                 _ => 1000,
             });
+            let now_title = app.window_title();
+            if now_title != title {
+                let _ = execute!(std::io::stdout(), ratatui::crossterm::terminal::SetTitle(&now_title));
+                title = now_title;
+            }
             if dirty || last_draw.elapsed() >= frame {
                 terminal.draw(|f| {
                     ui::draw(f, &mut app);
@@ -234,6 +246,8 @@ fn main() -> Result<()> {
                     m => {
                         // Playback position is shown by the regular animation frames.
                         dirty |= !matches!(m, app::Msg::Player(player::PlayerEvent::TimePos(_)));
+                        // Last.fm connected or disconnected on its own: saved like a changed setting.
+                        unsaved |= matches!(m, app::Msg::LastfmSession { .. } | app::Msg::LastfmSent { .. });
                         app.on_msg(m);
                     }
                 }
@@ -257,7 +271,7 @@ fn main() -> Result<()> {
     if kitty {
         input::kitty_off();
     }
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste, ratatui::crossterm::style::Print("\x1b[23;0t"));
     ratatui::restore();
 
     // The listening history learns where the track stopped; a slow network does not hold the exit long.
@@ -353,6 +367,8 @@ fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config
         web_api: app.api.web,
         output: own(app.output, run.output, saved.output),
         hide_account: app.hide_account,
+        remaining_time: app.remaining_time,
+        lastfm: app.lastfm_session().cloned(),
     }
 }
 

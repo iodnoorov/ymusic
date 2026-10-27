@@ -1,5 +1,7 @@
 //! Minimal client for the (unofficial) Yandex Music API.
 
+pub mod lastfm;
+
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use hmac::{Hmac, Mac};

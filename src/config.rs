@@ -1,5 +1,5 @@
 use crate::api::{quality_index, Quality, QUALITIES};
-use crate::app::{Art, Output};
+use crate::app::{Art, LastfmSession, Output};
 use crate::eq::{index as eq_index, Preset, PRESETS};
 use crate::queue::Repeat;
 use anyhow::{Context, Result};
@@ -54,6 +54,11 @@ pub struct Settings {
     pub output: Output,
     /// The header shows no login and no Plus badge.
     pub hide_account: bool,
+    /// The progress bar shows the time left instead of the track's length.
+    pub remaining_time: bool,
+    /// The connected Last.fm account; its session key is a secret like the token.
+    #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
+    pub lastfm: Option<LastfmSession>,
 }
 
 impl Default for Settings {
@@ -70,6 +75,8 @@ impl Default for Settings {
             web_api: false,
             output: Output::Auto,
             hide_account: false,
+            remaining_time: false,
+            lastfm: None,
         }
     }
 }
@@ -215,12 +222,13 @@ mod tests {
         let cfg: Config = serde_json::from_str(
             r#"{"token": "t", "volume": 40, "art": "spectrum", "eq": "laptop", "quality": "lq", "repeat": "one",
                 "crossfade": 5, "finish_track": true, "web_api": true, "icons": false, "output": "pulse",
-                "hide_account": true}"#,
+                "hide_account": true, "remaining_time": true, "lastfm": {"name": "me", "key": "sk"}}"#,
         )
         .unwrap();
         let s = &cfg.settings;
         assert_eq!((s.volume, s.art, s.eq.id, s.quality.id, s.repeat), (40, Some(Art::Spectrum), "laptop", "lq", Repeat::One));
-        assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5 && s.hide_account);
+        assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5 && s.hide_account && s.remaining_time);
+        assert!(s.lastfm.as_ref().is_some_and(|l| l.name == "me" && l.key == "sk"));
         assert_eq!(s.output, crate::app::Output::Pulse);
         let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back["art"], "spectrum");
@@ -228,10 +236,11 @@ mod tests {
         assert_eq!(back["quality"], "lq");
         assert_eq!(back["repeat"], "one");
         assert_eq!(back["output"], "pulse");
+        assert_eq!(back["lastfm"]["key"], "sk");
 
         // Stale or empty values, as older versions wrote them: defaults, the token stays.
         let cfg: Config =
-            serde_json::from_str(r#"{"token": "t", "art": "", "eq": "gone", "quality": 5, "repeat": "", "output": "jack", "covers": false}"#).unwrap();
+            serde_json::from_str(r#"{"token": "t", "art": "", "eq": "gone", "quality": 5, "repeat": "", "output": "jack", "lastfm": "x", "covers": false}"#).unwrap();
         assert_eq!(cfg.token.as_deref(), Some("t"));
         assert!(cfg.settings == Settings::default());
         assert!(!cfg.covers, "the old switch is still read");

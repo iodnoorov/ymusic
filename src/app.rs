@@ -5,6 +5,7 @@ use crate::api::{
     default_stations, iso_now, my_wave, random_uuid, Account, Api, PlayContext, PlayReport, Playlist, Station, Track,
     WaveBatch, MY_WAVE, QUALITIES,
 };
+use crate::api::lastfm::{self, Scrobble};
 use crate::effect::{Effect, Task};
 use crate::player::{PlayerCmd, PlayerEvent, TrackFile};
 use crate::input::Press;
@@ -56,6 +57,14 @@ pub enum Msg {
     Copied { url: String, by_tool: bool },
     /// A Yandex Music link found in the clipboard for «Играть по ссылке».
     ClipboardLink(String),
+    /// A link opened in the browser (`ok`) or not.
+    Opened { url: String, ok: bool },
+    /// A Last.fm token to be confirmed in the browser.
+    LastfmToken(Result<String, lastfm::Error>),
+    /// The session for a confirmed `token`: (user name, session key).
+    LastfmSession { token: String, result: Result<(String, String), lastfm::Error> },
+    /// «Now playing» (no `tracks`) or scrobbles were sent with `session`.
+    LastfmSent { session: String, tracks: Vec<Scrobble>, result: Result<(), lastfm::Error> },
     /// For the main loop (never passed to `App::on_msg`): a key or pasted text, the window
     /// resized, SIGTERM.
     Input(crate::input::Input),
@@ -136,6 +145,30 @@ struct Play {
     last_pos: f64,
     /// The report after 30 seconds of listening has been sent.
     partial_sent: bool,
+    /// When the playback started, Unix time: the scrobble's timestamp.
+    started_unix: u64,
+    /// Last.fm has been told the track plays.
+    now_playing_sent: bool,
+    scrobbled: bool,
+}
+
+/// A connected Last.fm account, kept in the config.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LastfmSession {
+    pub name: String,
+    pub key: String,
+}
+
+/// How long the user has to confirm the access to Last.fm in the browser.
+const LASTFM_CONFIRM: Duration = Duration::from_secs(300);
+/// How often the program asks whether the access has been confirmed.
+const LASTFM_POLL: Duration = Duration::from_secs(3);
+
+pub enum Lastfm {
+    Off,
+    /// Waiting for a token (`None`), then for the user to confirm it in the browser by `until`.
+    Connecting { token: Option<String>, until: Instant, poll_at: Instant, polling: bool },
+    On(LastfmSession),
 }
 
 /// Seconds of listening after which a track is reported as listened, as the website does.
@@ -170,13 +203,15 @@ pub enum Setting {
     Api,
     Art,
     Icons,
+    RemainingTime,
     HideAccount,
+    Lastfm,
     About,
     Logout,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 13] = [
+    pub const ALL: [Setting; 15] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
@@ -187,7 +222,9 @@ impl Setting {
         Setting::Api,
         Setting::Art,
         Setting::Icons,
+        Setting::RemainingTime,
         Setting::HideAccount,
+        Setting::Lastfm,
         Setting::About,
         Setting::Logout,
     ];
@@ -361,6 +398,11 @@ pub struct App {
     pub output: Output,
     /// The header shows no login and no Plus badge.
     pub hide_account: bool,
+    /// The progress bar shows the time left instead of the track's length.
+    pub remaining_time: bool,
+    pub lastfm: Lastfm,
+    /// Scrobbles that did not go through (no network): sent with the next one.
+    lastfm_backlog: Vec<Scrobble>,
     /// Spectrum bars, 0..1 per band, low to high.
     pub spectrum: Vec<f32>,
     spectrum_asked: Instant,
@@ -459,6 +501,9 @@ impl App {
             art: Art::Cover,
             output: Output::Auto,
             hide_account: false,
+            remaining_time: false,
+            lastfm: Lastfm::Off,
+            lastfm_backlog: Vec::new(),
             spectrum: vec![0.0; crate::player::SPECTRUM_BANDS],
             spectrum_asked: Instant::now(),
             clear_images: false,
@@ -818,7 +863,8 @@ impl App {
             reason: None,
         };
         self.send_play(report.clone());
-        self.play = Some(Play { report, last_pos: 0.0, partial_sent: false });
+        let started_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        self.play = Some(Play { report, last_pos: 0.0, partial_sent: false, started_unix, now_playing_sent: false, scrobbled: false });
     }
 
     /// The position moved to `t`: counts the time played; sends a report once 30 s are played.
@@ -839,6 +885,121 @@ impl App {
             play.partial_sent = true;
             let report = PlayReport { reason: Some("in_progress"), ..play.report.clone() };
             self.send_play(report);
+        }
+        self.lastfm_play();
+    }
+
+    /// Last.fm learns the track plays once it does, and gets a scrobble once it is listened long
+    /// enough (see `lastfm::scrobble_after`).
+    fn lastfm_play(&mut self) {
+        let Lastfm::On(s) = &self.lastfm else { return };
+        let session = s.key.clone();
+        let duration = self.duration;
+        let Some(play) = &mut self.play else { return };
+        let track = &play.report.track;
+        let artist = track.main_artist.as_ref().map_or(track.artists.clone(), |(_, name)| name.clone());
+        let item = Scrobble {
+            artist,
+            track: track.title.clone(),
+            album: track.album.clone(),
+            duration: duration.round() as u64,
+            timestamp: play.started_unix,
+        };
+        if !std::mem::replace(&mut play.now_playing_sent, true) {
+            self.task(Task::LastfmNowPlaying { session: session.clone(), track: item.clone() });
+        }
+        let Some(play) = &mut self.play else { return };
+        if !play.scrobbled && lastfm::scrobble_after(duration).is_some_and(|after| play.report.played >= after) {
+            play.scrobbled = true;
+            let mut tracks = std::mem::take(&mut self.lastfm_backlog);
+            tracks.push(item);
+            self.task(Task::LastfmScrobble { session, tracks });
+        }
+    }
+
+    /// Starts connecting Last.fm: a token is asked for, then confirmed by the user in the browser.
+    fn connect_lastfm(&mut self) {
+        let now = Instant::now();
+        self.lastfm = Lastfm::Connecting { token: None, until: now + LASTFM_CONFIRM, poll_at: now, polling: false };
+        self.set_status("Last.fm: подключение…");
+        self.task(Task::LastfmToken);
+    }
+
+    /// While connecting: asks now and then whether the access has been confirmed.
+    fn poll_lastfm(&mut self) {
+        let now = Instant::now();
+        let Lastfm::Connecting { token: Some(token), until, poll_at, polling } = &mut self.lastfm else { return };
+        if *polling || now < *poll_at {
+            return;
+        }
+        if now >= *until {
+            self.lastfm = Lastfm::Off;
+            self.set_error("Last.fm: доступ не подтверждён — подключите снова в настройках");
+            return;
+        }
+        *polling = true;
+        let token = token.clone();
+        self.task(Task::LastfmSession(token));
+    }
+
+    fn on_lastfm_session(&mut self, token: String, result: Result<(String, String), lastfm::Error>) {
+        let Lastfm::Connecting { token: Some(t), polling, poll_at, .. } = &mut self.lastfm else { return };
+        if *t != token {
+            return;
+        }
+        match result {
+            Ok((name, key)) => {
+                self.set_status(format!("Last.fm подключён: {name}"));
+                self.lastfm = Lastfm::On(LastfmSession { name, key });
+            }
+            // Not confirmed yet.
+            Err(e) if e.not_authorized() || e.is_temporary() => {
+                *polling = false;
+                *poll_at = Instant::now() + LASTFM_POLL;
+            }
+            Err(e) => {
+                self.lastfm = Lastfm::Off;
+                self.set_error(format!("Не удалось подключить Last.fm: {e}"));
+            }
+        }
+    }
+
+    fn on_lastfm_sent(&mut self, session: String, tracks: Vec<Scrobble>, result: Result<(), lastfm::Error>) {
+        if !matches!(&self.lastfm, Lastfm::On(s) if s.key == session) {
+            return;
+        }
+        match result {
+            Ok(()) => {}
+            Err(e) if e.is_session() => {
+                self.lastfm = Lastfm::Off;
+                self.lastfm_backlog.clear();
+                self.set_error("Last.fm: доступ отозван — подключите снова в настройках");
+            }
+            // Sent again with the next scrobble; the oldest go first if too many wait.
+            Err(e) if e.is_temporary() => {
+                if !tracks.is_empty() {
+                    let mut all = tracks;
+                    all.append(&mut self.lastfm_backlog);
+                    let extra = all.len().saturating_sub(lastfm::MAX_BATCH);
+                    all.drain(..extra);
+                    self.lastfm_backlog = all;
+                }
+            }
+            Err(e) if tracks.is_empty() => drop(e),
+            Err(e) => self.set_error(format!("Не удалось отправить скроббл: {e}")),
+        }
+    }
+
+    pub fn lastfm_session(&self) -> Option<&LastfmSession> {
+        if let Lastfm::On(s) = &self.lastfm { Some(s) } else { None }
+    }
+
+    /// The terminal window's title: what plays now.
+    pub fn window_title(&self) -> String {
+        match self.current() {
+            Some(t) if !t.artists.is_empty() => format!("{} — {}", t.artists, t.title),
+            Some(t) => t.title.clone(),
+            None => "ymusic".to_string(),
         }
     }
 
@@ -1398,6 +1559,31 @@ impl App {
                     *input = link;
                 }
             }
+            Msg::Opened { url, ok } => {
+                if !ok {
+                    crate::clipboard::osc52(&url);
+                    self.set_status(format!("Браузер не открылся — откройте ссылку сами (скопирована): {url}"));
+                    self.task(Task::CopyWithTool(url));
+                }
+            }
+            Msg::LastfmToken(result) => {
+                let Lastfm::Connecting { token: token @ None, poll_at, .. } = &mut self.lastfm else { return };
+                match result {
+                    Ok(t) => {
+                        *poll_at = Instant::now() + LASTFM_POLL;
+                        let url = lastfm::auth_url(&t);
+                        *token = Some(t);
+                        self.set_status("Last.fm: разрешите доступ в открывшемся браузере");
+                        self.task(Task::OpenUrl(url));
+                    }
+                    Err(e) => {
+                        self.lastfm = Lastfm::Off;
+                        self.set_error(format!("Не удалось подключить Last.fm: {e}"));
+                    }
+                }
+            }
+            Msg::LastfmSession { token, result } => self.on_lastfm_session(token, result),
+            Msg::LastfmSent { session, tracks, result } => self.on_lastfm_sent(session, tracks, result),
             Msg::LessAi(r) => match r {
                 Ok(on) => self.less_ai = Some(on),
                 Err(e) => self.set_error(format!("Не удалось загрузить настройки аккаунта: {e}")),
@@ -1446,6 +1632,7 @@ impl App {
     /// tries a failed track again when its time comes.
     pub fn tick(&mut self) {
         self.tick_spectrum();
+        self.poll_lastfm();
         if let Some((at, from)) = self.retry_at
             && Instant::now() >= at
             && let Some(p) = self.queue.pos()
@@ -1774,6 +1961,13 @@ impl App {
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::Output => self.output.name().to_string(),
             Setting::HideAccount => if self.hide_account { "вкл" } else { "выкл" }.to_string(),
+            Setting::RemainingTime => if self.remaining_time { "вкл" } else { "выкл" }.to_string(),
+            Setting::Lastfm if !lastfm::available() => "нет ключа".to_string(),
+            Setting::Lastfm => match &self.lastfm {
+                Lastfm::Off => "выкл".to_string(),
+                Lastfm::Connecting { .. } => "подключение…".to_string(),
+                Lastfm::On(s) => s.name.clone(),
+            },
             Setting::About | Setting::Logout => return None,
         })
     }
@@ -1826,6 +2020,20 @@ impl App {
                 self.play(PlayerCmd::Output(self.output.id()));
             }
             Setting::HideAccount => self.hide_account = !self.hide_account,
+            Setting::RemainingTime => self.remaining_time = !self.remaining_time,
+            Setting::Lastfm if !lastfm::available() => self.set_status("В этой сборке нет ключа Last.fm"),
+            Setting::Lastfm => match self.lastfm {
+                Lastfm::Off => self.connect_lastfm(),
+                Lastfm::Connecting { .. } => {
+                    self.lastfm = Lastfm::Off;
+                    self.set_status("Подключение Last.fm отменено");
+                }
+                Lastfm::On(_) => {
+                    self.lastfm = Lastfm::Off;
+                    self.lastfm_backlog.clear();
+                    self.set_status("Last.fm отключён");
+                }
+            },
             Setting::About | Setting::Logout => {}
         }
     }
@@ -2434,8 +2642,22 @@ mod tests {
         assert!(!app.icons);
         app.on_key(key(KeyCode::Right));
         assert!(app.icons);
+        // «Обратный отсчёт».
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.remaining_time);
+        app.on_key(key(KeyCode::Left));
+        assert!(!app.remaining_time);
         // «Скрыть аккаунт».
         app.on_key(key(KeyCode::Char('j')));
+        // «Last.fm»: without the program's key nothing is asked for (see `lastfm_scrobbles`).
+        app.on_key(key(KeyCode::Char('j')));
+        if !lastfm::available() {
+            app.take_tasks();
+            app.on_key(key(KeyCode::Enter));
+            assert!(matches!(app.lastfm, Lastfm::Off) && app.take_tasks().is_empty());
+            assert_eq!(app.setting_value(Setting::Lastfm).as_deref(), Some("нет ключа"));
+        }
 
         // «О программе» opens from the settings and returns there.
         app.on_key(key(KeyCode::Char('j')));
@@ -2443,19 +2665,19 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 11 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 13 })));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 12 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel: 14 })));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
         app.on_key(key(KeyCode::Char('o')));
-        for _ in 0..12 {
+        for _ in 0..Setting::ALL.len() {
             app.on_key(key(KeyCode::Char('j')));
         }
         app.on_key(key(KeyCode::Enter));
@@ -3071,6 +3293,118 @@ mod tests {
         assert_eq!(app.duration, 200.0);
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.25)));
         assert_eq!((app.time_pos, app.loading_track), (0.25, false));
+    }
+
+    /// Last.fm: connected by a token confirmed in the browser; the track is shown as playing once it
+    /// plays and scrobbled after half of it; scrobbles that failed for the network go with the next.
+    #[test]
+    fn lastfm_scrobbles() {
+        use super::*;
+        let mut app = App::for_test();
+        // Connecting: a token, the browser, then polls until the user has confirmed.
+        app.connect_lastfm();
+        assert!(matches!(app.take_tasks()[..], [Task::LastfmToken]));
+        app.on_msg(Msg::LastfmToken(Ok("tok".into())));
+        assert!(matches!(&app.take_tasks()[..], [Task::OpenUrl(url)] if url.ends_with("&token=tok")));
+        assert!(matches!(app.lastfm, Lastfm::Connecting { token: Some(_), .. }));
+        let Lastfm::Connecting { poll_at, .. } = &mut app.lastfm else { panic!() };
+        *poll_at = Instant::now();
+        app.tick();
+        assert!(matches!(&app.take_tasks()[..], [Task::LastfmSession(t)] if t == "tok"));
+        app.tick();
+        assert!(app.take_tasks().is_empty(), "one question at a time");
+        let pending = lastfm::Error { code: 14, message: "not authorized".into() };
+        app.on_msg(Msg::LastfmSession { token: "tok".into(), result: Err(pending) });
+        app.tick();
+        assert!(app.take_tasks().is_empty(), "asked again a while later");
+        app.on_msg(Msg::LastfmSession { token: "tok".into(), result: Ok(("me".into(), "sk".into())) });
+        assert!(app.lastfm_session().is_some_and(|s| s.name == "me" && s.key == "sk"));
+
+        let t = |id: &str, secs: u64| Track {
+            id: id.to_string(),
+            album_id: Some("9".into()),
+            title: format!("Трек {id}"),
+            artists: "A, B".into(),
+            main_artist: Some(("1".into(), "A".into())),
+            album: "Альбом".into(),
+            duration_ms: secs * 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let pos = |app: &mut App, d: f64, t: f64| {
+            app.take_player();
+            app.on_msg(Msg::Player(PlayerEvent::Duration(d)));
+            app.on_msg(Msg::Player(PlayerEvent::TimePos(t)));
+        };
+        let lastfm_tasks = |app: &mut App| -> Vec<Task> {
+            app.take_tasks()
+                .into_iter()
+                .filter(|t| matches!(t, Task::LastfmNowPlaying { .. } | Task::LastfmScrobble { .. }))
+                .collect()
+        };
+        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a", 100), t("b", 20), t("c", 100)], 0);
+        assert!(lastfm_tasks(&mut app).is_empty(), "nothing until it plays");
+        pos(&mut app, 100.0, 0.5);
+        let now = lastfm_tasks(&mut app);
+        let [Task::LastfmNowPlaying { session, track }] = &now[..] else { panic!("{now:?}") };
+        assert_eq!((session.as_str(), track.artist.as_str(), track.track.as_str(), track.duration), ("sk", "A", "Трек a", 100));
+        for i in 2..=100 {
+            pos(&mut app, 100.0, f64::from(i) * 0.5);
+        }
+        let sent = lastfm_tasks(&mut app);
+        let [Task::LastfmScrobble { tracks, .. }] = &sent[..] else { panic!("{sent:?}") };
+        assert_eq!(tracks.len(), 1);
+        let a = tracks[0].clone();
+        // The network failed: it goes again with the next scrobble.
+        app.on_msg(Msg::LastfmSent {
+            session: "sk".into(),
+            tracks: vec![a.clone()],
+            result: Err(lastfm::Error { code: 0, message: "нет сети".into() }),
+        });
+        // A track of 30 s or shorter is only shown as playing.
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        for i in 1..=40 {
+            pos(&mut app, 20.0, f64::from(i) * 0.5);
+        }
+        assert!(matches!(&lastfm_tasks(&mut app)[..], [Task::LastfmNowPlaying { .. }]));
+        app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        for i in 1..=101 {
+            pos(&mut app, 100.0, f64::from(i) * 0.5);
+        }
+        let sent = lastfm_tasks(&mut app);
+        let [_, Task::LastfmScrobble { tracks, .. }] = &sent[..] else { panic!("{sent:?}") };
+        assert_eq!((tracks.len(), &tracks[0], tracks[1].track.as_str()), (2, &a, "Трек c"));
+
+        // A revoked session disconnects.
+        app.on_msg(Msg::LastfmSent {
+            session: "sk".into(),
+            tracks: Vec::new(),
+            result: Err(lastfm::Error { code: 9, message: "Invalid session key".into() }),
+        });
+        assert!(matches!(app.lastfm, Lastfm::Off) && app.status_error);
+    }
+
+    /// The terminal title tells what plays.
+    #[test]
+    fn window_title() {
+        use super::*;
+        let mut app = App::for_test();
+        assert_eq!(app.window_title(), "ymusic");
+        let t = Track {
+            id: "1".into(),
+            album_id: None,
+            title: "Выхода нет".into(),
+            artists: "Сплин".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 220_000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t], 0);
+        assert_eq!(app.window_title(), "Сплин — Выхода нет");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Art, Modal, Repeat, Setting, Source, StationRow, Tab};
+use crate::app::{App, Art, Lastfm, Modal, Repeat, Setting, Source, StationRow, Tab};
 use crate::keymap::{self, Action, Action as A, Section};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -849,7 +849,11 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
 
     // progress
     let pos = fmt_time(app.time_pos);
-    let dur = fmt_time(app.duration);
+    let dur = if app.remaining_time && app.duration > 0.0 {
+        format!("-{}", fmt_time(app.duration - app.time_pos))
+    } else {
+        fmt_time(app.duration)
+    };
     let bar_w = l2.width.saturating_sub((pos.len() + dur.len() + 2) as u16) as usize;
     let ratio = if app.duration > 0.0 { (app.time_pos / app.duration).clamp(0.0, 1.0) } else { 0.0 };
     let done = ((bar_w as f64) * ratio) as usize;
@@ -1105,6 +1109,8 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Icons => "Иконки Nerd Font",
         Setting::Output => "Вывод звука",
         Setting::HideAccount => "Скрыть аккаунт",
+        Setting::RemainingTime => "Обратный отсчёт",
+        Setting::Lastfm => "Last.fm",
         Setting::About => "О программе",
         Setting::Logout => "Выйти из аккаунта",
     }
@@ -1125,6 +1131,13 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Output if cfg!(target_os = "macos") => "Системный вывод или PulseAudio, если он установлен".into(),
         Setting::Output => "Авто: PipeWire или PulseAudio, без них — прямо в ALSA".into(),
         Setting::HideAccount => "Без логина и значка Плюса в заголовке".into(),
+        Setting::RemainingTime => "Справа от полосы — сколько осталось до конца трека".into(),
+        Setting::Lastfm if !crate::api::lastfm::available() => "Ключ Last.fm не задан при сборке".into(),
+        Setting::Lastfm => match app.lastfm {
+            Lastfm::Off => "Скробблинг · Enter — подключить через браузер".into(),
+            Lastfm::Connecting { .. } => "Разрешите доступ в браузере · Enter — отмена".into(),
+            Lastfm::On(_) => "Скробблинг включён · Enter — отключить".into(),
+        },
         Setting::About => "Версия и ссылки на проект".into(),
         Setting::Logout => "Токен будет удалён, программа закроется".into(),
     }
@@ -1373,6 +1386,17 @@ mod tests {
                 assert!(text.contains("Выхода нет"));
             }
         }
+        // «Обратный отсчёт»: the time left instead of the length.
+        app.remaining_time = true;
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        assert!(text.contains("1:01 ") && text.contains(" -2:39") && !text.contains("3:40"), "{text}");
+        app.remaining_time = false;
+
         // Opened playlist and the pop-up dialogs.
         use crate::app::Modal;
         use crate::library::OpenPlaylist;
