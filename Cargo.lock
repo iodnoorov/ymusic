@@ -2238,7 +2238,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "ymusic-api"
-version = "3.6.1"
+version = "3.6.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "ymusic-cli"
-version = "3.6.1"
+version = "3.6.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "ymusic-core"
-version = "3.6.1"
+version = "3.6.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "ymusic-player"
-version = "3.6.1"
+version = "3.6.2"
 dependencies = [
  "anyhow",
  "fdk-aac",
