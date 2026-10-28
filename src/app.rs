@@ -978,6 +978,9 @@ impl App {
             // Sent again with the next scrobble; the oldest go first if too many wait.
             Err(e) if e.is_temporary() => {
                 if !tracks.is_empty() {
+                    if e.blocked {
+                        self.set_error(format!("Скробблы ждут отправки: {e}"));
+                    }
                     let mut all = tracks;
                     all.append(&mut self.lastfm_backlog);
                     let extra = all.len().saturating_sub(lastfm::MAX_BATCH);
@@ -3313,7 +3316,7 @@ mod tests {
         assert!(matches!(&app.take_tasks()[..], [Task::LastfmSession(t)] if t == "tok"));
         app.tick();
         assert!(app.take_tasks().is_empty(), "one question at a time");
-        let pending = lastfm::Error { code: 14, message: "not authorized".into() };
+        let pending = lastfm::Error { code: 14, message: "not authorized".into(), blocked: false };
         app.on_msg(Msg::LastfmSession { token: "tok".into(), result: Err(pending) });
         app.tick();
         assert!(app.take_tasks().is_empty(), "asked again a while later");
@@ -3360,7 +3363,7 @@ mod tests {
         app.on_msg(Msg::LastfmSent {
             session: "sk".into(),
             tracks: vec![a.clone()],
-            result: Err(lastfm::Error { code: 0, message: "нет сети".into() }),
+            result: Err(lastfm::Error { code: 0, message: "нет сети".into(), blocked: false }),
         });
         // A track of 30 s or shorter is only shown as playing.
         app.on_key(KeyEvent::from(KeyCode::Char('n')));
@@ -3380,7 +3383,7 @@ mod tests {
         app.on_msg(Msg::LastfmSent {
             session: "sk".into(),
             tracks: Vec::new(),
-            result: Err(lastfm::Error { code: 9, message: "Invalid session key".into() }),
+            result: Err(lastfm::Error { code: 9, message: "Invalid session key".into(), blocked: false }),
         });
         assert!(matches!(app.lastfm, Lastfm::Off) && app.status_error);
     }

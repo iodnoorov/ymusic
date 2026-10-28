@@ -35,9 +35,19 @@ pub struct Scrobble {
 pub struct Error {
     pub code: u32,
     pub message: String,
+    /// Last.fm refuses the network the request came from (it does so to Russian addresses).
+    pub blocked: bool,
 }
 
+/// What Last.fm answers a network it does not serve: HTTP 403 with error 11 in XML, whatever
+/// format was asked for.
+const BLOCKED: &str = "Last.fm недоступен из этой сети (HTTP 403) — из России нужен VPN";
+
 impl Error {
+    fn new(code: u32, message: impl Into<String>) -> Error {
+        Error { code, message: message.into(), blocked: false }
+    }
+
     /// The session is no longer valid (access revoked): Last.fm must be connected again.
     pub fn is_session(&self) -> bool {
         matches!(self.code, 4 | 9)
@@ -91,20 +101,33 @@ fn call(method: &str, params: Vec<(String, String)>) -> Result<Value> {
         .build();
     let form: Vec<(&str, &str)> = params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let answer = match agent.post(API).send_form(&form) {
-        Ok(r) => r.into_json::<Value>().map_err(|e| Error { code: 0, message: format!("Last.fm: {e}") })?,
+        Ok(r) => r.into_json::<Value>().map_err(|e| Error::new(0, format!("Last.fm: {e}")))?,
         // Errors come with an error status and the same JSON.
-        Err(ureq::Error::Status(code, r)) => {
-            r.into_json::<Value>().unwrap_or_else(|_| serde_json::json!({"error": 0, "message": format!("HTTP {code}")}))
+        Err(ureq::Error::Status(status, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            match serde_json::from_str::<Value>(&body) {
+                Ok(v) => v,
+                Err(_) if status == 403 && xml_code(&body) == Some(11) => {
+                    return Err(Error { code: 11, message: BLOCKED.into(), blocked: true });
+                }
+                Err(_) => return Err(Error::new(xml_code(&body).unwrap_or(0), format!("Last.fm: HTTP {status}"))),
+            }
         }
-        Err(e) => return Err(Error { code: 0, message: format!("Last.fm: {e}") }),
+        Err(e) => return Err(Error::new(0, format!("Last.fm: {e}"))),
     };
     match answer["error"].as_u64() {
         Some(code) => {
             let message = answer["message"].as_str().unwrap_or("неизвестная ошибка");
-            Err(Error { code: code as u32, message: format!("Last.fm: {message}") })
+            Err(Error::new(code as u32, format!("Last.fm: {message}")))
         }
         None => Ok(answer),
     }
+}
+
+/// The error code of an XML answer (`<error code="11">`).
+fn xml_code(body: &str) -> Option<u32> {
+    let rest = &body[body.find("<error code=\"")? + 13..];
+    rest[..rest.find('"')?].parse().ok()
 }
 
 fn param(k: &str, v: impl Into<String>) -> (String, String) {
@@ -114,7 +137,7 @@ fn param(k: &str, v: impl Into<String>) -> (String, String) {
 /// A token for connecting: confirmed by the user at `auth_url`, then traded for a session.
 pub fn token() -> Result<String> {
     let v = call("auth.getToken", Vec::new())?;
-    v["token"].as_str().map(String::from).ok_or_else(|| Error { code: 0, message: "Last.fm: нет токена в ответе".into() })
+    v["token"].as_str().map(String::from).ok_or_else(|| Error::new(0, "Last.fm: нет токена в ответе"))
 }
 
 /// The page where the user lets the program scrobble.
@@ -128,7 +151,7 @@ pub fn session(token: &str) -> Result<(String, String)> {
     let s = &v["session"];
     match (s["name"].as_str(), s["key"].as_str()) {
         (Some(name), Some(key)) => Ok((name.to_string(), key.to_string())),
-        _ => Err(Error { code: 0, message: "Last.fm: нет сессии в ответе".into() }),
+        _ => Err(Error::new(0, "Last.fm: нет сессии в ответе")),
     }
 }
 
@@ -198,6 +221,13 @@ mod tests {
         assert!(!t.is_empty());
         let e = session(&t).unwrap_err();
         assert!(e.not_authorized(), "{e:?}");
+    }
+
+    #[test]
+    fn blocked_answer() {
+        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<lfm status=\"failed\">\n<error code=\"11\">Access Denied - You cannot access this service</error>\n</lfm>";
+        assert_eq!(xml_code(body), Some(11));
+        assert_eq!(xml_code("<html>"), None);
     }
 
     #[test]
