@@ -6,6 +6,7 @@ mod effect;
 mod input;
 mod keymap;
 mod media;
+mod title;
 mod ui;
 
 use ymusic_api as api;
@@ -164,9 +165,7 @@ fn main() -> Result<()> {
     // kitty graphics one as text), and the first frame only writes cells that are not blank.
     terminal.clear()?;
     let mut kitty = false;
-    // The terminal's own title comes back on exit (where it keeps a stack of titles).
-    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print("\x1b[22;0t"));
-    let mut title = String::new();
+    let mut title = title::Title::start();
     // Media keys and desktop player widgets; their commands come back as messages.
     let mut media = media::Media::start(move |r| {
         let _ = remote.send(app::Msg::Remote(r));
@@ -192,11 +191,7 @@ fn main() -> Result<()> {
                 _ if app.is_animating() => 200,
                 _ => 1000,
             });
-            let now_title = app.window_title();
-            if now_title != title {
-                let _ = execute!(std::io::stdout(), ratatui::crossterm::terminal::SetTitle(&now_title));
-                title = now_title;
-            }
+            title.set(&app.window_title());
             if dirty || last_draw.elapsed() >= frame {
                 terminal.draw(|f| {
                     ui::draw(f, &mut app);
@@ -271,7 +266,8 @@ fn main() -> Result<()> {
     if kitty {
         input::kitty_off();
     }
-    let _ = execute!(std::io::stdout(), DisableBracketedPaste, ratatui::crossterm::style::Print("\x1b[23;0t"));
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    title.restore();
     ratatui::restore();
 
     // The listening history learns where the track stopped; a slow network does not hold the exit long.
