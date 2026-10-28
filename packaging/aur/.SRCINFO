@@ -13,6 +13,6 @@ pkgbase = ymusic-cli
 	optdepends = pulseaudio: the same with PulseAudio instead of PipeWire
 	options = !lto
 	source = ymusic-cli-3.6.1.tar.gz::https://github.com/iodnoorov/ymusic/archive/refs/tags/v3.6.1.tar.gz
-	sha256sums = SKIP
+	sha256sums = 1eaffe6a7e3a524dfa47270c59af2e7a289bab94161512c75b0dc581a7394f13
 
 pkgname = ymusic-cli
