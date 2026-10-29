@@ -34,15 +34,15 @@ pub enum Task {
     /// An event of a wave session (nothing comes back).
     WaveFeedback { station: String, session: Option<String>, batch: String, event: Value },
     WaveStart { intent: u64, station: String, name: String, settings: Option<(&'static str, &'static str)> },
-    WaveMore { station: String, session: Option<String>, recent: Vec<String> },
+    WaveMore { wave: u64, station: String, session: Option<String>, recent: Vec<String> },
     /// The link to the current track.
     TrackUrl { generation: u64, full_id: String, quality: &'static str },
     /// The link to the next track, played after the current one.
     Preload { generation: u64, idx: usize, track: Track, quality: &'static str },
     Cover(String),
-    SetLike { track: Track, like: bool },
+    SetLike { track: Track, like: bool, req: u64 },
     Dislike(Track),
-    Search { query: String, page: usize },
+    Search { generation: u64, query: String, page: usize },
     /// The tracks of the playlist opened in «Плейлисты».
     OpenPlaylist { pl: Playlist, req: u64 },
     /// A playlist to play.
@@ -63,11 +63,11 @@ pub enum Task {
     ReadClipboard,
     /// Opens a link in the browser.
     OpenUrl(String),
-    LastfmToken,
+    LastfmToken { req: u64 },
     /// Whether the user has confirmed the token yet.
     LastfmSession(String),
     LastfmNowPlaying { session: String, track: Scrobble },
-    LastfmScrobble { session: String, tracks: Vec<Scrobble> },
+    LastfmScrobble { session: String, req: u64, tracks: Vec<Scrobble> },
 }
 
 fn text(e: anyhow::Error) -> ApiError {
@@ -109,8 +109,8 @@ impl Task {
                 let result = api.wave_start(&station, settings).map_err(text);
                 Msg::WaveStarted { intent, station, name, result }
             }
-            Task::WaveMore { station, session, recent } => {
-                Msg::WaveMore(api.wave_more(&station, session.as_deref(), &recent).map_err(text))
+            Task::WaveMore { wave, station, session, recent } => {
+                Msg::WaveMore { wave, result: api.wave_more(&station, session.as_deref(), &recent).map_err(text) }
             }
             Task::TrackUrl { generation, full_id, quality } => {
                 Msg::Url { generation, result: api.track_url(&full_id, quality).map_err(text) }
@@ -123,17 +123,17 @@ impl Task {
                 let result = api.fetch_image(&url).map_err(text);
                 Msg::Cover { url, result }
             }
-            Task::SetLike { track, like } => match api.set_like(&track, like) {
-                Ok(()) => return,
-                Err(e) => Msg::LikeFailed { track, like, err: text(e) },
-            },
+            Task::SetLike { track, like, req } => {
+                let result = api.set_like(&track, like).map_err(text);
+                Msg::LikeSet { id: track.id, req, result }
+            }
             Task::Dislike(track) => match api.set_dislike(&track, true) {
                 Ok(()) => return,
                 Err(e) => Msg::Error(format!("Ошибка дизлайка: {e:#}")),
             },
-            Task::Search { query, page } => {
+            Task::Search { generation, query, page } => {
                 let result = api.search(&query, page).map_err(text);
-                Msg::Search { query, page, result }
+                Msg::Search { generation, query, page, result }
             }
             Task::OpenPlaylist { pl, req } => {
                 let result = api.playlist_tracks(&pl).map_err(text);
@@ -202,15 +202,15 @@ impl Task {
                 }
             }
             Task::OpenUrl(url) => Msg::Opened { ok: open_url(&url), url },
-            Task::LastfmToken => Msg::LastfmToken(lastfm::token()),
+            Task::LastfmToken { req } => Msg::LastfmToken { req, result: lastfm::token() },
             Task::LastfmSession(token) => Msg::LastfmSession { result: lastfm::session(&token), token },
             Task::LastfmNowPlaying { session, track } => {
                 let result = lastfm::now_playing(&session, &track);
-                Msg::LastfmSent { session, tracks: Vec::new(), result }
+                Msg::LastfmSent { session, req: None, result: result.map(|()| 0) }
             }
-            Task::LastfmScrobble { session, tracks } => {
+            Task::LastfmScrobble { session, req, tracks } => {
                 let result = lastfm::scrobble(&session, &tracks);
-                Msg::LastfmSent { session, tracks, result }
+                Msg::LastfmSent { session, req: Some(req), result }
             }
         };
         send(msg);
@@ -263,6 +263,45 @@ fn linked(api: &Api, intent: u64, link: Link) -> Msg {
 }
 
 impl Task {
+    /// A saturated queue must complete the protocol too: no spinner or optimistic write may
+    /// remain waiting forever for a task that was not accepted.
+    fn rejected(&self) -> Msg {
+        let error = || ApiError::from_anyhow(&anyhow::anyhow!("очередь фоновых задач заполнена, повторите действие"));
+        let lastfm_error =
+            || lastfm::Error {
+                code: 0, message: "очередь фоновых задач заполнена".into(), blocked: false
+            };
+        match self {
+            Task::Liked => Msg::Liked(Err(error())),
+            Task::Playlists { req } => Msg::Playlists { req: *req, result: Err(error()) },
+            Task::LessAi => Msg::LessAi(Err(error())),
+            Task::SetLessAi(on) => Msg::LessAiSet { on: *on, result: Err(error()) },
+            Task::WaveStart { intent, station, name, .. } => {
+                Msg::WaveStarted { intent: *intent, station: station.clone(), name: name.clone(), result: Err(error()) }
+            }
+            Task::WaveMore { wave, .. } => Msg::WaveMore { wave: *wave, result: Err(error()) },
+            Task::TrackUrl { generation, .. } => Msg::Url { generation: *generation, result: Err(error()) },
+            Task::Preload { generation, idx, track, .. } => {
+                Msg::Preload { generation: *generation, idx: *idx, id: track.id.clone(), result: Err(error()) }
+            }
+            Task::Cover(url) => Msg::Cover { url: url.clone(), result: Err(error()) },
+            Task::SetLike { track, req, .. } => Msg::LikeSet { id: track.id.clone(), req: *req, result: Err(error()) },
+            Task::Search { generation, query, page } => {
+                Msg::Search { generation: *generation, query: query.clone(), page: *page, result: Err(error()) }
+            }
+            Task::OpenPlaylist { pl, req } => Msg::PlaylistOpened { key: pl.key(), req: *req, result: Err(error()) },
+            Task::LastfmToken { req } => Msg::LastfmToken { req: *req, result: Err(lastfm_error()) },
+            Task::LastfmSession(token) => Msg::LastfmSession { token: token.clone(), result: Err(lastfm_error()) },
+            Task::LastfmNowPlaying { session, .. } => {
+                Msg::LastfmSent { session: session.clone(), req: None, result: Err(lastfm_error()) }
+            }
+            Task::LastfmScrobble { session, req, .. } => {
+                Msg::LastfmSent { session: session.clone(), req: Some(*req), result: Err(lastfm_error()) }
+            }
+            _ => Msg::Error(error().to_string()),
+        }
+    }
+
     /// The user waits for it: something is to play. Others (covers, reports, lists loading in the
     /// background) never hold it up — see `Pool`.
     fn urgent(&self) -> bool {
@@ -311,7 +350,8 @@ impl Runtime {
                 Effect::Task(task) => {
                     let (api, tx) = (api.clone(), self.tx.clone());
                     let (urgent, current) = (task.urgent(), self.generation.clone());
-                    self.pool.run(urgent, move || {
+                    let rejected = task.rejected();
+                    let accepted = self.pool.run(urgent, move || {
                         if task.stale(current.load(Ordering::Relaxed)) {
                             return;
                         }
@@ -319,6 +359,7 @@ impl Runtime {
                             let _ = tx.send(m);
                         });
                     });
+                    if !accepted { let _ = self.tx.send(rejected); }
                 }
             }
         }
@@ -328,6 +369,7 @@ impl Runtime {
 /// Threads for the tasks: at most so many requests go to the server at once (it answers 429
 /// «Concurrency limit exceeded» to more).
 const WORKERS: usize = 4;
+const MAX_QUEUED: usize = 256;
 
 type Job = Box<dyn FnOnce() + Send>;
 
@@ -345,6 +387,7 @@ struct PoolShared {
 
 #[derive(Default)]
 struct Queues {
+    stopped: bool,
     urgent: std::collections::VecDeque<Job>,
     background: std::collections::VecDeque<Job>,
     /// Background jobs running now.
@@ -366,14 +409,26 @@ impl Pool {
         Pool { shared }
     }
 
-    fn run(&self, urgent: bool, job: impl FnOnce() + Send + 'static) {
+    fn run(&self, urgent: bool, job: impl FnOnce() + Send + 'static) -> bool {
         let mut q = self.shared.queues.locked();
+        if q.stopped || q.urgent.len() + q.background.len() >= MAX_QUEUED { return false; }
         if urgent {
             q.urgent.push_back(Box::new(job));
         } else {
             q.background.push_back(Box::new(job));
         }
         self.shared.changed.notify_one();
+        true
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        let mut q = self.shared.queues.locked();
+        q.stopped = true;
+        q.urgent.clear();
+        q.background.clear();
+        self.shared.changed.notify_all();
     }
 }
 
@@ -383,6 +438,7 @@ impl PoolShared {
             let (job, background) = {
                 let mut q = self.queues.locked();
                 loop {
+                    if q.stopped { return; }
                     if let Some(job) = q.urgent.pop_front() {
                         break (job, false);
                     }
@@ -456,5 +512,25 @@ mod tests {
             let _ = after.send("after".into());
         });
         assert_eq!(finished.recv_timeout(Duration::from_secs(5)).unwrap(), "after");
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+    #[test]
+    fn saturation_rejects_work_and_drop_releases_queued_captures() {
+        let pool = Pool::new(0, 0);
+        let guard = Arc::new(());
+        for _ in 0..MAX_QUEUED {
+            let g = guard.clone();
+            assert!(pool.run(false, move || drop(g)));
+        }
+        assert!(!pool.run(true, || {}));
+        assert_eq!(Arc::strong_count(&guard), MAX_QUEUED + 1);
+        drop(pool);
+        assert_eq!(Arc::strong_count(&guard), 1);
+        let task = Task::TrackUrl { generation: 42, full_id: "1".into(), quality: "nq" };
+        assert!(matches!(task.rejected(), Msg::Url { generation: 42, result: Err(_) }));
     }
 }

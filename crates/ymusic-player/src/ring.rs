@@ -189,12 +189,23 @@ impl Ring {
         self.read.load(Ordering::Acquire)
     }
 
-    /// Puts a mark at the current end of the stream; returns the generation it belongs to.
-    pub fn mark(&self, mark: Mark) -> u64 {
+    /// Publish metadata only in the stream it was computed for: a clear during a blocking
+    /// decode/probe must never let a cancelled job publish into the new stream.
+    pub fn mark_if(&self, generation: u64, mark: Mark) -> bool {
         let mut meta = self.meta.locked();
+        if meta.generation != generation { return false; }
         let at = self.written.load(Ordering::Relaxed);
         meta.marks.push_back((at, mark));
-        meta.generation
+        true
+    }
+
+    pub fn start_if(&self, job: u64, generation: u64, mark: Mark) -> bool {
+        let mut meta = self.meta.locked();
+        if meta.generation != generation { return false; }
+        meta.producing = job;
+        let at = self.written.load(Ordering::Relaxed);
+        meta.marks.push_back((at, mark));
+        true
     }
 
     /// Drops the frames not yet handed to the output and all pending marks.
@@ -346,9 +357,9 @@ mod tests {
     fn marks_and_clearing() {
         let ring = Arc::new(Ring::default());
         let generation = ring.begin(1);
-        assert_eq!(ring.mark(Mark::Start { job: 1, at: 0.0, duration: None, gapless: false }), generation);
+        assert!(ring.mark_if(generation, Mark::Start { job: 1, at: 0.0, duration: None, gapless: false }));
         assert!(ring.push(&[0.5; 100], generation));
-        ring.mark(Mark::End);
+        ring.mark_if(generation, Mark::End);
         assert_eq!(ring.reached(0).len(), 1);
         assert!(ring.reached(49).is_empty());
         assert_eq!(ring.reached(50), vec![(50, Mark::End)]);
@@ -423,5 +434,32 @@ mod tests {
         let expected = |i: usize| [i as f32 / total as f32, -(i as f32) / total as f32];
         assert!(got.as_chunks::<2>().0.iter().enumerate().all(|(i, f)| *f == expected(i)));
         assert_eq!(ring.handed(), total as u64);
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn clear_and_seek_reject_late_audio_and_metadata() {
+        let ring = Arc::new(Ring::default());
+        let generation = ring.begin(1);
+        let (go, wait) = std::sync::mpsc::channel();
+        let r = ring.clone();
+        let producer = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            assert!(!r.push(&[0.5; 2], generation));
+            assert!(!r.mark_if(generation, Mark::End));
+            assert!(!r.start_if(2, generation, Mark::Start { job: 2, at: 0., duration: None, gapless: true }));
+        });
+        assert!(ring.request_seek(1, 10.));
+        go.send(()).unwrap();
+        producer.join().unwrap();
+        assert!(ring.reached(u64::MAX).is_empty());
+        let (current, seek) = ring.poll_seek();
+        assert_eq!(seek, Some(10.));
+        assert!(ring.mark_if(current, Mark::Start { job: 1, at: 10., duration: None, gapless: false }));
+        ring.clear();
+        assert!(ring.reached(u64::MAX).is_empty());
     }
 }

@@ -92,6 +92,7 @@ pub struct Search {
     pub editing: bool,
     /// The query the results are for.
     query: String,
+    generation: u64,
     results: Vec<Track>,
     loading: bool,
     /// Pages loaded so far and the number of tracks found (`None`: not known yet — the website
@@ -113,6 +114,10 @@ pub enum Page<E> {
 }
 
 impl Search {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -137,6 +142,7 @@ impl Search {
         if q.is_empty() {
             return false;
         }
+        self.generation += 1;
         self.query = q.to_string();
         self.pages = 0;
         self.total = None;
@@ -156,8 +162,8 @@ impl Search {
     }
 
     /// Page `page` of `query` came: (tracks, total found).
-    pub fn page_loaded<E>(&mut self, query: &str, page: usize, result: Result<(Vec<Track>, Option<usize>), E>) -> Page<E> {
-        if query != self.query || page != self.pages {
+    pub fn page_loaded<E>(&mut self, generation: u64, query: &str, page: usize, result: Result<(Vec<Track>, Option<usize>), E>) -> Page<E> {
+        if generation != self.generation || query != self.query || page != self.pages {
             return Page::Stale;
         }
         self.loading = false;
@@ -199,6 +205,7 @@ pub struct Playlists {
     /// Number of the latest request: an older reply (e.g. from `R` before an edit) is dropped.
     req: u64,
     pub open: Option<OpenPlaylist>,
+    open_req: u64,
     /// Key of the playlist the queue was started from.
     pub playing: Option<String>,
 }
@@ -262,7 +269,8 @@ impl Playlists {
     pub fn reload_open(&mut self) -> Option<(Playlist, u64)> {
         let open = self.open.as_mut()?;
         open.loading = true;
-        open.req += 1;
+        self.open_req += 1;
+        open.req = self.open_req;
         Some((open.pl.clone(), open.req))
     }
 
@@ -313,18 +321,18 @@ mod tests {
         assert!(s.submit());
         assert_eq!(s.next_page(), ("queen".to_string(), 0));
         assert!(!s.can_load_more(), "loading");
-        assert!(matches!(s.page_loaded::<()>("other", 0, Ok((vec![track("x")], None))), Page::Stale));
-        let Page::Loaded { first: true, new } = s.page_loaded::<()>("queen", 0, Ok((vec![track("a"), track("b")], None))) else {
+        assert!(matches!(s.page_loaded::<()>(s.generation(), "other", 0, Ok((vec![track("x")], None))), Page::Stale));
+        let Page::Loaded { first: true, new } = s.page_loaded::<()>(s.generation(), "queen", 0, Ok((vec![track("a"), track("b")], None))) else {
             panic!()
         };
         assert_eq!(ids(&new), ["a", "b"]);
         assert!(s.can_load_more());
         assert_eq!(s.next_page().1, 1);
         // Overlapping pages: only the new tracks; a page with nothing new ends the search.
-        let Page::Loaded { new, .. } = s.page_loaded::<()>("queen", 1, Ok((vec![track("b"), track("c")], None))) else { panic!() };
+        let Page::Loaded { new, .. } = s.page_loaded::<()>(s.generation(), "queen", 1, Ok((vec![track("b"), track("c")], None))) else { panic!() };
         assert_eq!(ids(&new), ["c"]);
         s.next_page();
-        assert!(matches!(s.page_loaded::<()>("queen", 2, Ok((vec![track("a")], None))), Page::Loaded { first: false, .. }));
+        assert!(matches!(s.page_loaded::<()>(s.generation(), "queen", 2, Ok((vec![track("a")], None))), Page::Loaded { first: false, .. }));
         assert_eq!(s.total(), Some(3));
         assert!(!s.can_load_more());
         s.input.clear();
@@ -354,5 +362,39 @@ mod tests {
         let r = p.begin_load();
         p.loaded::<()>(r, Ok(vec![])).unwrap().unwrap();
         assert!(p.open.is_none());
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn reopening_a_playlist_rejects_the_previous_opening() {
+        let mut p = Playlists::default();
+        let pl = Playlist { owner: "1".into(), kind: "1".into(), title: "p".into(), track_count: 0 };
+        p.open(pl.clone());
+        let (_, old) = p.reload_open().unwrap();
+        p.open = None;
+        p.open(pl.clone());
+        let (_, new) = p.reload_open().unwrap();
+        assert_ne!(old, new);
+        assert_eq!(p.open_loaded::<()>(&pl.key(), new, Ok(vec![])), Some(Ok(0)));
+        assert!(p.open_loaded::<()>(&pl.key(), old, Ok(vec![])).is_none());
+    }
+    #[test]
+    fn resubmitting_the_same_search_rejects_the_previous_submission() {
+        let mut s = Search { input: "q".into(), ..Search::default() };
+        s.submit();
+        let old = s.generation();
+        s.next_page();
+        s.input = "other".into();
+        s.submit();
+        s.next_page();
+        s.input = "q".into();
+        s.submit();
+        s.next_page();
+        assert!(matches!(s.page_loaded::<()>(old, "q", 0, Ok((vec![], None))), Page::Stale));
+        assert!(s.loading());
+        assert!(matches!(s.page_loaded::<()>(s.generation(), "q", 0, Ok((vec![], None))), Page::Loaded { .. }));
     }
 }

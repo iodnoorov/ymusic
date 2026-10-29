@@ -184,13 +184,25 @@ impl Queue {
     /// Appends the tracks not in the queue yet (a wave's next batch, a search page); in random
     /// order they are shuffled in, and the list's own order gets them too.
     pub fn append(&mut self, tracks: Vec<Track>) {
-        let known: HashSet<&str> = self.tracks.iter().map(|t| t.id.as_str()).collect();
-        let mut new: Vec<Track> = tracks.into_iter().filter(|t| !known.contains(t.id.as_str())).collect();
+        let mut known: HashSet<String> = self.tracks.iter().map(|t| t.id.clone()).collect();
+        let mut new: Vec<Track> = tracks.into_iter().filter(|t| known.insert(t.id.clone())).collect();
         if let Some(own) = &mut self.unshuffled {
             own.extend(new.iter().cloned());
             shuffle(&mut new);
         }
         self.tracks.extend(new);
+    }
+
+    /// Bound a wave's old history; keeps `keep` predecessors for Previous. Lists are untouched.
+    pub fn trim_history(&mut self, keep: usize) -> usize {
+        if !self.is_wave() { return 0; }
+        let removed = self.pos.unwrap_or(0).saturating_sub(keep);
+        if removed > 0 {
+            self.tracks.drain(..removed);
+            self.pos = self.pos.map(|p| p - removed);
+            self.carried = false;
+        }
+        removed
     }
 
     /// Random order turned on or off from the system (MPRIS, Now Playing): the playing list is
@@ -359,6 +371,19 @@ mod tests {
         assert!(q.on_carried());
         assert!(q.set_shuffled(false));
         assert_eq!(ids(&q), ["a", "x", "y", "z"], "it stays first, the list follows in its order");
+    }
+
+    #[test]
+    fn wave_history_is_bounded_and_previous_still_works() {
+        let mut q = Queue::default();
+        q.replace(Source::Wave, (0..1100).map(|i| track(&i.to_string())).collect());
+        q.select(1050);
+        assert_eq!(q.trim_history(1000), 50);
+        assert_eq!(q.current().unwrap().id, "1050");
+        assert_eq!(q.previous(), Some(999));
+        assert_eq!(q.tracks()[999].id, "1049");
+        q.append(vec![track("1100"), track("1100")]);
+        assert_eq!(q.len(), 1051);
     }
 
     #[test]

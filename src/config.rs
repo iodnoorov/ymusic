@@ -1,5 +1,5 @@
 use crate::api::{quality_index, Quality, QUALITIES};
-use crate::app::{Art, LastfmSession, Output};
+use crate::app::{Art, LastfmSession, Output, PendingScrobbles};
 use crate::eq::{index as eq_index, Preset, PRESETS};
 use crate::queue::Repeat;
 use anyhow::{Context, Result};
@@ -18,11 +18,13 @@ pub struct Config {
     /// Older configs: `false` — no cover; read once into `art` and not written back.
     #[serde(default = "default_true", skip_serializing)]
     pub covers: bool,
+    #[serde(default, deserialize_with = "lenient")]
+    pub lastfm_queue: PendingScrobbles,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { token: None, settings: Settings::default(), covers: true }
+        Config { token: None, settings: Settings::default(), covers: true, lastfm_queue: PendingScrobbles::default() }
     }
 }
 
@@ -201,6 +203,61 @@ impl Config {
     }
 }
 
+/// Desired settings and a deadline independent of where their changes came from. A failed write
+/// keeps both the dirty state and the last successfully saved config, and retries after a delay.
+pub struct SaveState {
+    desired: Settings,
+    queue_revision: u64,
+    due: Option<std::time::Instant>,
+    failed: bool,
+}
+
+impl SaveState {
+    pub fn new(saved: &Settings) -> Self {
+        Self { desired: saved.clone(), queue_revision: 0, due: None, failed: false }
+    }
+    pub fn observe(&mut self, settings: Settings, queue_revision: u64, now: std::time::Instant) {
+        if settings != self.desired || queue_revision != self.queue_revision {
+            self.desired = settings;
+            self.queue_revision = queue_revision;
+            // New input must not indefinitely postpone retry after a disk failure.
+            if !self.failed {
+                self.due = Some(now + std::time::Duration::from_secs(2));
+            }
+        }
+    }
+    pub fn wait(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.due.map(|at| at.saturating_duration_since(now))
+    }
+    pub fn ready(&self, now: std::time::Instant) -> bool {
+        self.due.is_some_and(|at| now >= at)
+    }
+    pub fn flush(
+        &mut self,
+        cfg: &mut Config,
+        queue: PendingScrobbles,
+        now: std::time::Instant,
+        save: impl FnOnce(&Config) -> Result<()>,
+    ) -> Result<()> {
+        let old = std::mem::replace(&mut cfg.settings, self.desired.clone());
+        let old_queue = std::mem::replace(&mut cfg.lastfm_queue, queue);
+        match save(cfg) {
+            Ok(()) => {
+                self.due = None;
+                self.failed = false;
+                Ok(())
+            }
+            Err(e) => {
+                cfg.settings = old;
+                cfg.lastfm_queue = old_queue;
+                self.due = Some(now + std::time::Duration::from_secs(5));
+                self.failed = true;
+                Err(e)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Config, Settings};
@@ -279,5 +336,65 @@ mod tests {
         assert_eq!((back.token.as_deref(), back.settings.volume), (Some("t"), 120));
         assert!(!d.join("real.json.tmp").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn pending_scrobbles_are_private_and_survive_a_config_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("ymusic-outbox-{}", crate::api::random_uuid()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("config.json");
+        let cfg = Config { lastfm_queue: PendingScrobbles {
+            account: "me".into(),
+            tracks: vec![crate::api::lastfm::Scrobble {
+                artist: "a".into(), track: "t".into(), album: String::new(), duration: 100, timestamp: 1,
+            }],
+        }, ..Config::default() };
+        cfg.save_to(&path).unwrap();
+        assert!(Config::load_from(&path).lastfm_queue == cfg.lastfm_queue);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let malformed: Config = serde_json::from_str(r#"{"token":"t","lastfm_queue":"bad"}"#).unwrap();
+        assert_eq!(malformed.token.as_deref(), Some("t"));
+        assert!(malformed.lastfm_queue.tracks.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remote_changes_are_saved_and_disk_failures_retry_without_new_input() {
+        let mut cfg = Config::default();
+        let mut app = crate::app::App::for_test();
+        app.volume = f64::from(cfg.settings.volume);
+        let run = crate::RunOnly { icons: None, output: None };
+        let now = Instant::now();
+        let mut saving = SaveState::new(&cfg.settings);
+        app.on_msg(crate::app::Msg::Remote(crate::media::Remote::Volume(25.)));
+        app.on_msg(crate::app::Msg::Remote(crate::media::Remote::Repeat(crate::queue::Repeat::One)));
+        saving.observe(crate::settings_of(&app, &cfg.settings, run), 0, now);
+        assert!(!saving.ready(now));
+        assert!(saving.ready(now + Duration::from_secs(2)));
+        assert!(
+            saving
+                .flush(&mut cfg, PendingScrobbles::default(), now + Duration::from_secs(2), |_| anyhow::bail!(
+                    "disk full"
+                ))
+                .is_err()
+        );
+        assert_eq!(cfg.settings.volume, 70);
+        saving.observe(crate::settings_of(&app, &cfg.settings, run), 0, now + Duration::from_secs(3));
+        assert!(!saving.ready(now + Duration::from_secs(6)));
+        assert!(saving.ready(now + Duration::from_secs(7)));
+        saving
+            .flush(&mut cfg, PendingScrobbles::default(), now + Duration::from_secs(7), |c| {
+                assert_eq!(c.settings.volume, 25);
+                assert_eq!(c.settings.repeat, crate::queue::Repeat::One);
+                Ok(())
+            })
+            .unwrap();
+        assert!(saving.wait(now + Duration::from_secs(8)).is_none());
     }
 }

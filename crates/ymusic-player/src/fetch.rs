@@ -1,9 +1,10 @@
-//! Downloads a track into memory while it is being decoded. A dropped or stalled connection is
+//! Downloads a track into an anonymous temporary file while it is being decoded. A dropped or stalled connection is
 //! resumed with a Range request from where it stopped; reads wait for the bytes they need.
 
 use crate::Lock;
 use std::sync::PoisonError;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -11,11 +12,14 @@ use std::time::Duration;
 const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Reconnects in a row without receiving anything before the download fails.
 const MAX_RETRIES: u32 = 3;
+const MAX_FILE: u64 = 512 * 1024 * 1024;
 const CHUNK: usize = 64 * 1024;
 
 #[derive(Default)]
 struct State {
-    data: Vec<u8>,
+    file: Option<std::fs::File>,
+    downloaded: u64,
+    network_error: bool,
     /// File size, when the server tells it.
     total: Option<u64>,
     done: bool,
@@ -48,6 +52,13 @@ impl Download {
 
     fn start_with(url: &str, tls: &Arc<rustls::ClientConfig>, stall: Duration) -> Download {
         let shared = Arc::new(Shared::default());
+        match tempfile::tempfile() {
+            Ok(file) => shared.state.locked().file = Some(file),
+            Err(e) => {
+                shared.update(|s| s.error = Some(format!("не удалось создать временный файл трека: {e}")));
+                return Download(shared);
+            }
+        }
         let (s, url, tls) = (shared.clone(), url.to_string(), tls.clone());
         // Only fails when the system is out of threads; the readers then get an error.
         if let Err(e) = std::thread::Builder::new().name("player-download".into()).spawn({
@@ -66,7 +77,16 @@ impl Download {
 
     /// The download gave up: the connection could not be made or kept.
     pub fn failed(&self) -> bool {
-        self.0.state.locked().error.is_some()
+        self.0.state.locked().network_error
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(data: &[u8], done: bool) -> Download {
+        let file = tempfile::tempfile().unwrap();
+        file.write_all_at(data, 0).unwrap();
+        Download(Arc::new(Shared { state: Mutex::new(State {
+            file: Some(file), downloaded: data.len() as u64, done, ..State::default()
+        }), changed: Condvar::new() }))
     }
 
     pub fn reader(&self) -> Reader {
@@ -82,7 +102,8 @@ fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, stall: Durati
         .build();
     let mut retries = 0;
     loop {
-        let have = shared.state.locked().data.len() as u64;
+        if shared.state.locked().cancelled { return; }
+        let have = shared.state.locked().downloaded;
         let mut req = agent.get(url);
         if have > 0 {
             req = req.set("Range", &format!("bytes={have}-"));
@@ -114,7 +135,7 @@ fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, stall: Durati
         };
         retries += 1;
         if retries > MAX_RETRIES || shared.state.locked().cancelled {
-            shared.update(|s| s.error = Some(error));
+            shared.update(|s| { s.error = Some(error); s.network_error = true; });
             return;
         }
         std::thread::sleep(Duration::from_millis(500 * u64::from(retries)));
@@ -133,14 +154,26 @@ fn receive(shared: &Shared, mut body: impl Read, mut skip: u64) -> Result<bool, 
             return Ok(false);
         }
         if n == 0 {
-            let complete = state.total.is_none_or(|t| state.data.len() as u64 >= t);
+            let complete = state.total.is_none_or(|t| state.downloaded >= t);
             drop(state);
             return if complete { Ok(true) } else { Err(("соединение оборвалось".into(), got)) };
         }
         let from = (skip as usize).min(n);
         skip -= from as u64;
-        state.data.extend_from_slice(&buf[from..n]);
-        got = true;
+        let data = &buf[from..n];
+        let result = if state.downloaded + data.len() as u64 > MAX_FILE {
+            Err(io::Error::other("файл трека превышает 512 МиБ"))
+        } else {
+            state.file.as_ref().expect("download file").write_all_at(data, state.downloaded)
+        };
+        if let Err(e) = result {
+            state.error = Some(format!("не удалось сохранить загружаемый трек: {e}"));
+            drop(state);
+            shared.changed.notify_all();
+            return Ok(false);
+        }
+        state.downloaded += data.len() as u64;
+        got |= !data.is_empty();
         drop(state);
         shared.changed.notify_all();
     }
@@ -154,16 +187,17 @@ pub struct Reader {
 
 impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() { return Ok(0); }
         let mut s = self.shared.state.locked();
         loop {
             if s.cancelled {
                 return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "загрузка отменена"));
             }
-            let len = s.data.len() as u64;
+            let len = s.downloaded;
             if self.pos < len {
                 let n = ((len - self.pos) as usize).min(buf.len());
-                let from = self.pos as usize;
-                buf[..n].copy_from_slice(&s.data[from..from + n]);
+                s.file.as_ref().ok_or_else(|| io::Error::other("нет временного файла трека"))?
+                    .read_exact_at(&mut buf[..n], self.pos)?;
                 self.pos += n as u64;
                 return Ok(n);
             }
@@ -191,7 +225,7 @@ impl Seek for Reader {
                         break t;
                     }
                     if s.done {
-                        break s.data.len() as u64;
+                        break s.downloaded;
                     }
                     if s.cancelled || s.error.is_some() {
                         return Err(io::Error::other("размер файла неизвестен"));
@@ -312,5 +346,33 @@ pub(crate) mod tests {
             d2.cancel();
         });
         assert_eq!(r.read(&mut buf).unwrap_err().kind(), std::io::ErrorKind::ConnectionAborted);
+    }
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    #[test]
+    fn empty_reads_do_not_wait_and_spooled_bytes_support_backward_seek() {
+        let d = Download::for_test(b"abcdef", false);
+        let mut r = d.reader();
+        assert_eq!(r.read(&mut []).unwrap(), 0);
+        let mut buf = [0; 3];
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"abc");
+        r.seek(SeekFrom::Start(1)).unwrap();
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"bcd");
+        d.cancel();
+        assert_eq!(r.read(&mut buf).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+    }
+    #[test]
+    fn spool_error_wakes_reader_and_is_not_a_network_failure() {
+        let d = Download::for_test(b"", false);
+        // A deliberately read-only descriptor simulates a local storage failure.
+        d.0.state.locked().file = Some(std::fs::File::open("Cargo.toml").unwrap());
+        assert!(!receive(&d.0, &b"data"[..], 0).unwrap());
+        assert!(d.reader().read(&mut [0; 4]).is_err());
+        assert!(!d.failed());
     }
 }

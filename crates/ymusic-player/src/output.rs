@@ -25,6 +25,8 @@ const FRAME: usize = 8;
 const SERVER_BUFFER_MS: u32 = 200;
 /// How long the server's answer about its delay is trusted: in between, playback is assumed to
 /// go on at our rate.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 const DELAY_REFRESH: Duration = Duration::from_secs(1);
 
 /// The connection to the server: messages are read into `rbuf` and taken from there whole.
@@ -65,6 +67,7 @@ impl Conn {
                 return Ok(None);
             }
             let desc = protocol::read_descriptor(&mut Cursor::new(&self.rbuf[..protocol::DESCRIPTOR_SIZE]))?;
+            if desc.length as usize > MAX_MESSAGE { return Err(anyhow!("слишком большое сообщение звукового сервера")); }
             let len = protocol::DESCRIPTOR_SIZE + desc.length as usize;
             if self.rbuf.len() < len {
                 return Ok(None);
@@ -86,21 +89,38 @@ impl Conn {
 
     /// Sends a command and waits for its reply (while connecting, before the socket is
     /// non-blocking).
-    fn call<T: TagStructRead>(&mut self, seq: u32, command: &Command) -> Result<T> {
-        protocol::write_command_message(&mut self.sock, seq, command, self.version)?;
+    fn call<T: TagStructRead>(&mut self, seq: u32, command: &Command, deadline: Instant) -> Result<T> {
+        let mut bytes = Vec::new();
+        protocol::write_command_message(&mut bytes, seq, command, self.version)?;
+        let mut remaining = bytes.as_slice();
+        while !remaining.is_empty() {
+            self.sock.set_write_timeout(Some(time_left(deadline)?))?;
+            match self.sock.write(remaining)? {
+                0 => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
+                n => remaining = &remaining[n..],
+            }
+        }
         loop {
             while let Some(mut m) = self.message()? {
+                time_left(deadline)?;
                 match m.command {
                     Command::Reply if m.seq == seq => return Ok(T::read(&mut TagStructReader::new(&mut m.payload, self.version), self.version)?),
                     Command::Error(e) if m.seq == seq => return Err(anyhow!("звуковой сервер ответил ошибкой: {e:?}")),
                     _ => {}
                 }
             }
+            self.sock.set_read_timeout(Some(time_left(deadline)?))?;
             if !self.receive()? {
                 return Err(anyhow!("звуковой сервер закрыл соединение"));
             }
         }
     }
+}
+
+fn time_left(deadline: Instant) -> io::Result<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() { Err(io::Error::new(io::ErrorKind::TimedOut, "звуковой сервер не ответил вовремя")) }
+    else { Ok(left) }
 }
 
 /// A command for the output thread and where its reply goes (the latency for a timing query).
@@ -131,13 +151,14 @@ impl Pulse {
         let path = pulseaudio::socket_path_from_env().ok_or_else(none)?;
         let sock = UnixStream::connect(&path).with_context(|| format!("нет связи со звуковым сервером ({})", path.display()))?;
         let mut conn = Conn { sock, rbuf: Vec::new(), version: protocol::MAX_VERSION, requested: 0 };
+        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         let cookie = pulseaudio::cookie_path_from_env().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
         let auth = protocol::AuthParams { version: protocol::MAX_VERSION, supports_shm: false, supports_memfd: false, cookie };
-        let reply: protocol::AuthReply = conn.call(0, &Command::Auth(auth))?;
+        let reply: protocol::AuthReply = conn.call(0, &Command::Auth(auth), deadline)?;
         conn.version = conn.version.min(reply.version);
         let mut props = protocol::Props::new();
         props.set(protocol::Prop::ApplicationName, c"ymusic");
-        let _: protocol::SetClientNameReply = conn.call(1, &Command::SetClientName(props))?;
+        let _: protocol::SetClientNameReply = conn.call(1, &Command::SetClientName(props), deadline)?;
 
         let buffer = RATE * SERVER_BUFFER_MS / 1000 * FRAME as u32;
         let mut props = protocol::Props::new();
@@ -166,8 +187,10 @@ impl Pulse {
             ..Default::default()
         };
         let stream: protocol::CreatePlaybackStreamReply =
-            conn.call(2, &Command::CreatePlaybackStream(params)).context("звуковой сервер не открыл поток")?;
+            conn.call(2, &Command::CreatePlaybackStream(params), deadline).context("звуковой сервер не открыл поток")?;
         conn.requested += stream.requested_bytes as usize;
+        conn.sock.set_read_timeout(None)?;
+        conn.sock.set_write_timeout(None)?;
         conn.sock.set_nonblocking(true)?;
 
         let wake = Arc::new(Wake::new()?);
@@ -323,6 +346,7 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
             }
             while !out.is_empty() {
                 match conn.sock.write(&out) {
+                    Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero).into()),
                     Ok(n) => drop(out.drain(..n)),
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) => return Err(e.into()),
@@ -372,6 +396,43 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
     if let Err(e) = result {
         for (_, reply) in pending.drain() {
             let _ = reply.send(Err(format!("{e:#}")));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn conn(sock: UnixStream) -> Conn {
+        Conn { sock, rbuf: vec![], version: protocol::MAX_VERSION, requested: 0 }
+    }
+    #[test]
+    fn silent_server_and_unrelated_messages_have_a_total_deadline() {
+        for noisy in [false, true] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let mut c = conn(client);
+            let start = Instant::now();
+            let peer = std::thread::spawn(move || {
+                server.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
+                if noisy {
+                    while protocol::write_command_message(&mut server, 999, &Command::Reply, protocol::MAX_VERSION)
+                        .is_ok()
+                    {}
+                } else {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            });
+            assert!(
+                c.call::<protocol::AuthReply>(
+                    1,
+                    &Command::GetPlaybackLatency(protocol::LatencyParams { channel: 0, now: SystemTime::now() }),
+                    start + Duration::from_millis(100)
+                )
+                .is_err()
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+            drop(c);
+            peer.join().unwrap();
         }
     }
 }

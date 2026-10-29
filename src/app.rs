@@ -6,6 +6,11 @@ use crate::api::{
     WaveBatch, MY_WAVE, QUALITIES,
 };
 use crate::api::lastfm::{self, Scrobble};
+mod scrobbling;
+pub use scrobbling::PendingScrobbles;
+use scrobbling::ScrobbleQueue;
+mod wave;
+pub use wave::Wave;
 use crate::effect::{Effect, Task};
 use crate::player::{PlayerCmd, PlayerEvent, TrackFile};
 use crate::input::Press;
@@ -17,7 +22,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 pub enum Msg {
@@ -29,7 +34,7 @@ pub enum Msg {
     Liked(Result<Vec<Track>, ApiError>),
     Stations(Vec<Station>),
     /// Page `page` of the search for `query`: (tracks, total found).
-    Search { query: String, page: usize, result: Result<(Vec<Track>, Option<usize>), ApiError> },
+    Search { generation: u64, query: String, page: usize, result: Result<(Vec<Track>, Option<usize>), ApiError> },
     Playlists { req: u64, result: Result<Vec<Playlist>, ApiError> },
     PlaylistOpened { key: String, req: u64, result: Result<Vec<Track>, ApiError> },
     /// Result of renaming a playlist or changing its tracks: status text on success.
@@ -44,8 +49,8 @@ pub enum Msg {
         result: Result<Vec<Track>, ApiError>,
     },
     WaveStarted { intent: u64, station: String, name: String, result: Result<WaveBatch, ApiError> },
-    WaveMore(Result<WaveBatch, ApiError>),
-    LikeFailed { track: Track, like: bool, err: ApiError },
+    WaveMore { wave: u64, result: Result<WaveBatch, ApiError> },
+    LikeSet { id: String, req: u64, result: Result<(), ApiError> },
     Cover { url: String, result: Result<image::DynamicImage, ApiError> },
     Preload { generation: u64, idx: usize, id: String, result: Result<String, ApiError> },
     /// «Меньше ИИ-музыки» loaded from the account.
@@ -60,11 +65,11 @@ pub enum Msg {
     /// A link opened in the browser (`ok`) or not.
     Opened { url: String, ok: bool },
     /// A Last.fm token to be confirmed in the browser.
-    LastfmToken(Result<String, lastfm::Error>),
+    LastfmToken { req: u64, result: Result<String, lastfm::Error> },
     /// The session for a confirmed `token`: (user name, session key).
     LastfmSession { token: String, result: Result<(String, String), lastfm::Error> },
     /// «Now playing» (no `tracks`) or scrobbles were sent with `session`.
-    LastfmSent { session: String, tracks: Vec<Scrobble>, result: Result<(), lastfm::Error> },
+    LastfmSent { session: String, req: Option<u64>, result: Result<usize, lastfm::Error> },
     /// For the main loop (never passed to `App::on_msg`): a key or pasted text, the window
     /// resized, SIGTERM.
     Input(crate::input::Input),
@@ -84,8 +89,8 @@ impl Msg {
             | Msg::PlaylistEdited { result: Err(e), .. }
             | Msg::ListLoaded { result: Err(e), .. }
             | Msg::WaveStarted { result: Err(e), .. }
-            | Msg::WaveMore(Err(e))
-            | Msg::LikeFailed { err: e, .. }
+            | Msg::WaveMore { result: Err(e), .. }
+            | Msg::LikeSet { result: Err(e), .. }
             | Msg::Cover { result: Err(e), .. }
             | Msg::Preload { result: Err(e), .. }
             | Msg::LessAi(Err(e))
@@ -115,15 +120,6 @@ impl Tab {
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap()
     }
-}
-
-pub struct Wave {
-    pub station: String,
-    pub name: String,
-    pub session: Option<String>,
-    pub batch: String,
-    pub fetching: bool,
-    pub pending_next: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -167,7 +163,7 @@ const LASTFM_POLL: Duration = Duration::from_secs(3);
 pub enum Lastfm {
     Off,
     /// Waiting for a token (`None`), then for the user to confirm it in the browser by `until`.
-    Connecting { token: Option<String>, until: Instant, poll_at: Instant, polling: bool },
+    Connecting { req: u64, token: Option<String>, until: Instant, poll_at: Instant, polling: bool },
     On(LastfmSession),
 }
 
@@ -337,6 +333,16 @@ pub enum StationRow {
     Station(Station),
 }
 
+/// At most one server write per track; intermediate toggles are coalesced.
+struct LikeEdit {
+    track: Track,
+    confirmed: bool,
+    desired: bool,
+    sent: bool,
+    req: u64,
+    latest: u64,
+}
+
 pub struct App {
     pub api: Api,
     /// What the logic has asked for since the last `take_effects`.
@@ -371,6 +377,8 @@ pub struct App {
 
     pub likes: Likes,
     pub liked_state: TableState,
+    like_edits: HashMap<String, LikeEdit>,
+    like_req: u64,
 
     pub stations: Vec<StationRow>,
     pub stations_state: ListState,
@@ -401,8 +409,8 @@ pub struct App {
     /// The progress bar shows the time left instead of the track's length.
     pub remaining_time: bool,
     pub lastfm: Lastfm,
-    /// Scrobbles that did not go through (no network): sent with the next one.
-    lastfm_backlog: Vec<Scrobble>,
+    scrobbles: ScrobbleQueue,
+    lastfm_auth: u64,
     /// Spectrum bars, 0..1 per band, low to high.
     pub spectrum: Vec<f32>,
     spectrum_asked: Instant,
@@ -485,6 +493,8 @@ impl App {
             awaiting_start: false,
             likes: Likes::default(),
             liked_state: TableState::default(),
+            like_edits: HashMap::new(),
+            like_req: 0,
             stations: Vec::new(),
             stations_state: ListState::default(),
             search: Search::default(),
@@ -503,7 +513,8 @@ impl App {
             hide_account: false,
             remaining_time: false,
             lastfm: Lastfm::Off,
-            lastfm_backlog: Vec::new(),
+            scrobbles: ScrobbleQueue::default(),
+            lastfm_auth: 0,
             spectrum: vec![0.0; crate::player::SPECTRUM_BANDS],
             spectrum_asked: Instant::now(),
             clear_images: false,
@@ -889,114 +900,6 @@ impl App {
         self.lastfm_play();
     }
 
-    /// Last.fm learns the track plays once it does, and gets a scrobble once it is listened long
-    /// enough (see `lastfm::scrobble_after`).
-    fn lastfm_play(&mut self) {
-        let Lastfm::On(s) = &self.lastfm else { return };
-        let session = s.key.clone();
-        let duration = self.duration;
-        let Some(play) = &mut self.play else { return };
-        let track = &play.report.track;
-        let artist = track.main_artist.as_ref().map_or(track.artists.clone(), |(_, name)| name.clone());
-        let item = Scrobble {
-            artist,
-            track: track.title.clone(),
-            album: track.album.clone(),
-            duration: duration.round() as u64,
-            timestamp: play.started_unix,
-        };
-        if !std::mem::replace(&mut play.now_playing_sent, true) {
-            self.task(Task::LastfmNowPlaying { session: session.clone(), track: item.clone() });
-        }
-        let Some(play) = &mut self.play else { return };
-        if !play.scrobbled && lastfm::scrobble_after(duration).is_some_and(|after| play.report.played >= after) {
-            play.scrobbled = true;
-            let mut tracks = std::mem::take(&mut self.lastfm_backlog);
-            tracks.push(item);
-            self.task(Task::LastfmScrobble { session, tracks });
-        }
-    }
-
-    /// Starts connecting Last.fm: a token is asked for, then confirmed by the user in the browser.
-    fn connect_lastfm(&mut self) {
-        let now = Instant::now();
-        self.lastfm = Lastfm::Connecting { token: None, until: now + LASTFM_CONFIRM, poll_at: now, polling: false };
-        self.set_status("Last.fm: подключение…");
-        self.task(Task::LastfmToken);
-    }
-
-    /// While connecting: asks now and then whether the access has been confirmed.
-    fn poll_lastfm(&mut self) {
-        let now = Instant::now();
-        let Lastfm::Connecting { token: Some(token), until, poll_at, polling } = &mut self.lastfm else { return };
-        if *polling || now < *poll_at {
-            return;
-        }
-        if now >= *until {
-            self.lastfm = Lastfm::Off;
-            self.set_error("Last.fm: доступ не подтверждён — подключите снова в настройках");
-            return;
-        }
-        *polling = true;
-        let token = token.clone();
-        self.task(Task::LastfmSession(token));
-    }
-
-    fn on_lastfm_session(&mut self, token: String, result: Result<(String, String), lastfm::Error>) {
-        let Lastfm::Connecting { token: Some(t), polling, poll_at, .. } = &mut self.lastfm else { return };
-        if *t != token {
-            return;
-        }
-        match result {
-            Ok((name, key)) => {
-                self.set_status(format!("Last.fm подключён: {name}"));
-                self.lastfm = Lastfm::On(LastfmSession { name, key });
-            }
-            // Not confirmed yet.
-            Err(e) if e.not_authorized() || e.is_temporary() => {
-                *polling = false;
-                *poll_at = Instant::now() + LASTFM_POLL;
-            }
-            Err(e) => {
-                self.lastfm = Lastfm::Off;
-                self.set_error(format!("Не удалось подключить Last.fm: {e}"));
-            }
-        }
-    }
-
-    fn on_lastfm_sent(&mut self, session: String, tracks: Vec<Scrobble>, result: Result<(), lastfm::Error>) {
-        if !matches!(&self.lastfm, Lastfm::On(s) if s.key == session) {
-            return;
-        }
-        match result {
-            Ok(()) => {}
-            Err(e) if e.is_session() => {
-                self.lastfm = Lastfm::Off;
-                self.lastfm_backlog.clear();
-                self.set_error("Last.fm: доступ отозван — подключите снова в настройках");
-            }
-            // Sent again with the next scrobble; the oldest go first if too many wait.
-            Err(e) if e.is_temporary() => {
-                if !tracks.is_empty() {
-                    if e.blocked {
-                        self.set_error(format!("Скробблы ждут отправки: {e}"));
-                    }
-                    let mut all = tracks;
-                    all.append(&mut self.lastfm_backlog);
-                    let extra = all.len().saturating_sub(lastfm::MAX_BATCH);
-                    all.drain(..extra);
-                    self.lastfm_backlog = all;
-                }
-            }
-            Err(e) if tracks.is_empty() => drop(e),
-            Err(e) => self.set_error(format!("Не удалось отправить скроббл: {e}")),
-        }
-    }
-
-    pub fn lastfm_session(&self) -> Option<&LastfmSession> {
-        if let Lastfm::On(s) = &self.lastfm { Some(s) } else { None }
-    }
-
     /// The terminal window's title: what plays now.
     pub fn window_title(&self) -> String {
         match self.current() {
@@ -1057,9 +960,10 @@ impl App {
     }
 
     /// Updates state for a new current track. `preloaded`: the player already switched to it.
-    fn begin_track(&mut self, idx: usize, preloaded: bool) -> bool {
+    fn begin_track(&mut self, mut idx: usize, preloaded: bool) -> bool {
         let Some(track) = self.queue.tracks().get(idx).cloned() else { return false };
         self.queue.select(idx);
+        idx -= self.queue.trim_history(1000);
         self.queue_state.select(Some(idx));
         self.generation += 1;
         self.time_pos = 0.0;
@@ -1230,15 +1134,6 @@ impl App {
         self.intent
     }
 
-    fn start_wave(&mut self, station: Station) {
-        let intent = self.new_intent();
-        let name = station.name.clone();
-        self.set_status(format!("Запуск: {name}…"));
-        let settings = station.settings;
-        let id = station.id.clone();
-        self.task(Task::WaveStart { intent, station: id, name, settings });
-    }
-
     fn load_cover(&mut self, url: Option<String>) {
         let Some(url) = url else { return };
         if self.art != Art::Cover
@@ -1282,17 +1177,6 @@ impl App {
         self.start_wave(st);
     }
 
-    fn fetch_more_wave(&mut self) {
-        let Some(w) = &mut self.wave else { return };
-        if w.fetching {
-            return;
-        }
-        w.fetching = true;
-        let (st, sess) = (w.station.clone(), w.session.clone());
-        let recent: Vec<String> = self.queue.tracks().iter().rev().take(10).rev().map(Track::full_id).collect();
-        self.task(Task::WaveMore { station: st, session: sess, recent });
-    }
-
     // ------------------------------------------------------------ likes
 
     fn toggle_like(&mut self, track: Track) {
@@ -1307,7 +1191,42 @@ impl App {
         } else {
             format!("Убрано из «Мне нравится»: {}", track.title)
         });
-        self.task(Task::SetLike { track, like });
+        self.like_req += 1;
+        let req = self.like_req;
+        if let Some(edit) = self.like_edits.get_mut(&track.id) {
+            edit.desired = like;
+            edit.latest = req;
+        } else {
+            self.like_edits.insert(track.id.clone(), LikeEdit {
+                track: track.clone(), confirmed: !like, desired: like, sent: like, req, latest: req,
+            });
+            self.task(Task::SetLike { track, like, req });
+        }
+    }
+
+    fn on_like_set(&mut self, id: String, req: u64, result: Result<(), ApiError>) {
+        let Some(mut edit) = self.like_edits.remove(&id) else { return };
+        if edit.req != req {
+            self.like_edits.insert(id, edit);
+            return;
+        }
+        if result.is_ok() {
+            edit.confirmed = edit.sent;
+        }
+        let newer = edit.latest != req;
+        if (result.is_err() && newer) || (result.is_ok() && edit.desired != edit.confirmed) {
+            edit.req = edit.latest;
+            edit.sent = edit.desired;
+            self.task(Task::SetLike { track: edit.track.clone(), like: edit.sent, req: edit.req });
+            self.like_edits.insert(id, edit);
+        } else if let Err(e) = result {
+            self.apply_like(&edit.track, edit.confirmed);
+            self.set_error(format!("Ошибка лайка: {e}"));
+        } else if self.likes.loading() {
+            // The reload may have captured the server before this write completed. Keep the
+            // confirmed value in Likes' pending overlay even after removing the in-flight edit.
+            self.apply_like(&edit.track, edit.desired);
+        }
     }
 
     fn apply_like(&mut self, track: &Track, like: bool) {
@@ -1414,15 +1333,22 @@ impl App {
                     }
                 }
             }
-            Msg::LikedIds(ids) => self.likes.ids_loaded(&ids),
-            Msg::Liked(r) => match self.likes.loaded(r) {
-                Ok(()) => {
-                    if !self.likes.tracks().is_empty() && self.liked_state.selected().is_none() {
-                        self.liked_state.select(Some(0));
+            Msg::LikedIds(ids) => {
+                self.likes.ids_loaded(&ids);
+                for edit in self.like_edits.values() { self.likes.set(&edit.track, edit.desired); }
+            }
+            Msg::Liked(r) => {
+                let result = self.likes.loaded(r);
+                for edit in self.like_edits.values() { self.likes.set(&edit.track, edit.desired); }
+                match result {
+                    Ok(()) => {
+                        if !self.likes.tracks().is_empty() && self.liked_state.selected().is_none() {
+                            self.liked_state.select(Some(0));
+                        }
                     }
+                    Err(e) => self.set_error(format!("Не удалось загрузить «Мне нравится»: {e}")),
                 }
-                Err(e) => self.set_error(format!("Не удалось загрузить «Мне нравится»: {e}")),
-            },
+            }
             Msg::Stations(list) => {
                 let mut all = default_stations();
                 all.retain(|s| s.id == MY_WAVE);
@@ -1432,7 +1358,7 @@ impl App {
                 all.extend(rest.into_iter().filter(|s| s.id != MY_WAVE));
                 self.set_stations(all);
             }
-            Msg::Search { query, page, result } => match self.search.page_loaded(&query, page, result) {
+            Msg::Search { generation, query, page, result } => match self.search.page_loaded(generation, &query, page, result) {
                 Page::Stale => {}
                 Page::Failed(e) => self.set_error(format!("Ошибка поиска: {e}")),
                 Page::Loaded { first, new } => {
@@ -1488,62 +1414,9 @@ impl App {
                 }
                 Err(e) => self.set_error(format!("{name}: не удалось загрузить треки: {e}")),
             },
-            Msg::WaveStarted { station, name, result, .. } => match result {
-                Ok(b) => {
-                    let from = station.replace(':', "-");
-                    let wave = Wave {
-                        station,
-                        name: name.clone(),
-                        session: b.session_id,
-                        batch: b.batch_id.clone(),
-                        fetching: false,
-                        pending_next: false,
-                    };
-                    let finishing = self.finishing_track();
-                    if finishing {
-                        self.queue_after_current(b.tracks, Source::Wave, Some(wave));
-                    } else {
-                        self.report_end(End::Other);
-                        self.wave = Some(wave);
-                        self.queue.replace(Source::Wave, b.tracks);
-                        self.search.feeds_queue = false;
-                        self.preload = None;
-                    }
-                    self.wave_feedback(json!({"type": "radioStarted", "timestamp": iso_now(), "from": from}), None);
-                    self.tab = Tab::Wave;
-                    if finishing {
-                        self.set_status(format!("После этого трека: {name}"));
-                    } else {
-                        self.set_status(format!("Играет: {name}"));
-                        self.next(End::Silent);
-                    }
-                }
-                Err(e) => self.set_error(format!("Не удалось запустить волну: {e}")),
-            },
-            Msg::WaveMore(r) => {
-                let Some(w) = &mut self.wave else { return };
-                w.fetching = false;
-                match r {
-                    Ok(b) => {
-                        w.batch = b.batch_id;
-                        if b.session_id.is_some() {
-                            w.session = b.session_id;
-                        }
-                        let pending = std::mem::take(&mut w.pending_next);
-                        self.queue.append(b.tracks);
-                        if pending {
-                            self.next(End::Silent);
-                        } else {
-                            self.schedule_preload();
-                        }
-                    }
-                    Err(e) => self.set_error(format!("Волна: {e}")),
-                }
-            }
-            Msg::LikeFailed { track, like, err } => {
-                self.apply_like(&track, !like);
-                self.set_error(format!("Ошибка лайка: {err}"));
-            }
+            Msg::WaveStarted { intent, station, name, result } => self.on_wave_started(intent, station, name, result),
+            Msg::WaveMore { wave, result } => self.on_wave_more(wave, result),
+            Msg::LikeSet { id, req, result } => self.on_like_set(id, req, result),
             Msg::Error(s) => self.set_error(s),
             // Without a utility it is up to the terminal (OSC 52), which may ignore it: the link
             // stays in the status to be selected by hand.
@@ -1569,24 +1442,9 @@ impl App {
                     self.task(Task::CopyWithTool(url));
                 }
             }
-            Msg::LastfmToken(result) => {
-                let Lastfm::Connecting { token: token @ None, poll_at, .. } = &mut self.lastfm else { return };
-                match result {
-                    Ok(t) => {
-                        *poll_at = Instant::now() + LASTFM_POLL;
-                        let url = lastfm::auth_url(&t);
-                        *token = Some(t);
-                        self.set_status("Last.fm: разрешите доступ в открывшемся браузере");
-                        self.task(Task::OpenUrl(url));
-                    }
-                    Err(e) => {
-                        self.lastfm = Lastfm::Off;
-                        self.set_error(format!("Не удалось подключить Last.fm: {e}"));
-                    }
-                }
-            }
+            Msg::LastfmToken { req, result } => self.on_lastfm_token(req, result),
             Msg::LastfmSession { token, result } => self.on_lastfm_session(token, result),
-            Msg::LastfmSent { session, tracks, result } => self.on_lastfm_sent(session, tracks, result),
+            Msg::LastfmSent { session, req, result } => self.on_lastfm_sent(session, req, result),
             Msg::LessAi(r) => match r {
                 Ok(on) => self.less_ai = Some(on),
                 Err(e) => self.set_error(format!("Не удалось загрузить настройки аккаунта: {e}")),
@@ -1833,7 +1691,8 @@ impl App {
     /// Requests the next page of the current search.
     fn load_search_page(&mut self) {
         let (query, page) = self.search.next_page();
-        self.task(Task::Search { query, page });
+        let generation = self.search.generation();
+        self.task(Task::Search { generation, query, page });
     }
 
     /// Loads the next search page when the queue played from the search is close to its end.
@@ -2033,7 +1892,7 @@ impl App {
                 }
                 Lastfm::On(_) => {
                     self.lastfm = Lastfm::Off;
-                    self.lastfm_backlog.clear();
+                    self.scrobbles.clear();
                     self.set_status("Last.fm отключён");
                 }
             },
@@ -2767,6 +2626,7 @@ mod tests {
         app.finish_track = true;
         app.queue.replace(Source::Wave, vec![t("a"), t("b")]);
         app.wave = Some(Wave {
+            id: 1,
             station: "user:onyourwave".into(),
             name: "Моя волна".into(),
             session: None,
@@ -2853,6 +2713,7 @@ mod tests {
         // the next track is asked for.
         app.queue.replace(Source::Wave, vec![t("w1"), t("w2")]);
         app.wave = Some(Wave {
+            id: 1,
             station: "user:onyourwave".into(),
             name: "Моя волна".into(),
             session: Some("s".into()),
@@ -3306,8 +3167,8 @@ mod tests {
         let mut app = App::for_test();
         // Connecting: a token, the browser, then polls until the user has confirmed.
         app.connect_lastfm();
-        assert!(matches!(app.take_tasks()[..], [Task::LastfmToken]));
-        app.on_msg(Msg::LastfmToken(Ok("tok".into())));
+        assert!(matches!(app.take_tasks()[..], [Task::LastfmToken { .. }]));
+        app.on_msg(Msg::LastfmToken { req: app.lastfm_auth, result: Ok("tok".into()) });
         assert!(matches!(&app.take_tasks()[..], [Task::OpenUrl(url)] if url.ends_with("&token=tok")));
         assert!(matches!(app.lastfm, Lastfm::Connecting { token: Some(_), .. }));
         let Lastfm::Connecting { poll_at, .. } = &mut app.lastfm else { panic!() };
@@ -3362,7 +3223,7 @@ mod tests {
         // The network failed: it goes again with the next scrobble.
         app.on_msg(Msg::LastfmSent {
             session: "sk".into(),
-            tracks: vec![a.clone()],
+            req: app.scrobbles.in_flight(),
             result: Err(lastfm::Error { code: 0, message: "нет сети".into(), blocked: false }),
         });
         // A track of 30 s or shorter is only shown as playing.
@@ -3382,7 +3243,7 @@ mod tests {
         // A revoked session disconnects.
         app.on_msg(Msg::LastfmSent {
             session: "sk".into(),
-            tracks: Vec::new(),
+            req: None,
             result: Err(lastfm::Error { code: 9, message: "Invalid session key".into(), blocked: false }),
         });
         assert!(matches!(app.lastfm, Lastfm::Off) && app.status_error);
@@ -3512,7 +3373,7 @@ mod tests {
         app.tab = Tab::Search;
         search(&mut app, "q");
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(0..100), Some(250))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 0, result: Ok((page(0..100), Some(250))) });
         assert_eq!((app.search.results().len(), app.search.total(), app.search.loading()), (100, Some(250), false));
 
         // Far from the end: nothing more is requested.
@@ -3523,12 +3384,12 @@ mod tests {
         assert!(app.search.loading());
 
         // Replies to another query or page are ignored.
-        app.on_msg(Msg::Search { query: "old".into(), page: 1, result: Ok((page(500..600), Some(900))) });
-        app.on_msg(Msg::Search { query: "q".into(), page: 0, result: Ok((page(500..600), Some(900))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "old".into(), page: 1, result: Ok((page(500..600), Some(900))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 0, result: Ok((page(500..600), Some(900))) });
         assert_eq!(app.search.results().len(), 100);
 
         // Overlapping tracks are not duplicated; selection stays in place.
-        app.on_msg(Msg::Search { query: "q".into(), page: 1, result: Ok((page(90..190), Some(250))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 1, result: Ok((page(90..190), Some(250))) });
         assert_eq!(app.search.results().len(), 190);
         assert_eq!(app.search_state.selected(), Some(85));
 
@@ -3538,29 +3399,29 @@ mod tests {
         assert_eq!((app.queue.len(), app.queue.pos(), app.search.loading()), (190, Some(0), false));
         app.begin_track(175, false);
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { query: "q".into(), page: 2, result: Ok((page(180..290), Some(400))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 2, result: Ok((page(180..290), Some(400))) });
         assert_eq!((app.search.results().len(), app.queue.len()), (290, 290));
         assert_eq!(app.queue.tracks()[289].id, "289");
         // A new search does not touch the playing queue.
         search(&mut app, "new");
-        app.on_msg(Msg::Search { query: "new".into(), page: 0, result: Ok((page(1000..1100), Some(900))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "new".into(), page: 0, result: Ok((page(1000..1100), Some(900))) });
         assert_eq!(app.queue.len(), 290);
 
         // A page without new tracks ends the paging.
         app.move_sel(1000);
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { query: "new".into(), page: 1, result: Ok((page(1000..1100), Some(900))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "new".into(), page: 1, result: Ok((page(1000..1100), Some(900))) });
         assert_eq!(app.search.total(), Some(100));
         app.move_sel(1000);
         assert!(!app.search.loading());
 
         // The website API does not count the results: pages are loaded until the last one.
         search(&mut app, "web");
-        app.on_msg(Msg::Search { query: "web".into(), page: 0, result: Ok((page(0..100), None)) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "web".into(), page: 0, result: Ok((page(0..100), None)) });
         assert_eq!(app.search.total(), None);
         app.move_sel(1000);
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { query: "web".into(), page: 1, result: Ok((page(100..130), Some(130))) });
+        app.on_msg(Msg::Search { generation: app.search.generation(), query: "web".into(), page: 1, result: Ok((page(100..130), Some(130))) });
         assert_eq!((app.search.results().len(), app.search.total()), (130, Some(130)));
         app.move_sel(1000);
         assert!(!app.search.loading());
@@ -3712,5 +3573,127 @@ mod tests {
         app.play_list("Мне нравится", PlayContext::default(), vec![t("c")], 0);
         app.on_msg(list(link, "Трек по ссылке", vec![t("d")]));
         assert_eq!(app.queue.tracks()[0].id, "c");
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    fn track(id: &str) -> Track {
+        Track::from_json(&json!({"id": id, "title": id, "durationMs":100000,"available":true})).unwrap()
+    }
+    #[test]
+    fn wave_replies_belong_to_their_start_even_for_the_same_station() {
+        let mut app = App::for_test();
+        let station = default_stations().remove(0);
+        app.start_wave(station.clone());
+        let old = app.intent;
+        let batch = || WaveBatch { session_id: Some("s".into()), batch_id: "b".into(), tracks: vec![track("a")] };
+        app.on_msg(Msg::WaveStarted {
+            intent: old,
+            station: station.id.clone(),
+            name: station.name.clone(),
+            result: Ok(batch()),
+        });
+        app.start_wave(station.clone());
+        let current = app.intent;
+        app.on_msg(Msg::WaveStarted { intent: current, station: station.id, name: station.name, result: Ok(batch()) });
+        app.wave.as_mut().unwrap().fetching = true;
+        app.on_msg(Msg::WaveMore {
+            wave: old,
+            result: Ok(WaveBatch {
+                session_id: Some("old".into()),
+                batch_id: "old".into(),
+                tracks: vec![track("old")],
+            }),
+        });
+        assert_eq!(app.wave.as_ref().unwrap().session.as_deref(), Some("s"));
+        assert!(app.wave.as_ref().unwrap().fetching && !app.queue.contains("old"));
+        app.on_msg(Msg::WaveMore {
+            wave: current,
+            result: Ok(WaveBatch {
+                session_id: Some("new".into()),
+                batch_id: "new".into(),
+                tracks: vec![track("new")],
+            }),
+        });
+        assert!(app.queue.contains("new") && !app.wave.as_ref().unwrap().fetching);
+    }
+    #[test]
+    fn likes_are_serialized_and_a_late_failure_preserves_the_latest_intent() {
+        let mut app = App::for_test();
+        let t = track("1");
+        app.toggle_like(t.clone());
+        app.toggle_like(t.clone());
+        app.toggle_like(t.clone());
+        let tasks = app.take_tasks();
+        let [Task::SetLike { req, like: true, .. }] = tasks.as_slice() else { panic!("{tasks:?}") };
+        let old = *req;
+        app.on_msg(Msg::LikeSet {
+            id: t.id.clone(),
+            req: old,
+            result: Err(ApiError::from_anyhow(&anyhow::anyhow!("network"))),
+        });
+        assert!(app.is_liked(&t));
+        let tasks = app.take_tasks();
+        let [Task::SetLike { req, like: true, .. }] = tasks.as_slice() else { panic!("{tasks:?}") };
+        let current = *req;
+        assert_ne!(old, current);
+        app.on_msg(Msg::LikeSet { id: t.id.clone(), req: old, result: Ok(()) });
+        assert!(app.take_tasks().is_empty());
+        app.on_msg(Msg::LikeSet { id: t.id.clone(), req: current, result: Ok(()) });
+        assert!(app.is_liked(&t) && app.like_edits.is_empty());
+        app.toggle_like(t.clone());
+        let tasks = app.take_tasks();
+        let [Task::SetLike { req, like: false, .. }] = tasks.as_slice() else { panic!() };
+        app.on_msg(Msg::LikeSet {
+            id: t.id.clone(),
+            req: *req,
+            result: Err(ApiError::from_anyhow(&anyhow::anyhow!("failed"))),
+        });
+        assert!(app.is_liked(&t), "failed latest operation restores the confirmed state");
+    }
+    #[test]
+    fn like_reload_preserves_in_flight_desired_value() {
+        let mut app = App::for_test();
+        let t = track("1");
+        app.toggle_like(t.clone());
+        app.load_liked();
+        app.on_msg(Msg::LikedIds(vec![]));
+        app.on_msg(Msg::Liked(Ok(vec![])));
+        assert!(app.is_liked(&t));
+        app.toggle_like(t.clone());
+        let req = app.like_edits[&t.id].req;
+        app.on_msg(Msg::LikeSet { id: t.id.clone(), req, result: Ok(()) });
+        assert!(!app.is_liked(&t));
+        assert!(app.take_tasks().iter().any(|task| matches!(task, Task::SetLike { like: false, .. })));
+    }
+    #[test]
+    fn like_acknowledgement_during_reload_survives_its_old_snapshot() {
+        let mut app = App::for_test();
+        let t = track("1");
+        app.toggle_like(t.clone());
+        let req = app.like_edits[&t.id].req;
+        app.load_liked();
+        app.on_msg(Msg::LikeSet { id: t.id.clone(), req, result: Ok(()) });
+        assert!(app.like_edits.is_empty());
+        app.on_msg(Msg::LikedIds(vec![]));
+        app.on_msg(Msg::Liked(Ok(vec![])));
+        assert!(app.is_liked(&t));
+    }
+
+    #[test]
+    fn cancelled_lastfm_token_cannot_complete_a_new_attempt() {
+        let mut app = App::for_test();
+        app.connect_lastfm();
+        let old = app.lastfm_auth;
+        app.lastfm = Lastfm::Off;
+        app.connect_lastfm();
+        app.take_tasks();
+        app.on_msg(Msg::LastfmToken { req: old, result: Ok("old".into()) });
+        assert!(matches!(app.lastfm, Lastfm::Connecting { token: None, .. }));
+        assert!(app.take_tasks().is_empty());
+        app.on_msg(Msg::LastfmToken { req: app.lastfm_auth, result: Ok("new".into()) });
+        assert!(matches!(app.lastfm,Lastfm::Connecting { token:Some(ref t),.. } if t=="new"));
     }
 }

@@ -18,7 +18,7 @@ pub fn available() -> bool {
 }
 
 /// A listened track as Last.fm takes it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scrobble {
     pub artist: String,
     pub track: String,
@@ -175,14 +175,28 @@ pub fn now_playing(session: &str, t: &Scrobble) -> Result<()> {
 }
 
 /// Adds listened tracks to the user's history (at most `MAX_BATCH`).
-pub fn scrobble(session: &str, tracks: &[Scrobble]) -> Result<()> {
+pub fn scrobble(session: &str, tracks: &[Scrobble]) -> Result<usize> {
+    if tracks.is_empty() || tracks.len() > MAX_BATCH {
+        return Err(Error::new(6, "Last.fm: пакет должен содержать от 1 до 50 скробблов"));
+    }
     let mut params = vec![param("sk", session)];
-    for (i, t) in tracks.iter().take(MAX_BATCH).enumerate() {
+    for (i, t) in tracks.iter().enumerate() {
         let suffix = format!("[{i}]");
         track_params(t, &suffix, &mut params);
         params.push(param(&format!("timestamp{suffix}"), t.timestamp.to_string()));
     }
-    call("track.scrobble", params).map(drop)
+    let v = call("track.scrobble", params)?;
+    scrobble_result(&v, tracks.len())
+}
+
+/// Validate the acknowledgement count; filtered items are final too, but reported to the user.
+fn scrobble_result(v: &Value, sent: usize) -> Result<usize> {
+    let counts = &v["scrobbles"]["@attr"];
+    let number = |v: &Value| v.as_u64().or_else(|| v.as_str()?.parse().ok());
+    match (number(&counts["accepted"]), number(&counts["ignored"])) {
+        (Some(a), Some(i)) if a.checked_add(i) == Some(sent as u64) => Ok(i as usize),
+        _ => Err(Error::new(0, "Last.fm: неполное подтверждение пакета скробблов")),
+    }
 }
 
 /// When a track counts as listened: half of it or 4 minutes, whichever comes first; tracks of
@@ -228,6 +242,16 @@ mod tests {
         let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<lfm status=\"failed\">\n<error code=\"11\">Access Denied - You cannot access this service</error>\n</lfm>";
         assert_eq!(xml_code(body), Some(11));
         assert_eq!(xml_code("<html>"), None);
+    }
+
+    #[test]
+    fn acknowledgements_and_batch_limits() {
+        let ok=serde_json::json!({"scrobbles":{"@attr":{"accepted":"49","ignored":"1"}}});
+        assert_eq!(scrobble_result(&ok,50).unwrap(),1);
+        assert!(scrobble_result(&ok,51).is_err());
+        assert!(scrobble_result(&serde_json::json!({}),1).is_err());
+        let t=Scrobble{artist:"a".into(),track:"t".into(),album:String::new(),duration:100,timestamp:1};
+        assert_eq!(scrobble("unused",&vec![t;51]).unwrap_err().code,6);
     }
 
     #[test]

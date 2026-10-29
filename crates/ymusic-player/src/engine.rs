@@ -34,17 +34,26 @@ struct Job {
     /// See `TrackFile`.
     length: Option<f64>,
     start: f64,
+    prepared: Mutex<Option<Receiver<std::result::Result<Track, String>>>>,
 }
 
 impl Job {
     fn new(file: &TrackFile, tls: &Arc<rustls::ClientConfig>) -> Arc<Job> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let download = Download::start(&file.url, tls);
+        let (ready, prepared) = mpsc::channel();
+        let (d, length) = (download.clone(), file.length);
+        let _ = std::thread::Builder::new().name("player-prepare".into()).spawn(move || {
+            let result = Track::from_download(&d, length).map_err(|e| format!("{e:#}"));
+            let _ = ready.send(result);
+        });
         Arc::new(Job {
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            download: Download::start(&file.url, tls),
+            download,
             cancelled: AtomicBool::new(false),
             length: file.length,
             start: file.start,
+            prepared: Mutex::new(Some(prepared)),
         })
     }
 
@@ -464,8 +473,6 @@ fn produce(shared: &Shared, work: &Receiver<Work>) {
 
 /// A track on its way into the ring: decoded and resampled to our rate.
 struct Track {
-    /// Keeps the download going while the track is decoded.
-    _job: Option<Arc<Job>>,
     dec: Decoder,
     resampler: Resampler,
     duration: Option<f64>,
@@ -479,15 +486,22 @@ struct Track {
 
 impl Track {
     fn open(job: &Arc<Job>) -> Result<Track> {
-        let mut track = Track::from_decoder(Decoder::open(Box::new(job.download.reader()))?)?;
-        track._job = Some(job.clone());
-        track.duration = track.duration.or(job.length);
+        let prepared = job.prepared.locked().take();
+        if let Some(ready) = prepared {
+            return ready.recv().map_err(|_| anyhow::anyhow!("подготовка трека прервана"))?
+                .map_err(anyhow::Error::msg);
+        }
+        Track::from_download(&job.download, job.length)
+    }
+
+    fn from_download(download: &Download, length: Option<f64>) -> Result<Track> {
+        let mut track = Self::from_decoder(Decoder::open(Box::new(download.reader()))?)?;
+        track.duration = track.duration.or(length);
         Ok(track)
     }
 
     fn from_decoder(dec: Decoder) -> Result<Track> {
         Ok(Track {
-            _job: None,
             resampler: Resampler::to(dec.sample_rate(), RATE),
             duration: dec.duration(),
             dec,
@@ -535,6 +549,8 @@ impl Track {
 /// The track being faded out while the next one comes in.
 struct Crossfade {
     from: Track,
+    /// Retains the outgoing download until its tail has been mixed.
+    _outgoing: Option<Arc<Job>>,
     /// Length and how far it has gone, seconds.
     len: f64,
     done: f64,
@@ -564,21 +580,22 @@ impl Crossfade {
 fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) -> Option<(Arc<Job>, bool)> {
     let ring = &shared.ring;
     let epoch = shared.epoch.load(Ordering::Relaxed);
-    ring.begin(job.id);
-    let fail = |job: &Job, e: anyhow::Error| {
+    let mut generation = ring.begin(job.id);
+    let fail = |job: &Job, e: anyhow::Error, generation: u64| {
         if !job.cancelled() {
-            ring.mark(Mark::Error { message: format!("{e:#}"), network: job.download.failed() });
+            ring.mark_if(generation, Mark::Error { message: format!("{e:#}"), network: job.download.failed() });
         }
         None
     };
     let mut cur = match Track::open(&job) {
         Ok(t) => t,
-        Err(e) => return fail(&job, e),
+        Err(e) => return fail(&job, e, generation),
     };
     let mut job = job;
     // Resumed after a failure: where it stopped (from the beginning if that cannot be reached).
     let at = if job.start > 0.0 { cur.seek(job.start).unwrap_or(0.0) } else { 0.0 };
-    ring.mark(Mark::Start { job: job.id, at, duration: cur.duration, gapless });
+    if job.cancelled() || shared.epoch.load(Ordering::Relaxed) != epoch
+        || !ring.mark_if(generation, Mark::Start { job: job.id, at, duration: cur.duration, gapless }) { return None; }
     if !gapless {
         effects.reset();
     }
@@ -588,7 +605,8 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
         if job.cancelled() || shared.epoch.load(Ordering::Relaxed) != epoch {
             return None;
         }
-        let (mut generation, seek) = ring.poll_seek();
+        let (current_generation, seek) = ring.poll_seek();
+        generation = current_generation;
         if let Some(t) = seek {
             // A seek ends a crossfade: only the incoming track goes on.
             fade = None;
@@ -596,7 +614,7 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
             // Past the end the demuxer fails: the track is over.
             let Ok(at) = cur.seek(t) else { break };
             effects.reset();
-            generation = ring.mark(Mark::Start { job: job.id, at, duration: cur.duration, gapless: false });
+            if !ring.mark_if(generation, Mark::Start { job: job.id, at, duration: cur.duration, gapless: false }) { continue; }
         }
         let settings = *shared.settings.locked();
         effects.sync(settings);
@@ -607,11 +625,19 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
             let half = |t: &Track| t.duration.map_or(f64::INFINITY, |d| d / 2.0);
             let len = cur.left().unwrap_or(0.0).min(half(&cur)).min(half(&track));
             if len > 0.0 {
-                generation = ring.begin(next.id);
-                ring.mark(Mark::Start { job: next.id, at: 0.0, duration: track.duration, gapless: true });
+                if !ring.start_if(next.id, generation, Mark::Start { job: next.id, at: 0.0, duration: track.duration, gapless: true }) {
+                    // A seek raced preparation: retain the prepared next track and handle the
+                    // seek on the next iteration. A reset cancels both jobs through `live`.
+                    let (tx, rx) = mpsc::channel();
+                    let _ = tx.send(Ok(track));
+                    *next.prepared.locked() = Some(rx);
+                    let mut slot = shared.next.locked();
+                    if slot.is_none() && !next.cancelled() { *slot = Some(next); }
+                    continue;
+                }
                 *shared.incoming.locked() = Some(next.clone());
                 let from = std::mem::replace(&mut cur, track);
-                fade = Some(Crossfade { from, len, done: 0.0 });
+                fade = Some(Crossfade { from, _outgoing: Some(job.clone()), len, done: 0.0 });
                 job = next;
             } else {
                 // Nothing left to overlap: the track follows right after.
@@ -622,7 +648,7 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
         let frames = match cur.read(CHUNK, &mut buf) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(e) => return fail(&job, e),
+            Err(e) => return fail(&job, e, generation),
         };
         if let Some(f) = &mut fade
             && !f.mix(&mut buf[..frames * 2], &mut scratch)
@@ -634,26 +660,34 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
         // A refused push means a seek or a new track: the loop above sorts it out.
         ring.push(&buf, generation);
     }
+    if job.cancelled() || shared.epoch.load(Ordering::Relaxed) != epoch { return None; }
     shared.incoming.locked().take();
     if let Some(next) = shared.next.locked().take() {
         return Some((next, true));
     }
-    ring.mark(Mark::End);
+    if !job.cancelled() && shared.epoch.load(Ordering::Relaxed) == epoch { ring.mark_if(generation, Mark::End); }
     None
 }
 
 /// Takes the appended track for a crossfade and opens it; one that fails to open is left to be
 /// played (and to report its error) the usual way.
 fn open_next(shared: &Shared) -> Option<(Arc<Job>, Track)> {
-    let next = shared.next.locked().take()?;
-    match Track::open(&next) {
-        Ok(t) => Some((next, t)),
-        Err(_) => {
-            let mut slot = shared.next.locked();
-            // Another track may have been appended meanwhile.
-            if slot.is_none() {
-                *slot = Some(next);
-            }
+    let mut slot = shared.next.locked();
+    let next = slot.as_ref()?;
+    let mut prepared = next.prepared.locked();
+    // Never wait for network or probing on the thread producing the outgoing track.
+    let result = prepared.as_ref()?.try_recv().ok()?;
+    match result {
+        Ok(track) => {
+            prepared.take();
+            drop(prepared);
+            Some((slot.take()?, track))
+        }
+        Err(e) => {
+            // Put the failure back for the ordinary transition to report it once.
+            let (tx, rx) = mpsc::channel();
+            let _ = tx.send(Err(e));
+            *prepared = Some(rx);
             None
         }
     }
@@ -770,7 +804,7 @@ mod tests {
         from.seek(1.0).unwrap();
         let (mut want_out, mut want_in) = (track(MP3), track(LC));
         want_out.seek(1.0).unwrap();
-        let mut f = Crossfade { from, len: 1.0, done: 0.0 };
+        let mut f = Crossfade { from, _outgoing: None, len: 1.0, done: 0.0 };
         let (mut mixed, mut old, mut new, mut scratch): (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) = Default::default();
         let mut more = true;
         while more {
@@ -822,5 +856,87 @@ mod tests {
         drop(job);
         let err = download.reader().read(&mut [0; 16]).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::ConnectionAborted);
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use std::io::Cursor;
+    fn decoded() -> Track {
+        Track::from_decoder(Decoder::open(Box::new(Cursor::new(&include_bytes!("../tests/data/mp3.mp3")[..]))).unwrap())
+            .unwrap()
+    }
+    fn shared() -> Arc<Shared> {
+        Arc::new(Shared {
+            ring: Arc::new(Ring::default()),
+            next: Mutex::new(None),
+            incoming: Mutex::new(None),
+            epoch: AtomicU64::new(0),
+            settings: Mutex::new(Settings { fade: 1., version: 1, ..Settings::default() }),
+        })
+    }
+    fn job(id: u64) -> (Arc<Job>, Sender<std::result::Result<Track, String>>) {
+        let (tx, rx) = mpsc::channel();
+        (
+            Arc::new(Job {
+                id,
+                download: Download::for_test(b"", false),
+                cancelled: AtomicBool::new(false),
+                length: Some(2.),
+                start: 0.,
+                prepared: Mutex::new(Some(rx)),
+            }),
+            tx,
+        )
+    }
+    #[test]
+    fn an_unprepared_next_track_never_blocks_the_outgoing_tail() {
+        let s = shared();
+        let (cur, ready) = job(1);
+        ready.send(Ok(decoded())).unwrap();
+        let (next, _hold) = job(2);
+        *s.next.locked() = Some(next);
+        let (done, wait) = mpsc::channel();
+        let worker_s = s.clone();
+        let worker = std::thread::spawn(move || {
+            let result = play(&worker_s, cur, false, &mut Effects::new());
+            done.send(result.map(|(j, _)| j.id)).unwrap();
+        });
+        let start = Instant::now();
+        let mut pcm = Vec::new();
+        let next;
+        loop {
+            s.ring.take_samples(4096, &mut pcm);
+            if let Ok(result) = wait.try_recv() {
+                next = result;
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(5), "outgoing playback waited for the next decoder");
+            std::thread::yield_now();
+        }
+        s.ring.take_samples(44100, &mut pcm);
+        worker.join().unwrap();
+        assert_eq!(next, Some(2));
+        assert!(pcm.len() > 80000, "outgoing tail was lost");
+    }
+    #[test]
+    fn cancellation_while_opening_never_publishes_into_the_new_stream() {
+        let s = shared();
+        let (cur, ready) = job(1);
+        let control = cur.clone();
+        let worker_s = s.clone();
+        let worker = std::thread::spawn(move || play(&worker_s, cur, false, &mut Effects::new()));
+        let start = Instant::now();
+        while !s.ring.request_seek(1, 0.) {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::yield_now();
+        }
+        control.cancel();
+        s.epoch.fetch_add(1, Ordering::Relaxed);
+        s.ring.clear();
+        ready.send(Ok(decoded())).unwrap();
+        assert!(worker.join().unwrap().is_none());
+        assert!(s.ring.reached(u64::MAX).is_empty());
     }
 }

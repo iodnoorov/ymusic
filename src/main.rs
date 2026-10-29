@@ -68,9 +68,6 @@ impl<T> Lock<T> for std::sync::Mutex<T> {
     }
 }
 
-/// Changed settings are saved once the keys have been left alone this long.
-const SAVE_AFTER: Duration = Duration::from_secs(2);
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut cfg = Config::load();
@@ -124,6 +121,7 @@ fn main() -> Result<()> {
     if let Some(session) = &s.lastfm {
         app.lastfm = app::Lastfm::On(session.clone());
     }
+    app.restore_scrobbles(cfg.lastfm_queue.clone());
     app.queue.set_repeat(s.repeat);
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
@@ -177,8 +175,8 @@ fn main() -> Result<()> {
         let truecolor = ui::truecolor();
         let mut dirty = true;
         let mut last_draw = Instant::now();
-        let mut last_input = Instant::now();
-        let mut unsaved = false;
+        let mut saving = config::SaveState::new(&cfg.settings);
+        let mut save_error = None;
         while !app.quit {
             if std::mem::take(&mut app.clear_images) {
                 delete_images(app.picker.as_ref());
@@ -204,8 +202,8 @@ fn main() -> Result<()> {
             }
             // Until the next frame, or the moment to save changed settings.
             let mut wait = frame.saturating_sub(last_draw.elapsed());
-            if unsaved {
-                wait = wait.min(SAVE_AFTER.saturating_sub(last_input.elapsed()));
+            if let Some(until_save) = saving.wait(Instant::now()) {
+                wait = wait.min(until_save);
             }
             // On macOS «Исполняется» delivers its commands on this thread's run loop, which
             // `media.sync` turns: it must come round often.
@@ -225,8 +223,6 @@ fn main() -> Result<()> {
                     }
                     app::Msg::Input(i) => {
                         dirty = true;
-                        last_input = Instant::now();
-                        unsaved = true;
                         match i {
                             input::Input::Key(k) => app.on_key(k),
                             input::Input::Paste(s) => app.on_paste(&s),
@@ -241,21 +237,26 @@ fn main() -> Result<()> {
                     m => {
                         // Playback position is shown by the regular animation frames.
                         dirty |= !matches!(m, app::Msg::Player(player::PlayerEvent::TimePos(_)));
-                        // Last.fm connected or disconnected on its own: saved like a changed setting.
-                        unsaved |= matches!(m, app::Msg::LastfmSession { .. } | app::Msg::LastfmSent { .. });
                         app.on_msg(m);
                     }
                 }
             }
-            // Changed settings are saved once the keys are left alone for a moment, so they
-            // survive a crash or kill; not on every volume step.
-            if unsaved && last_input.elapsed() >= SAVE_AFTER {
-                unsaved = false;
-                if sync_settings(&mut cfg, &app, run) {
-                    let _ = cfg.save();
+            app.tick();
+            let now = Instant::now();
+            saving.observe(settings_of(&app, &cfg.settings, run), app.scrobbles_revision(), now);
+            if saving.ready(now) {
+                match saving.flush(&mut cfg, app.pending_scrobbles(), now, Config::save) {
+                    Ok(()) => save_error = None,
+                    Err(e) => {
+                        let message = format!("Не удалось сохранить настройки: {e:#}");
+                        if save_error.as_ref() != Some(&message) {
+                            app.set_error(&message);
+                            save_error = Some(message);
+                            dirty = true;
+                        }
+                    }
                 }
             }
-            app.tick();
             // What the keys and messages above asked for.
             runtime.run(app.take_effects(), &app.task_api(), app.generation());
             let (state, position) = app.media_state();
@@ -281,14 +282,19 @@ fn main() -> Result<()> {
         let _ = done_rx.recv_timeout(Duration::from_secs(2));
     }
 
-    sync_settings(&mut cfg, &app, run);
+    cfg.settings = settings_of(&app, &cfg.settings, run);
+    cfg.lastfm_queue = app.pending_scrobbles();
     if app.logout {
         cfg.token = None;
     }
-    let _ = cfg.save();
-    if app.logout && res.is_ok() {
+    let saved = cfg.save().context("не удалось сохранить настройки при выходе");
+    if app.logout && res.is_ok() && saved.is_ok() {
         println!("Вы вышли из аккаунта. Войти снова: ymusic login");
         warn_env_token();
+    }
+    if let Err(e) = saved {
+        if res.is_ok() { return Err(e); }
+        eprintln!("{e:#}");
     }
     match app.exit_error.take() {
         Some(e) if res.is_ok() => Err(anyhow::anyhow!(e)),
@@ -366,14 +372,6 @@ fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config
         remaining_time: app.remaining_time,
         lastfm: app.lastfm_session().cloned(),
     }
-}
-
-/// Copies the settings changed in the program into the config; true if any of them changed.
-fn sync_settings(cfg: &mut Config, app: &app::App, run: RunOnly) -> bool {
-    let now = settings_of(app, &cfg.settings, run);
-    let changed = now != cfg.settings;
-    cfg.settings = now;
-    changed
 }
 
 /// Logout removes only the saved token: one from the environment keeps working.
