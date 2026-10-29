@@ -7,22 +7,22 @@ class Ymusic < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.2/ymusic-3.6.2-aarch64-macos.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.3/ymusic-3.6.3-aarch64-macos.tar.gz"
       sha256 "SHA256_AARCH64_MACOS"
     end
     on_intel do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.2/ymusic-3.6.2-x86_64-macos.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.3/ymusic-3.6.3-x86_64-macos.tar.gz"
       sha256 "SHA256_X86_64_MACOS"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.2/ymusic-3.6.2-aarch64-linux.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.3/ymusic-3.6.3-aarch64-linux.tar.gz"
       sha256 "SHA256_AARCH64_LINUX"
     end
     on_intel do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.2/ymusic-3.6.2-x86_64-linux.tar.gz"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.6.3/ymusic-3.6.3-x86_64-linux.tar.gz"
       sha256 "SHA256_X86_64_LINUX"
     end
   end
