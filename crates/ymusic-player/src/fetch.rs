@@ -473,6 +473,8 @@ pub(crate) mod tests {
                     };
                     let (data, seen, stopped) = (data.clone(), seen.clone(), stopped.clone());
                     connections.push(std::thread::spawn(move || {
+                        // BSD/macOS inherit the listener's nonblocking mode; Linux does not.
+                        stream.set_nonblocking(false).unwrap();
                         stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
                         stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
                         let mut request = 0..data.len() as u64;
