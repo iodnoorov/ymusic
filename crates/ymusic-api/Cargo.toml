@@ -12,6 +12,7 @@ publish = false
 anyhow.workspace = true
 base64 = "0.22"
 hmac = "0.12"
+html-escape = "0.2"
 image.workspace = true
 md-5 = "0.10"
 rustls.workspace = true

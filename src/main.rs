@@ -122,6 +122,7 @@ fn main() -> Result<()> {
         app.lastfm = app::Lastfm::On(session.clone());
     }
     app.restore_scrobbles(cfg.lastfm_queue.clone());
+    app.restore_podcast_progress(cfg.podcast_progress.clone());
     app.queue.set_repeat(s.repeat);
     // `--no-icons` and `YMUSIC_NO_ICONS` apply to this run only; the config keeps its value
     // unless icons are switched in the settings window.
@@ -243,9 +244,12 @@ fn main() -> Result<()> {
             }
             app.tick();
             let now = Instant::now();
-            saving.observe(settings_of(&app, &cfg.settings, run), app.scrobbles_revision(), now);
+            saving.observe(
+                settings_of(&app, &cfg.settings, run),
+                app.scrobbles_revision().wrapping_add(app.podcast_progress_revision()), now,
+            );
             if saving.ready(now) {
-                match saving.flush(&mut cfg, app.pending_scrobbles(), now, Config::save) {
+                match saving.flush(&mut cfg, app.pending_scrobbles(), app.pending_podcast_progress(), now, Config::save) {
                     Ok(()) => save_error = None,
                     Err(e) => {
                         let message = format!("Не удалось сохранить настройки: {e:#}");
@@ -271,19 +275,41 @@ fn main() -> Result<()> {
     title.restore();
     ratatui::restore();
 
-    // The listening history learns where the track stopped; a slow network does not hold the exit long.
-    if let Some(report) = app.quit_play() {
+    // Keep the last checkpoint before stopping output. Unsent progress remains durable below.
+    app.capture_podcast_progress();
+    runtime.player.apply(player::PlayerCmd::Stop);
+    let history = app.quit_play();
+    let pending = app.pending_podcast_progress();
+    if history.is_some() || !pending.items.is_empty() {
         let (done_tx, done_rx) = mpsc::channel();
-        let api = app.api.clone();
-        std::thread::spawn(move || {
-            let _ = api.send_play(&report);
-            let _ = done_tx.send(());
-        });
-        let _ = done_rx.recv_timeout(Duration::from_secs(2));
+        if let Some(report) = history {
+            let api = app.api.clone();
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                let _ = api.send_play(&report);
+                let _ = done_tx.send(None);
+            });
+        }
+        if !pending.items.is_empty() {
+            let api = app.api.clone();
+            let done_tx = done_tx.clone();
+            std::thread::spawn(move || {
+                for report in pending.items {
+                    let result = api.podcast_save_progress(&report).map_err(|e| api::ApiError::from_anyhow(&e));
+                    if done_tx.send(Some((report, result))).is_err() { break; }
+                }
+            });
+        }
+        drop(done_tx);
+        let until = Instant::now() + Duration::from_secs(2);
+        while let Ok(result) = done_rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            if let Some((report, result)) = result { app.podcast_progress_saved(&report, result); }
+        }
     }
 
     cfg.settings = settings_of(&app, &cfg.settings, run);
     cfg.lastfm_queue = app.pending_scrobbles();
+    cfg.podcast_progress = app.pending_podcast_progress();
     if app.logout {
         cfg.token = None;
     }

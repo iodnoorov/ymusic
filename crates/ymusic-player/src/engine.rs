@@ -34,6 +34,7 @@ struct Job {
     /// See `TrackFile`.
     length: Option<f64>,
     start: f64,
+    crossfade: bool,
     prepared: Mutex<Option<Receiver<std::result::Result<Track, String>>>>,
 }
 
@@ -53,6 +54,7 @@ impl Job {
             cancelled: AtomicBool::new(false),
             length: file.length,
             start: file.start,
+            crossfade: file.crossfade,
             prepared: Mutex::new(Some(prepared)),
         })
     }
@@ -168,6 +170,8 @@ impl Player {
                 paused: false,
                 muted: false,
                 volume: f64::from(volume),
+                active: None,
+                buffering: false,
             };
             c.run(&cmd_rx, &tx);
         })?;
@@ -233,6 +237,9 @@ struct Control {
     paused: bool,
     muted: bool,
     volume: f64,
+    /// The audible source, or the initial source before its first Start mark.
+    active: Option<Arc<Job>>,
+    buffering: bool,
 }
 
 impl Control {
@@ -260,6 +267,10 @@ impl Control {
                 match self.open_output() {
                     Ok(o) => self.output = Some(o),
                     Err(e2) => {
+                        self.finish_seek(&mut events);
+                        for ev in events.drain(..) {
+                            let _ = tx.send(ev.into());
+                        }
                         let msg = format!("звук пропал: {e:#}; переподключиться не удалось: {e2:#}");
                         let _ = tx.send(PlayerEvent::Died(msg).into());
                         break;
@@ -286,7 +297,7 @@ impl Control {
         }
         match cmd {
             Cmd::Load(file) => {
-                self.reset()?;
+                self.reset(events)?;
                 self.start(Job::new(&file, &self.options.tls));
                 self.set_paused(false, events)?;
             }
@@ -303,7 +314,7 @@ impl Control {
                 let next = self.shared.next.locked().take().or_else(|| self.shared.incoming.locked().take());
                 if let Some(job) = next {
                     self.live.retain(|j| j.id != job.id);
-                    self.reset()?;
+                    self.reset(events)?;
                     self.start(job);
                     self.set_paused(false, events)?;
                 }
@@ -332,10 +343,8 @@ impl Control {
                         None => self.position(c, self.output()?.played(&self.shared.ring)?),
                     };
                     let target = (pos + d).max(0.0);
-                    if self.shared.ring.request_seek(c.job, target) {
+                    if self.request_seek(c.job, target, events) {
                         self.output()?.flush()?;
-                        self.seek_to = Some(target);
-                        self.last_pos = f64::NEG_INFINITY;
                     }
                 }
             }
@@ -358,8 +367,9 @@ impl Control {
                 }
             }
             Cmd::Output(_) => {}
-            Cmd::Stop => self.reset()?,
+            Cmd::Stop => self.reset(events)?,
         }
+        self.report_buffering(events, false);
         Ok(())
     }
 
@@ -379,11 +389,13 @@ impl Control {
 
     fn start(&mut self, job: Arc<Job>) {
         self.live.push(job.clone());
+        self.active = Some(job.clone());
         let _ = self.work.send(Work::Play(job));
     }
 
     /// Cancels every track and drops the sound on its way.
-    fn reset(&mut self) -> Result<()> {
+    fn reset(&mut self, events: &mut Vec<PlayerEvent>) -> Result<()> {
+        self.finish_seek(events);
         self.reset_quietly();
         self.output()?.flush()
     }
@@ -400,33 +412,77 @@ impl Control {
         self.shared.ring.clear();
         self.cur = None;
         self.seek_to = None;
+        self.active = None;
     }
 
     fn position(&self, c: &Current, played: u64) -> f64 {
         c.at + played.saturating_sub(c.frame) as f64 / f64::from(RATE)
     }
 
+    fn request_seek(&mut self, job: u64, target: f64, events: &mut Vec<PlayerEvent>) -> bool {
+        if !self.shared.ring.request_seek(job, target) { return false; }
+        self.seek_to = Some(target);
+        self.last_pos = f64::NEG_INFINITY;
+        events.push(PlayerEvent::Seeking(true));
+        true
+    }
+
+    fn finish_seek(&mut self, events: &mut Vec<PlayerEvent>) {
+        if self.seek_to.take().is_some() {
+            events.push(PlayerEvent::Seeking(false));
+        }
+    }
+
+    fn report_buffering(&mut self, events: &mut Vec<PlayerEvent>, force: bool) {
+        let buffering = self.active.as_ref().is_some_and(|job| {
+            job.download.waiting()
+                // An outgoing tail is still an actual source during a crossfade, not preload.
+                || (self.shared.incoming.locked().as_ref().is_some_and(|incoming| incoming.id == job.id)
+                    && self.live.iter().any(|old| old.id < job.id && old.download.waiting()))
+        });
+        if force || buffering != self.buffering {
+            self.buffering = buffering;
+            events.push(PlayerEvent::Buffering(buffering));
+        }
+    }
+
+    fn prune_finished(&mut self) {
+        if let Some(active) = &self.active {
+            // A crossfade still owns the outgoing job. Keep it cancellable by reset even after
+            // the incoming Start mark is heard; release its tempfile once the producer lets go.
+            self.live.retain(|job| job.id >= active.id || Arc::strong_count(job) > 1);
+        }
+    }
+
     /// Reports what playback has reached: track starts and ends, errors, the position.
     fn tick(&mut self, events: &mut Vec<PlayerEvent>) -> Result<()> {
         let played = self.output()?.played(&self.shared.ring)?;
+        self.report_playback(played, events);
+        Ok(())
+    }
+
+    fn report_playback(&mut self, played: u64, events: &mut Vec<PlayerEvent>) {
+        let mut started = false;
         for (frame, mark) in self.shared.ring.reached(played) {
             match mark {
                 Mark::Start { job, at, duration, gapless } => {
                     if gapless {
                         events.push(PlayerEvent::Eof);
                     }
-                    // Earlier tracks are over: free their downloads.
-                    self.live.retain(|j| j.id >= job);
+                    self.active = self.live.iter().find(|j| j.id == job).cloned();
                     self.cur = Some(Current { job, at, frame });
-                    self.seek_to = None;
                     self.last_pos = f64::NEG_INFINITY;
                     // Also tells the app that the track has started (0 — the length is unknown).
                     events.push(PlayerEvent::Duration(duration.unwrap_or(0.0)));
+                    self.finish_seek(events);
+                    started = true;
                 }
                 Mark::End | Mark::Error { .. } => {
+                    self.finish_seek(events);
                     if let Some(c) = self.cur.take() {
                         self.live.retain(|j| j.id > c.job);
                     }
+                    self.active = None;
                     events.push(match mark {
                         Mark::Error { message, network } => PlayerEvent::Error { message, network },
                         _ => PlayerEvent::Eof,
@@ -434,6 +490,9 @@ impl Control {
                 }
             }
         }
+        self.prune_finished();
+        // Duration must not mask an ongoing wait when the app clears its initial loading state.
+        self.report_buffering(events, started);
         if let Some(c) = &self.cur {
             let t = self.seek_to.unwrap_or_else(|| self.position(c, played));
             if (t - self.last_pos).abs() >= 0.25 {
@@ -441,7 +500,6 @@ impl Control {
                 events.push(PlayerEvent::TimePos(t));
             }
         }
-        Ok(())
     }
 }
 
@@ -488,8 +546,14 @@ impl Track {
     fn open(job: &Arc<Job>) -> Result<Track> {
         let prepared = job.prepared.locked().take();
         if let Some(ready) = prepared {
-            return ready.recv().map_err(|_| anyhow::anyhow!("подготовка трека прервана"))?
-                .map_err(anyhow::Error::msg);
+            loop {
+                if job.cancelled() { anyhow::bail!("подготовка трека отменена"); }
+                match ready.recv_timeout(Duration::from_millis(20)) {
+                    Ok(result) => return result.map_err(anyhow::Error::msg),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => anyhow::bail!("подготовка трека прервана"),
+                }
+            }
         }
         Track::from_download(&job.download, job.length)
     }
@@ -582,18 +646,27 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
     let epoch = shared.epoch.load(Ordering::Relaxed);
     let mut generation = ring.begin(job.id);
     let fail = |job: &Job, e: anyhow::Error, generation: u64| {
-        if !job.cancelled() {
-            ring.mark_if(generation, Mark::Error { message: format!("{e:#}"), network: job.download.failed() });
-        }
-        None
+        !job.cancelled()
+            && ring.mark_if(generation, Mark::Error { message: format!("{e:#}"), network: job.download.failed() })
     };
     let mut cur = match Track::open(&job) {
         Ok(t) => t,
-        Err(e) => return fail(&job, e, generation),
+        Err(e) => {
+            fail(&job, e, generation);
+            return None;
+        }
     };
     let mut job = job;
-    // Resumed after a failure: where it stopped (from the beginning if that cannot be reached).
-    let at = if job.start > 0.0 { cur.seek(job.start).unwrap_or(0.0) } else { 0.0 };
+    // A failed resume must not silently restart a podcast (or a retried music track) at zero.
+    let at = if job.start > 0.0 {
+        match cur.seek(job.start) {
+            Ok(at) => at,
+            Err(e) => {
+                fail(&job, e, generation);
+                return None;
+            }
+        }
+    } else { 0.0 };
     if job.cancelled() || shared.epoch.load(Ordering::Relaxed) != epoch
         || !ring.mark_if(generation, Mark::Start { job: job.id, at, duration: cur.duration, gapless }) { return None; }
     if !gapless {
@@ -611,15 +684,24 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
             // A seek ends a crossfade: only the incoming track goes on.
             fade = None;
             shared.incoming.locked().take();
-            // Past the end the demuxer fails: the track is over.
-            let Ok(at) = cur.seek(t) else { break };
+            let at = match cur.seek(t) {
+                Ok(at) => at,
+                // Only a target beyond the known end can turn a failed seek into EOF.
+                // Network and decoder failures inside the track must remain errors.
+                Err(_) if cur.duration.is_some_and(|duration| t >= duration) => break,
+                Err(e) => {
+                    if fail(&job, e, generation) { return None; }
+                    // A newer seek/reset invalidated this result while the decoder was blocked.
+                    continue;
+                }
+            };
             effects.reset();
             if !ring.mark_if(generation, Mark::Start { job: job.id, at, duration: cur.duration, gapless: false }) { continue; }
         }
         let settings = *shared.settings.locked();
         effects.sync(settings);
         if fade.is_none() && settings.fade > 0.0 && cur.left().is_some_and(|l| l <= settings.fade)
-            && let Some((next, track)) = open_next(shared)
+            && let Some((next, track)) = open_next(shared, &job)
         {
             // As long as is left (the next track may have come late), at most half of either track.
             let half = |t: &Track| t.duration.map_or(f64::INFINITY, |d| d / 2.0);
@@ -648,7 +730,10 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
         let frames = match cur.read(CHUNK, &mut buf) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(e) => return fail(&job, e, generation),
+            Err(e) => {
+                if fail(&job, e, generation) { return None; }
+                continue;
+            }
         };
         if let Some(f) = &mut fade
             && !f.mix(&mut buf[..frames * 2], &mut scratch)
@@ -671,9 +756,10 @@ fn play(shared: &Shared, job: Arc<Job>, gapless: bool, effects: &mut Effects) ->
 
 /// Takes the appended track for a crossfade and opens it; one that fails to open is left to be
 /// played (and to report its error) the usual way.
-fn open_next(shared: &Shared) -> Option<(Arc<Job>, Track)> {
+fn open_next(shared: &Shared, outgoing: &Job) -> Option<(Arc<Job>, Track)> {
     let mut slot = shared.next.locked();
     let next = slot.as_ref()?;
+    if !outgoing.crossfade || !next.crossfade { return None; }
     let mut prepared = next.prepared.locked();
     // Never wait for network or probing on the thread producing the outgoing track.
     let result = prepared.as_ref()?.try_recv().ok()?;
@@ -850,7 +936,7 @@ mod tests {
     #[test]
     fn dropped_job_stops_its_download() {
         use std::io::Read;
-        let file = TrackFile { url: "http://127.0.0.1:9/".into(), length: None, start: 0.0 };
+        let file = TrackFile { url: "http://127.0.0.1:9/".into(), length: None, start: 0.0, crossfade: true };
         let job = Job::new(&file, &crate::fetch::tests::tls());
         let download = job.download.clone();
         drop(job);
@@ -885,11 +971,124 @@ mod scheduling_tests {
                 cancelled: AtomicBool::new(false),
                 length: Some(2.),
                 start: 0.,
+                crossfade: true,
                 prepared: Mutex::new(Some(rx)),
             }),
             tx,
         )
     }
+
+    fn control_with_cached_mp3() -> Control {
+        let (mut current, _ready) = job(1);
+        Arc::get_mut(&mut current).unwrap().download =
+            Download::for_test(include_bytes!("../tests/data/mp3.mp3"), true);
+        let shared = shared();
+        let generation = shared.ring.begin(current.id);
+        assert!(shared.ring.mark_if(generation,
+            Mark::Start { job: current.id, at: 0., duration: Some(2.), gapless: false }));
+        let (work, _commands) = mpsc::channel();
+        let mut control = Control {
+            shared,
+            options: Options { output: None, alsa_device: None, tls: crate::fetch::tests::tls() },
+            output: None,
+            work,
+            live: vec![current.clone()],
+            cur: None,
+            seek_to: None,
+            last_pos: f64::NEG_INFINITY,
+            paused: false,
+            muted: false,
+            volume: 100.,
+            active: Some(current),
+            buffering: false,
+        };
+        control.report_playback(0, &mut Vec::new());
+        control
+    }
+
+    #[test]
+    fn cached_mp3_seek_stays_pending_until_its_completed_start_mark() {
+        let mut control = control_with_cached_mp3();
+        let mut events = Vec::new();
+        assert!(control.request_seek(1, 0.5, &mut events));
+        let (old_generation, old_seek) = control.shared.ring.poll_seek();
+        assert_eq!(old_seek, Some(0.5));
+        // A second seek supersedes the first even if decoding the first one finishes later.
+        assert!(control.request_seek(1, 1., &mut events));
+        let (generation, seek) = control.shared.ring.poll_seek();
+        assert_eq!(seek, Some(1.));
+        assert!(!control.shared.ring.mark_if(old_generation,
+            Mark::Start { job: 1, at: 0.5, duration: Some(2.), gapless: false }));
+        control.report_playback(0, &mut events);
+        assert!(matches!(events.as_slice(),
+            [PlayerEvent::Seeking(true), PlayerEvent::Seeking(true), PlayerEvent::TimePos(1.)]));
+        assert!(!control.buffering, "cached decoder work is not an HTTP wait");
+        let source = control.active.as_ref().unwrap().download.clone();
+        let mut track = Track::from_download(&source, Some(2.)).unwrap();
+        let at = track.seek(seek.unwrap()).unwrap();
+        assert!(control.shared.ring.mark_if(generation,
+            Mark::Start { job: 1, at, duration: track.duration, gapless: false }));
+        events.clear();
+        control.report_playback(0, &mut events);
+        assert!(matches!(events.as_slice(),
+            [PlayerEvent::Duration(_), PlayerEvent::Seeking(false), PlayerEvent::Buffering(false), PlayerEvent::TimePos(_)]));
+        assert!(matches!(events.last(), Some(PlayerEvent::TimePos(t)) if (*t - at).abs() < 1e-9));
+        assert!(control.seek_to.is_none());
+    }
+
+    #[test]
+    fn eof_and_decoder_errors_reset_pending_seeks_without_optimistic_positions() {
+        for mark in [Mark::End, Mark::Error { message: "decode failed".into(), network: false }] {
+            let mut control = control_with_cached_mp3();
+            let mut events = Vec::new();
+            assert!(control.request_seek(1, 1., &mut events));
+            let (generation, _) = control.shared.ring.poll_seek();
+            assert!(control.shared.ring.mark_if(generation, mark.clone()));
+            events.clear();
+            control.report_playback(0, &mut events);
+            match mark {
+                Mark::End => assert!(matches!(events.as_slice(), [PlayerEvent::Seeking(false), PlayerEvent::Eof])),
+                _ => assert!(matches!(events.as_slice(), [PlayerEvent::Seeking(false), PlayerEvent::Error { .. }])),
+            }
+            assert!(control.seek_to.is_none());
+        }
+    }
+
+    #[test]
+    fn stopping_a_seek_drops_old_marks_before_a_new_source_starts() {
+        let mut control = control_with_cached_mp3();
+        let mut events = Vec::new();
+        assert!(control.request_seek(1, 1., &mut events));
+        let (old_generation, _) = control.shared.ring.poll_seek();
+        events.clear();
+        // The fixture has no audio device: Stop still resets state before attempting the flush.
+        assert!(control.command(Cmd::Stop, &mut events).is_err());
+        assert!(matches!(events.as_slice(), [PlayerEvent::Cleared, PlayerEvent::Seeking(false)]));
+        assert!(!control.shared.ring.mark_if(old_generation,
+            Mark::Start { job: 1, at: 1., duration: Some(2.), gapless: false }));
+        assert!(!control.shared.ring.mark_if(old_generation,
+            Mark::Error { message: "stale seek".into(), network: false }));
+        let (new, _ready) = job(2);
+        control.start(new);
+        let generation = control.shared.ring.begin(2);
+        assert!(control.shared.ring.mark_if(generation,
+            Mark::Start { job: 2, at: 0., duration: Some(2.), gapless: false }));
+        events.clear();
+        control.report_playback(0, &mut events);
+        assert!(matches!(events.as_slice(),
+            [PlayerEvent::Duration(_), PlayerEvent::Buffering(false), PlayerEvent::TimePos(0.)]));
+    }
+    #[test]
+    fn failed_initial_seek_reports_an_error_instead_of_restarting_at_zero() {
+        let s = shared();
+        let (mut current, ready) = job(1);
+        Arc::get_mut(&mut current).unwrap().start = 60.;
+        ready.send(Ok(decoded())).unwrap();
+        assert!(play(&s, current, false, &mut Effects::new()).is_none());
+        let marks = s.ring.reached(0);
+        assert!(matches!(marks.as_slice(), [(_, Mark::Error { .. })]), "{marks:?}");
+    }
+
     #[test]
     fn an_unprepared_next_track_never_blocks_the_outgoing_tail() {
         let s = shared();
@@ -935,8 +1134,111 @@ mod scheduling_tests {
         control.cancel();
         s.epoch.fetch_add(1, Ordering::Relaxed);
         s.ring.clear();
-        ready.send(Ok(decoded())).unwrap();
+        // A hung preparation must not retain the producer until its socket/ready sender finishes.
         assert!(worker.join().unwrap().is_none());
+        assert!(ready.send(Ok(decoded())).is_err());
         assert!(s.ring.reached(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn both_transition_files_must_allow_crossfade() {
+        for (out, inc) in [(false, false), (false, true), (true, false), (true, true)] {
+            let s = shared();
+            let (mut outgoing, _hold) = job(1);
+            Arc::get_mut(&mut outgoing).unwrap().crossfade = out;
+            let (mut next, ready) = job(2);
+            Arc::get_mut(&mut next).unwrap().crossfade = inc;
+            ready.send(Ok(decoded())).unwrap();
+            *s.next.locked() = Some(next);
+            assert_eq!(open_next(&s, &outgoing).is_some(), out && inc);
+            assert_eq!(s.next.locked().is_some(), !(out && inc));
+        }
+    }
+
+    #[test]
+    fn a_new_load_does_not_wait_for_cancelled_preparation() {
+        let s = shared();
+        let (commands, work) = mpsc::channel();
+        let worker_s = s.clone();
+        let worker = std::thread::spawn(move || produce(&worker_s, &work));
+        let (old, _blocked_prepare) = job(1);
+        commands.send(Work::Play(old.clone())).unwrap();
+        let began = Instant::now();
+        while !s.ring.request_seek(1, 0.) {
+            assert!(began.elapsed() < Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+        old.cancel();
+        s.epoch.fetch_add(1, Ordering::Relaxed);
+        s.ring.clear();
+        let (new, ready) = job(2);
+        ready.send(Ok(decoded())).unwrap();
+        commands.send(Work::Play(new.clone())).unwrap();
+        let began = Instant::now();
+        while !s.ring.request_seek(2, 0.) {
+            assert!(began.elapsed() < Duration::from_millis(500), "new load waited for old preparation");
+            std::thread::yield_now();
+        }
+        new.cancel();
+        s.epoch.fetch_add(1, Ordering::Relaxed);
+        s.ring.clear();
+        drop(commands);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn buffering_ignores_preload_and_is_republished_after_duration() {
+        use std::io::Read;
+        let s = shared();
+        let (current, _current_prepare) = job(1);
+        let (future, _future_prepare) = job(2);
+        let mut reader = future.download.reader();
+        let waiter = std::thread::spawn(move || reader.read(&mut [0; 1]).unwrap_err().kind());
+        let began = Instant::now();
+        while !future.download.waiting() {
+            assert!(began.elapsed() < Duration::from_secs(1));
+            std::thread::yield_now();
+        }
+        let (work, _commands) = mpsc::channel();
+        let mut control = Control {
+            shared: s,
+            options: Options { output: None, alsa_device: None, tls: crate::fetch::tests::tls() },
+            output: None,
+            work,
+            live: vec![current.clone(), future.clone()],
+            cur: None,
+            seek_to: None,
+            last_pos: f64::NEG_INFINITY,
+            paused: false,
+            muted: false,
+            volume: 100.,
+            active: Some(current),
+            buffering: false,
+        };
+        let mut events = Vec::new();
+        control.report_buffering(&mut events, false);
+        assert!(events.is_empty(), "future preload changed current loading status");
+        let outgoing = control.active.clone().unwrap();
+        let mut old_reader = outgoing.download.reader();
+        let old_waiter = std::thread::spawn(move || old_reader.read(&mut [0; 1]).unwrap_err().kind());
+        let began = Instant::now();
+        while !outgoing.download.waiting() {
+            assert!(began.elapsed() < Duration::from_secs(1));
+            std::thread::yield_now();
+        }
+        control.active = Some(future.clone());
+        control.prune_finished();
+        assert!(control.live.iter().any(|job| job.id == outgoing.id), "outgoing crossfade lost cancellation");
+        control.report_buffering(&mut events, false);
+        assert!(matches!(events.as_slice(), [PlayerEvent::Buffering(true)]));
+        events = vec![PlayerEvent::Duration(2.)];
+        control.report_buffering(&mut events, true);
+        assert!(matches!(events.as_slice(), [PlayerEvent::Duration(_), PlayerEvent::Buffering(true)]));
+        events.clear();
+        control.reset_quietly();
+        control.report_buffering(&mut events, false);
+        assert!(matches!(events.as_slice(), [PlayerEvent::Buffering(false)]));
+        assert_eq!(waiter.join().unwrap(), std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(old_waiter.join().unwrap(), std::io::ErrorKind::ConnectionAborted);
     }
 }

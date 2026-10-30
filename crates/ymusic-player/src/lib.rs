@@ -47,6 +47,12 @@ pub enum PlayerEvent {
     TimePos(f64),
     /// A track has started (or was seeked in): its length, 0 if unknown.
     Duration(f64),
+    /// The current source is waiting for uncached HTTP bytes or its size (also after Duration).
+    Buffering(bool),
+    /// A requested decoder seek is pending. `true` precedes its optimistic `TimePos`; `false`
+    /// follows the completed seek's Start mark, or a load, stop, EOF or error that abandons it.
+    /// Independent of HTTP `Buffering`: a fully cached source may still be seeking.
+    Seeking(bool),
     Pause(bool),
     Volume(f64),
     Mute(bool),
@@ -89,6 +95,8 @@ pub struct TrackFile {
     pub length: Option<f64>,
     /// Where to start, seconds (0 — from the beginning).
     pub start: f64,
+    /// Whether this file may overlap another music file. Both sides must opt in.
+    pub crossfade: bool,
 }
 
 /// What the app asks the player to do.

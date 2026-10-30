@@ -1,5 +1,5 @@
 use crate::api::{quality_index, Quality, QUALITIES};
-use crate::app::{Art, LastfmSession, Output, PendingScrobbles};
+use crate::app::{Art, LastfmSession, Output, PendingPodcastProgress, PendingScrobbles};
 use crate::eq::{index as eq_index, Preset, PRESETS};
 use crate::queue::Repeat;
 use anyhow::{Context, Result};
@@ -20,11 +20,16 @@ pub struct Config {
     pub covers: bool,
     #[serde(default, deserialize_with = "lenient")]
     pub lastfm_queue: PendingScrobbles,
+    #[serde(default, deserialize_with = "lenient")]
+    pub podcast_progress: PendingPodcastProgress,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { token: None, settings: Settings::default(), covers: true, lastfm_queue: PendingScrobbles::default() }
+        Config {
+            token: None, settings: Settings::default(), covers: true,
+            lastfm_queue: PendingScrobbles::default(), podcast_progress: PendingPodcastProgress::default(),
+        }
     }
 }
 
@@ -236,11 +241,13 @@ impl SaveState {
         &mut self,
         cfg: &mut Config,
         queue: PendingScrobbles,
+        podcast_progress: PendingPodcastProgress,
         now: std::time::Instant,
         save: impl FnOnce(&Config) -> Result<()>,
     ) -> Result<()> {
         let old = std::mem::replace(&mut cfg.settings, self.desired.clone());
         let old_queue = std::mem::replace(&mut cfg.lastfm_queue, queue);
+        let old_progress = std::mem::replace(&mut cfg.podcast_progress, podcast_progress);
         match save(cfg) {
             Ok(()) => {
                 self.due = None;
@@ -250,6 +257,7 @@ impl SaveState {
             Err(e) => {
                 cfg.settings = old;
                 cfg.lastfm_queue = old_queue;
+                cfg.podcast_progress = old_progress;
                 self.due = Some(now + std::time::Duration::from_secs(5));
                 self.failed = true;
                 Err(e)
@@ -379,7 +387,7 @@ mod save_tests {
         assert!(saving.ready(now + Duration::from_secs(2)));
         assert!(
             saving
-                .flush(&mut cfg, PendingScrobbles::default(), now + Duration::from_secs(2), |_| anyhow::bail!(
+                .flush(&mut cfg, PendingScrobbles::default(), PendingPodcastProgress::default(), now + Duration::from_secs(2), |_| anyhow::bail!(
                     "disk full"
                 ))
                 .is_err()
@@ -389,7 +397,7 @@ mod save_tests {
         assert!(!saving.ready(now + Duration::from_secs(6)));
         assert!(saving.ready(now + Duration::from_secs(7)));
         saving
-            .flush(&mut cfg, PendingScrobbles::default(), now + Duration::from_secs(7), |c| {
+            .flush(&mut cfg, PendingScrobbles::default(), PendingPodcastProgress::default(), now + Duration::from_secs(7), |c| {
                 assert_eq!(c.settings.volume, 25);
                 assert_eq!(c.settings.repeat, crate::queue::Repeat::One);
                 Ok(())

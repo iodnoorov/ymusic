@@ -1,6 +1,8 @@
 //! Minimal client for the (unofficial) Yandex Music API.
 
 pub mod lastfm;
+mod podcast;
+pub use podcast::{Podcast, PodcastProgress, StreamProgress, TrackKind};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -86,9 +88,20 @@ pub struct Track {
     pub cover: Option<String>,
     /// Wave batch the track came from (only for wave tracks).
     pub batch: Option<String>,
+    pub kind: TrackKind,
+    pub progress: Option<StreamProgress>,
+    pub published: Option<String>,
 }
 
 impl Track {
+    pub fn is_music(&self) -> bool {
+        self.kind == TrackKind::Music
+    }
+
+    pub fn is_podcast(&self) -> bool {
+        self.kind == TrackKind::Podcast
+    }
+
     pub fn full_id(&self) -> String {
         match &self.album_id {
             Some(a) => format!("{}:{}", self.id, a),
@@ -121,11 +134,18 @@ impl Track {
             .unwrap_or_default();
         let album = &v["albums"][0];
         let first = &v["artists"][0];
+        let kind = TrackKind::from_json(v);
         Some(Track {
             id,
             album_id: id_str(&album["id"]),
             title,
-            artists: if artists.is_empty() { "Неизвестный исполнитель".into() } else { artists },
+            artists: if !artists.is_empty() {
+                artists
+            } else if kind == TrackKind::Podcast {
+                album["title"].as_str().unwrap_or("").to_string()
+            } else {
+                "Неизвестный исполнитель".into()
+            },
             main_artist: id_str(&first["id"]).map(|id| (id, first["name"].as_str().unwrap_or("").to_string())),
             album: album["title"].as_str().unwrap_or("").to_string(),
             duration_ms: v["durationMs"].as_u64().unwrap_or(0),
@@ -136,6 +156,9 @@ impl Track {
                 .filter(|s| !s.is_empty())
                 .map(cover_url),
             batch: None,
+            kind,
+            progress: StreamProgress::from_json(&v["streamProgress"]),
+            published: v["pubDate"].as_str().map(str::to_string),
         })
     }
 }
@@ -684,25 +707,12 @@ impl Api {
 
     // ---------------------------------------------------------------- likes
 
-    /// Full ids (`track:album`) of liked music tracks, newest first, and, from the website API, the
-    /// tracks themselves. Liked podcast episodes and audiobook chapters share the same list and are
-    /// filtered out by the server.
-    pub fn liked(&self) -> Result<(Vec<String>, Option<Vec<Track>>)> {
-        if self.web {
-            // The website reads «Мне нравится» as the user's playlist 3. Only ids are asked for: with
-            // track objects a large library is several megabytes in one answer, and the server drops
-            // a slow reader (seen on a Raspberry Pi). Pages are no way out: they repeat some tracks.
-            let r = self.get(
-                &format!("/users/{}/playlists/3", self.uid),
-                &[("trackMetaType", "music"), ("resumeStream", "false"), ("richTracks", "false")],
-            )?;
-            let ids: Vec<String> = r["tracks"].as_array().into_iter().flatten().filter_map(item_full_id).collect();
-            // Tracks removed from the catalog stay in the list there; the mobile API leaves them out.
-            let tracks = self.tracks(&ids)?.into_iter().filter(|t| t.available).collect();
-            return Ok((ids, Some(tracks)));
-        }
-        let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[("trackMetaType", "music")])?;
-        Ok((r["library"]["tracks"].as_array().into_iter().flatten().filter_map(item_full_id).collect(), None))
+    /// Full ids (`track:album`) of liked tracks, newest first, including podcast episodes.
+    /// The music-only view is filtered by the caller; playlist 3 does not expose every episode like.
+    pub fn liked(&self) -> Result<Vec<String>> {
+        let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[])?;
+        let tracks = r["library"]["tracks"].as_array().context("нет списка лайков в ответе")?;
+        Ok(tracks.iter().filter_map(item_full_id).collect())
     }
 
     pub fn set_like(&self, track: &Track, like: bool) -> Result<()> {
@@ -1269,18 +1279,6 @@ mod tests {
         let (a, b) = (m.account_status().unwrap(), w.account_status().unwrap());
         assert_eq!((a.uid, a.login, a.has_plus), (b.uid, b.login, b.has_plus));
         assert_eq!(mobile.uid, web.uid);
-    }
-
-    /// Network test: needs a token (see `test_token`). Only reads the likes.
-    #[test]
-    #[ignore]
-    fn liked() {
-        for api in apis() {
-            let (ids, tracks) = api.liked().unwrap();
-            assert!(!ids.is_empty());
-            let tracks = tracks.map_or_else(|| api.tracks(&ids), Ok).unwrap();
-            assert!(tracks.len() * 10 > ids.len() * 8, "web={}: {} of {}", api.web, tracks.len(), ids.len());
-        }
     }
 
     /// Network test: WRITES to the account — likes and dislikes a track, then takes both back.

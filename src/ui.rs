@@ -1,7 +1,7 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Art, Lastfm, Modal, Repeat, Setting, Source, StationRow, Tab};
+use crate::app::{App, Art, Lastfm, Modal, PodcastSection, Repeat, Setting, Source, StationRow, Tab};
 use crate::keymap::{self, Action, Action as A, Section};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
@@ -207,11 +207,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Tab::Liked => draw_liked(f, app, content),
         Tab::Search => draw_search(f, app, content),
         Tab::Playlists => draw_playlists(f, app, content),
+        Tab::Podcasts => draw_podcasts(f, app, content),
     }
     draw_player(f, app, player);
     draw_hints(f, app, hints);
+    draw_podcast_description(f, app);
     if app.show_help {
-        draw_help(f, ic(app));
+        draw_help(f, app);
     }
     if app.show_about {
         draw_about(f, ic(app));
@@ -221,25 +223,36 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let i = ic(app);
-    let tabs =
-        [(i.wave, "Волна"), (i.stations, "Станции"), (i.liked, "Мне нравится"), (i.search, "Поиск"), (i.queue, "Плейлисты")];
-    let mut spans = vec![
-        Span::styled(format!(" {} ", i.logo), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()),
-        Span::styled(" ymusic ", Style::new().fg(ACCENT).bold()),
-        Span::raw("  "),
+    let tabs = [
+        (i.wave, "Волна"),
+        (i.stations, "Станции"),
+        (i.liked, "Мне нравится"),
+        (i.search, "Поиск"),
+        (i.queue, "Плейлисты"),
+        (i.info, "Подкасты"),
     ];
-    let compact = area.width < 110;
+    let mut spans = vec![Span::styled(format!(" {} ", i.logo), Style::new().fg(ON_ACCENT).bg(ACCENT).bold())];
+    if area.width >= 76 {
+        spans.push(Span::styled(" ymusic  ", Style::new().fg(ACCENT).bold()));
+    }
+    let compact = area.width < 130;
     for (n, (icon, name)) in tabs.iter().enumerate() {
         if n == app.tab.index() {
-            spans.push(Span::styled(format!(" {icon} {name} "), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()));
+            spans.push(Span::styled(format!(" {} {name} ", n + 1), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()));
         } else {
             spans.push(Span::styled(format!(" {}", n + 1), Style::new().fg(MUTED)));
-            let label = if compact { format!(" {icon} ") } else { format!(" {icon} {name} ") };
+            let label = if area.width < 76 {
+                String::new()
+            } else if compact {
+                format!(" {icon} ")
+            } else {
+                format!(" {icon} {name} ")
+            };
             spans.push(Span::styled(label, Style::new().fg(SUB)));
         }
         spans.push(Span::raw(" "));
     }
-    if app.hide_account {
+    if app.hide_account || area.width < 100 {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
@@ -346,13 +359,19 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         let icon = if app.queue.is_wave() { i.wave } else { i.queue };
         lines.push(Line::from(Span::styled(format!("{icon} {src}"), Style::new().fg(ACCENT))));
     }
-    if app.is_liked(t) {
-        lines.push(Line::from(Span::styled(format!("{} В «Мне нравится»", i.heart), Style::new().fg(HEART))));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("l", Style::new().fg(ACCENT).bold()),
-            Span::styled(" — добавить в любимые", Style::new().fg(MUTED)),
-        ]));
+    if t.is_podcast() {
+        lines.push(Line::from(Span::styled(podcast_progress(t), Style::new().fg(SUB))));
+    }
+    if t.is_music() || t.is_podcast() {
+        if app.is_liked(t) {
+            let label = if t.is_podcast() { "Выпуск понравился" } else { "В «Мне нравится»" };
+            lines.push(Line::from(Span::styled(format!("{} {label}", i.heart), Style::new().fg(HEART))));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("l", Style::new().fg(ACCENT).bold()),
+                Span::styled(if t.is_podcast() { " — лайк выпуску" } else { " — добавить в любимые" }, Style::new().fg(MUTED)),
+            ]));
+        }
     }
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }), info);
 }
@@ -733,6 +752,284 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     app.search_state = st;
 }
 
+// ---------------------------------------------------------------- podcasts
+
+fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
+    let [sections, mut content] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let mut tabs = Vec::new();
+    for (section, title) in [
+        (PodcastSection::Mine, "Мои"),
+        (PodcastSection::New, "Новые выпуски"),
+        (PodcastSection::Search, "Поиск"),
+    ] {
+        let style = if app.podcasts.section == section {
+            Style::new().fg(ON_ACCENT).bg(ACCENT).bold()
+        } else {
+            Style::new().fg(SUB)
+        };
+        tabs.push(Span::styled(format!(" {title} "), style));
+    }
+    f.render_widget(Paragraph::new(Line::from(tabs)), sections);
+    if app.podcasts.section == PodcastSection::Search && app.podcasts.open.is_none() {
+        let [input, results] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(content);
+        content = results;
+        let podcasts = &app.podcasts;
+        let mut spans = vec![Span::styled(format!("{}  ", ic(app).search), Style::new().fg(ACCENT))];
+        if podcasts.input.is_empty() && !podcasts.editing {
+            spans.push(Span::styled("Название подкаста…  (/ или i — ввод)", Style::new().fg(MUTED)));
+        } else {
+            // Keep the end and the cursor visible while editing a long query.
+            let room = input.width.saturating_sub(8) as usize;
+            let skip = podcasts.input.chars().count().saturating_sub(room);
+            let text: String = podcasts.input.chars().skip(skip).collect();
+            spans.push(Span::styled(text, Style::new().fg(Color::Reset).bold()));
+        }
+        if podcasts.editing && (app.tick / 2).is_multiple_of(2) {
+            spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).block(
+                Block::bordered()
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(if podcasts.editing { ACCENT } else { BORDER }))
+                    .padding(Padding::horizontal(1)),
+            ),
+            input,
+        );
+    }
+    if app.podcasts.open.is_some() {
+        draw_podcast_episodes(f, app, content);
+    } else {
+        draw_podcast_shows(f, app, content);
+    }
+}
+
+/// A window in a two-line podcast table, keeping the selected row in view.
+fn podcast_window(state: &mut TableState, len: usize, height: u16) -> (usize, usize, Option<usize>) {
+    let visible = (height.saturating_sub(2) as usize / 2).max(1);
+    let selected = state.selected().filter(|&s| s < len);
+    let mut offset = state.offset();
+    if let Some(s) = selected {
+        if s < offset {
+            offset = s;
+        } else if s >= offset + visible {
+            offset = s + 1 - visible;
+        }
+    }
+    offset = offset.min(len.saturating_sub(visible));
+    *state.offset_mut() = offset;
+    (offset, (offset + visible).min(len), selected.map(|s| s - offset))
+}
+
+fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
+    let podcasts = &app.podcasts;
+    let shown = podcasts.shows.len();
+    let of = match podcasts.total {
+        Some(total) if total > shown => format!(" из {total}"),
+        None if podcasts.section == PodcastSection::Search && !podcasts.query.is_empty() => "+".into(),
+        _ => String::new(),
+    };
+    let loading = if podcasts.loading { format!(" · {}", spinner(app.tick)) } else { String::new() };
+    let block = panel(ic(app).info, format!("Подкасты · {shown}{of}{loading}"));
+    if shown == 0 {
+        let message = if podcasts.loading {
+            "Загрузка подкастов…"
+        } else {
+            match podcasts.section {
+                PodcastSection::Mine => "Пока нет подкастов — найдите их в поиске",
+                PodcastSection::New => "Новых выпусков нет",
+                PodcastSection::Search if podcasts.query.is_empty() => "Введите название подкаста",
+                PodcastSection::Search => "Подкасты не найдены",
+            }
+        };
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(Paragraph::new(message).style(Style::new().fg(SUB)).wrap(Wrap { trim: true }), inner);
+        return;
+    }
+    let (start, end, selected) = podcast_window(&mut app.podcasts.state, shown, block.inner(area).height);
+    let current = app.current().filter(|t| t.is_podcast());
+    let rows = app.podcasts.shows[start..end].iter().enumerate().map(|(n, show)| {
+        let on = current.is_some_and(|t| t.album_id.as_deref() == Some(show.id.as_str()));
+        let style = if on { Style::new().fg(ACCENT).bold() } else { Style::new().fg(Color::Reset) };
+        let favorite = if app.podcasts.liked.contains(&show.id) { " · В Моих" } else { "" };
+        let summary = show.description.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+        let details = format!("{} вып.{}  {}", show.episodes, favorite, summary);
+        Row::new(vec![
+            Cell::from(Span::styled(
+                if on { ic(app).play.to_string() } else { (start + n + 1).to_string() },
+                Style::new().fg(if on { ACCENT } else { MUTED }),
+            )),
+            Cell::from(vec![
+                Line::from(Span::styled(show.title.as_str(), style)),
+                Line::from(Span::styled(details, Style::new().fg(SUB))),
+            ]),
+        ])
+        .height(2)
+    });
+    let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(0)])
+        .header(Row::new(["#", "Подкаст · выпуски / описание"]).style(Style::new().fg(MUTED)).bottom_margin(1))
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(Style::new().bg(SEL_BG).bold())
+        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+        .highlight_spacing(HighlightSpacing::Always);
+    f.render_stateful_widget(table, area, &mut TableState::default().with_selected(selected));
+}
+
+fn podcast_progress(track: &Track) -> String {
+    match &track.progress {
+        Some(progress) if progress.finished => "Прослушан".into(),
+        Some(progress) if progress.position > 0.0 => format!("С {}", fmt_time(progress.position)),
+        _ => "Не прослушан".into(),
+    }
+}
+
+fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(open) = &app.podcasts.open else { return };
+    let favorite = if app.podcasts.liked.contains(&open.show.id) { " · В Моих" } else { "" };
+    let loading = if open.loading { format!(" · {}", spinner(app.tick)) } else { String::new() };
+    let title = format!("{}{} · {}/{}{}", open.show.title, favorite, open.tracks.len(), open.total, loading);
+    let block = panel(ic(app).info, title);
+    if open.tracks.is_empty() {
+        let inner = block.inner(area);
+        let message = if open.loading { "Загрузка выпусков…" } else { "Выпусков нет" };
+        f.render_widget(block, area);
+        f.render_widget(Paragraph::new(message).style(Style::new().fg(SUB)), inner);
+        return;
+    }
+    let len = open.tracks.len();
+    let (start, end, selected) = podcast_window(&mut app.podcasts.episode_state, len, block.inner(area).height);
+    let open = app.podcasts.open.as_ref().unwrap();
+    let current = app.current().map(|t| t.id.as_str());
+    let rows = open.tracks[start..end].iter().enumerate().map(|(n, track)| {
+        let on = current == Some(track.id.as_str());
+        let style = if !track.available {
+            Style::new().fg(MUTED).crossed_out()
+        } else if on {
+            Style::new().fg(ACCENT).bold()
+        } else {
+            Style::new().fg(Color::Reset)
+        };
+        let marker = if on {
+            if app.loading_track { spinner(app.tick) } else if app.paused { ic(app).pause } else { ic(app).play }
+        } else {
+            ""
+        };
+        let number = if on { marker.to_string() } else { (start + n + 1).to_string() };
+        let date = track.published.as_deref().unwrap_or("Без даты").split('T').next().unwrap_or("Без даты");
+        let compact = area.width < 60;
+        let progress = if on {
+            let position = fmt_time(app.time_pos);
+            if compact { position } else { format!("С {position}") }
+        } else if compact {
+            match &track.progress {
+                Some(progress) if progress.finished => "Готово".into(),
+                Some(progress) if progress.position > 0.0 => fmt_time(progress.position),
+                _ => "Новый".into(),
+            }
+        } else {
+            podcast_progress(track)
+        };
+        let details = format!("{date} · {} · {progress}", fmt_time(track.duration_ms as f64 / 1000.0));
+        let title = Span::styled(track.title.as_str(), style);
+        let title = if app.is_liked(track) {
+            Line::from(vec![Span::styled(format!("{} ", ic(app).heart), Style::new().fg(HEART)), title])
+        } else {
+            Line::from(title)
+        };
+        Row::new(vec![
+            Cell::from(Span::styled(number, Style::new().fg(if on { ACCENT } else { MUTED }))),
+            Cell::from(vec![
+                title,
+                Line::from(Span::styled(details, Style::new().fg(SUB))),
+            ]),
+        ])
+        .height(2)
+    });
+    let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(0)])
+        .header(Row::new(["#", "Выпуск · дата / длительность / прогресс"]).style(Style::new().fg(MUTED)).bottom_margin(1))
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(Style::new().bg(SEL_BG).bold())
+        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+        .highlight_spacing(HighlightSpacing::Always);
+    f.render_stateful_widget(table, area, &mut TableState::default().with_selected(selected));
+}
+
+/// Borrow the text while wrapping at grapheme boundaries, preferring whitespace.
+/// Explicit lines make End/clamping exact without ratatui's unstable line-count API.
+fn podcast_description_lines(text: &str, width: u16) -> Vec<Line<'_>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for source in text.split('\n') {
+        let mut rest = source.trim();
+        if rest.is_empty() {
+            lines.push(Line::default());
+        }
+        while !rest.is_empty() {
+            let mut used = 0;
+            let mut end = 0;
+            let mut space = None;
+            let span = Span::raw(rest);
+            for grapheme in span.styled_graphemes(Style::default()) {
+                let cells = Span::raw(grapheme.symbol).width();
+                let whitespace = grapheme.symbol.chars().all(char::is_whitespace);
+                if used + cells > usize::from(width) {
+                    if whitespace {
+                        space = Some(end);
+                    }
+                    break;
+                }
+                if whitespace {
+                    space = Some(end);
+                }
+                used += cells;
+                end += grapheme.symbol.len();
+            }
+            if end == rest.len() {
+                lines.push(Line::raw(rest));
+                break;
+            }
+            if end == 0 {
+                // A single wide grapheme cannot fit this terminal: clip it as a unit.
+                end = span.styled_graphemes(Style::default()).next().map_or(rest.len(), |g| g.symbol.len());
+            } else if let Some(at) = space.filter(|&at| at > 0) {
+                end = at;
+            }
+            lines.push(Line::raw(rest[..end].trim_end()));
+            rest = rest[end..].trim_start();
+        }
+    }
+    lines
+}
+
+fn draw_podcast_description(f: &mut Frame, app: &mut App) {
+    if app.tab != Tab::Podcasts {
+        return;
+    }
+    let Some((title, description)) = &app.podcasts.description else { return };
+    let [vertical] = Layout::vertical([Constraint::Percentage(85)]).flex(Flex::Center).areas(f.area());
+    let [area] = Layout::horizontal([Constraint::Max(90)]).flex(Flex::Center).areas(vertical);
+    f.render_widget(Clear, area);
+    let close = keymap::hint_keys(&[A::Back, A::PodcastDescription]);
+    let block = panel(ic(app).info, title)
+        .border_style(Style::new().fg(ACCENT))
+        .title_bottom(Line::from(Span::styled(
+            format!(" {close} — закрыть · ↑↓ PgUp/PgDn Home/End "),
+            Style::new().fg(MUTED),
+        )));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let text = if description.trim().is_empty() { "Описание отсутствует" } else { description };
+    let lines = podcast_description_lines(text, inner.width);
+    let last = lines.len().saturating_sub(inner.height as usize).min(u16::MAX as usize) as u16;
+    app.podcasts.description_scroll = app.podcasts.description_scroll.min(last);
+    f.render_widget(Paragraph::new(lines).scroll((app.podcasts.description_scroll, 0)), inner);
+}
+
 fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
     let i = ic(app);
     let active = (app.queue.is_wave())
@@ -804,10 +1101,10 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     let filled = ((app.volume.min(100.0) / 10.0).round() as usize).min(10);
     let vol_color = if app.muted { MUTED } else { ACCENT };
     let mut right = vec![];
-    let repeat = match app.queue.repeat() {
-        Repeat::Off => None,
-        Repeat::All => Some(i.repeat),
-        Repeat::One => Some(i.repeat_one),
+    let repeat = match (app.current().is_some_and(Track::is_podcast), app.queue.repeat()) {
+        (false, Repeat::All) => Some(i.repeat),
+        (false, Repeat::One) => Some(i.repeat_one),
+        _ => None,
     };
     if let Some(icon) = repeat {
         right.push(Span::styled(format!("{icon}   "), Style::new().fg(ACCENT)));
@@ -834,6 +1131,9 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     ];
     match app.current() {
         Some(t) => {
+            if app.loading_track {
+                left.push(Span::styled("Загрузка… ", Style::new().fg(ACCENT)));
+            }
             left.push(Span::styled(t.title.as_str(), Style::new().fg(Color::Reset).bold()));
             left.push(Span::styled(format!("  {}", t.artists), Style::new().fg(SUB)));
             if app.is_liked(t) {
@@ -877,7 +1177,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(Span::styled(format!(" {icon} {s}"), Style::new().fg(color))), area);
         return;
     }
-    let keys: &[(&str, &str)] = if app.search.editing {
+    let keys: &[(&str, &str)] = if app.search.editing || (app.tab == Tab::Podcasts && app.podcasts.editing) {
         &[("Enter", "искать"), ("Esc", "отмена"), ("Ctrl+U", "очистить")]
     } else if let Some(modal) = &app.modal {
         match modal {
@@ -890,7 +1190,36 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
             Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
         }
     } else {
-        let actions: &[(&[Action], &str)] = if app.tab == Tab::Playlists && app.playlists.open.is_some() {
+        let actions: &[(&[Action], &str)] = if app.tab == Tab::Podcasts {
+            if app.podcasts.description.is_some() {
+                &[
+                    (&[A::Back, A::PodcastDescription], "закрыть"),
+                    (&[A::Up, A::Down], "прокрутка"),
+                    (&[A::PageUp, A::PageDown], "страницы"),
+                    (&[A::Top, A::Bottom], "начало / конец"),
+                ]
+            } else if app.podcasts.open.is_some() {
+                &[
+                    (&[A::Activate], "продолжить"),
+                    (&[A::PodcastFromStart], "с начала"),
+                    (&[A::PodcastDescription], "описание"),
+                    (&[A::LikeSelected], "лайк выпуска"),
+                    (&[A::PodcastFavorite], "в Мои"),
+                    (&[A::Back], "назад"),
+                    (&[A::Help], "помощь"),
+                ]
+            } else {
+                &[
+                    (&[A::Activate], "выпуски"),
+                    (&[A::PodcastPreviousSection, A::PodcastNextSection], "раздел"),
+                    (&[A::Search], "поиск"),
+                    (&[A::PodcastFavorite], "в Мои"),
+                    (&[A::PodcastDescription], "описание"),
+                    (&[A::Reload], "обновить"),
+                    (&[A::Help], "помощь"),
+                ]
+            }
+        } else if app.tab == Tab::Playlists && app.playlists.open.is_some() {
             &[
                 (&[A::Activate], "играть"),
                 (&[A::Shuffle], "в случайном порядке"),
@@ -939,6 +1268,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
                     (&[A::Help], "помощь"),
                     (&[A::Quit], "выход"),
                 ],
+                Tab::Podcasts => unreachable!("podcast hints are handled above"),
             }
         };
         let help = keymap::hint_keys(&[A::Help]);
@@ -953,7 +1283,10 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
 /// right edge on the main screen.
 fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)], keep: &str) {
     // «Настройки» sit at the right edge, except while text is typed (`o` is input there).
-    let about = (!app.search.editing && app.modal.is_none()).then(|| {
+    let about = (!app.search.editing
+        && !(app.tab == Tab::Podcasts && (app.podcasts.editing || app.podcasts.description.is_some()))
+        && app.modal.is_none())
+    .then(|| {
         Line::from(vec![
             Span::styled("o", Style::new().fg(ACCENT).bold()),
             Span::styled(" настройки ", Style::new().fg(MUTED)),
@@ -977,13 +1310,16 @@ fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)],
     }
 }
 
-fn draw_help(f: &mut Frame, i: &Icons) {
+fn draw_help(f: &mut Frame, app: &App) {
+    let i = ic(app);
+    let podcasts = app.tab == Tab::Podcasts;
     let icon = |s: Section| match s {
         Section::Playback => i.play,
         Section::Ratings => i.heart,
         Section::Waves => i.wave,
         Section::Navigation => i.keys,
         Section::Playlists => i.queue,
+        Section::Podcasts => i.info,
     };
     let render = |sections: &[Section]| {
         let mut lines = vec![];
@@ -993,6 +1329,9 @@ fn draw_help(f: &mut Frame, i: &Icons) {
                 Span::styled(section.title().to_uppercase(), Style::new().fg(SUB).bold()),
             ]));
             for row in keymap::ROWS.iter().filter(|r| r.section == section) {
+                if podcasts && row.keys.iter().any(|(_, action)| matches!(action, A::Activate | A::Shuffle | A::OpenLink | A::Dislike)) {
+                    continue;
+                }
                 let Some(help) = row.help else { continue };
                 lines.push(Line::from(vec![
                     Span::styled(format!("   {:<12}", keymap::row_keys(row)), Style::new().fg(ACCENT).bold()),
@@ -1004,14 +1343,19 @@ fn draw_help(f: &mut Frame, i: &Icons) {
         lines.pop();
         lines
     };
-    let sections = Section::ALL;
+    let sections: &[Section] = if podcasts {
+        &[Section::Podcasts, Section::Ratings, Section::Playback, Section::Navigation]
+    } else {
+        &Section::ALL
+    };
     const COL: u16 = 46;
     let area = f.area();
     // Two columns when they fit, otherwise one (cut at the bottom on very small terminals).
     let columns = if area.width >= 2 * COL + 6 {
-        vec![render(&sections[..3]), render(&sections[3..])]
+        let split = if podcasts { 2 } else { 3 };
+        vec![render(&sections[..split]), render(&sections[split..])]
     } else {
-        vec![render(&sections)]
+        vec![render(sections)]
     };
     let rows = columns.iter().map(Vec::len).max().unwrap_or(0) as u16;
     let width = (columns.len() as u16 * COL + 4).min(area.width);
@@ -1339,6 +1683,21 @@ mod tests {
     }
     use ratatui::{backend::TestBackend, Terminal};
 
+    #[test]
+    fn podcast_description_wrapping() {
+        let lines = super::podcast_description_lines("Один два три\n\nабвгдежз\n界界界", 6);
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(text, ["Один", "два", "три", "", "абвгде", "жз", "界界界"]);
+        assert!(lines.iter().all(|line| line.width() <= 6));
+        assert!(super::podcast_description_lines("текст", 0).is_empty());
+        let lines = super::podcast_description_lines("👩‍💻👩‍💻", 2);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|line| line.width() == 2));
+        let lines = super::podcast_description_lines("Один два три", 8);
+        assert_eq!(lines.iter().map(ToString::to_string).collect::<Vec<_>>(), ["Один два", "три"]);
+    }
+
+
     /// Renders every tab.
     #[test]
     fn render_smoke() {
@@ -1354,6 +1713,9 @@ mod tests {
             available: true,
             cover: None,
             batch: None,
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
         };
         app.queue.replace(crate::queue::Source::None, vec![
             Track { id: "0".into(), title: "Группа крови".into(), artists: "Кино".into(), ..t.clone() },
@@ -1510,18 +1872,7 @@ mod tests {
         let mut picker = Picker::from_fontsize((10, 20));
         picker.set_protocol_type(ProtocolType::Kitty);
         app.picker = Some(picker);
-        let track = |id: &str| Track {
-            id: id.into(),
-            album_id: None,
-            title: id.into(),
-            artists: "A".into(),
-            main_artist: None,
-            album: String::new(),
-            duration_ms: 1000,
-            available: true,
-            cover: Some(format!("cover-{id}")),
-            batch: None,
-        };
+        let track = |id: &str| Track { id: id.into(), album_id: None, title: id.into(), artists: "A".into(), main_artist: None, album: String::new(), duration_ms: 1000, available: true, cover: Some(format!("cover-{id}")), batch: None, kind: crate::api::TrackKind::Music, progress: None, published: None };
         app.queue.replace(crate::queue::Source::None, vec![track("a"), track("b")]);
         app.covers = ["a", "b"]
             .iter()
@@ -1568,6 +1919,9 @@ mod tests {
                 available: true,
                 cover: Some(url.clone()),
                 batch: None,
+                kind: crate::api::TrackKind::Music,
+                progress: None,
+                published: None,
             }]);
             app.queue.select(0);
             let mut term = Terminal::new(TestBackend::new(120, 34)).unwrap();

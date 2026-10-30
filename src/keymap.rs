@@ -40,7 +40,7 @@ pub enum Action {
     CopyLink,
     OpenLink,
     Search,
-    /// Back into the search field (on the search tab).
+    /// Back into the music or podcast search field.
     EditSearch,
     Reload,
     AddToPlaylist,
@@ -48,8 +48,13 @@ pub enum Action {
     Remove,
     Rename,
     NewPlaylist,
-    /// Out of the open playlist.
+    /// Out of the open playlist, podcast, or podcast description.
     Back,
+    PodcastPreviousSection,
+    PodcastNextSection,
+    PodcastFromStart,
+    PodcastDescription,
+    PodcastFavorite,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,10 +64,13 @@ pub enum Section {
     Waves,
     Navigation,
     Playlists,
+    Podcasts,
 }
 
 impl Section {
-    pub const ALL: [Section; 5] = [Section::Playback, Section::Ratings, Section::Waves, Section::Navigation, Section::Playlists];
+    pub const ALL: [Section; 6] = [
+        Section::Playback, Section::Ratings, Section::Waves, Section::Navigation, Section::Playlists, Section::Podcasts,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -71,6 +79,7 @@ impl Section {
             Section::Waves => "Волны",
             Section::Navigation => "Навигация",
             Section::Playlists => "Плейлисты",
+            Section::Podcasts => "Подкасты",
         }
     }
 }
@@ -78,7 +87,7 @@ impl Section {
 /// A row of the help and the keys behind it.
 pub struct Row {
     pub section: Section,
-    /// The keys as the help shows them, when shorter than all of them listed (`1-5  Tab`).
+    /// The keys as the help shows them, when shorter than all of them listed (`1-6  Tab`).
     pub label: Option<&'static str>,
     /// What the row says in the help; `None`: not shown there.
     pub help: Option<&'static str>,
@@ -108,8 +117,8 @@ pub const ROWS: &[Row] = &[
     ),
     row(Section::Playback, "без звука", &[(C('m'), A::Mute)]),
     row(Section::Playback, "повтор: очередь / трек / выкл", &[(C('T'), A::Repeat)]),
-    row(Section::Ratings, "лайк текущего трека", &[(C('l'), A::LikeCurrent)]),
-    row(Section::Ratings, "лайк выбранного в списке", &[(C('L'), A::LikeSelected)]),
+    row(Section::Ratings, "лайк текущего трека / выпуска", &[(C('l'), A::LikeCurrent)]),
+    row(Section::Ratings, "лайк выбранного трека / выпуска", &[(C('L'), A::LikeSelected)]),
     row(Section::Ratings, "дизлайк и пропуск", &[(C('d'), A::Dislike)]),
     row(Section::Waves, "Моя волна", &[(C('w'), A::MyWave)]),
     // The stations tab and Enter, both bound below.
@@ -119,7 +128,7 @@ pub const ROWS: &[Row] = &[
     row(Section::Waves, "альбом трека", &[(C('e'), A::Album)]),
     labeled(
         Section::Navigation,
-        "1-5  Tab",
+        "1-6  Tab",
         "вкладки",
         &[
             (C('1'), A::Tab(0)),
@@ -127,6 +136,7 @@ pub const ROWS: &[Row] = &[
             (C('3'), A::Tab(2)),
             (C('4'), A::Tab(3)),
             (C('5'), A::Tab(4)),
+            (C('6'), A::Tab(5)),
             (KeyCode::Tab, A::NextTab),
             (KeyCode::BackTab, A::PrevTab),
         ],
@@ -170,6 +180,17 @@ pub const ROWS: &[Row] = &[
     row(Section::Playlists, "удалить трек / плейлист", &[(C('x'), A::Remove)]),
     row(Section::Playlists, "переименовать плейлист", &[(C('E'), A::Rename)]),
     row(Section::Playlists, "новый плейлист", &[(C('N'), A::NewPlaylist)]),
+    row(
+        Section::Podcasts,
+        "предыдущий / следующий раздел",
+        &[(C('['), A::PodcastPreviousSection), (C(']'), A::PodcastNextSection)],
+    ),
+    labeled(Section::Podcasts, "Enter  Esc", "открыть / играть / назад", &[]),
+    row(Section::Podcasts, "эпизод с начала", &[(C('z'), A::PodcastFromStart)]),
+    row(Section::Podcasts, "описание / закрыть описание", &[(C('I'), A::PodcastDescription)]),
+    row(Section::Podcasts, "добавить / убрать подкаст из Моих", &[(C('f'), A::PodcastFavorite)]),
+    labeled(Section::Podcasts, "↑ ↓  PgUp PgDn", "прокрутка описания", &[]),
+    labeled(Section::Podcasts, "Home  End", "начало / конец описания", &[]),
 ];
 
 /// What `code` does on the main screen.
@@ -232,6 +253,13 @@ mod tests {
         assert_eq!(hint_keys(&[A::SeekBack, A::SeekForward]), "←→");
         assert_eq!(hint_keys(&[A::VolumeUp, A::VolumeDown]), "+-");
         assert_eq!(hint_keys(&[A::Back]), "Esc");
+        assert_eq!(action(C('6')), Some(A::Tab(5)));
+        assert_eq!(action(C('[')), Some(A::PodcastPreviousSection));
+        assert_eq!(action(C(']')), Some(A::PodcastNextSection));
+        assert_eq!(action(C('z')), Some(A::PodcastFromStart));
+        assert_eq!(action(C('I')), Some(A::PodcastDescription));
+        assert_eq!(action(C('f')), Some(A::PodcastFavorite));
+        assert_eq!(hint_keys(&[A::PodcastPreviousSection, A::PodcastNextSection]), "[]");
         // Every row the help shows has keys behind it (or names keys bound elsewhere).
         for r in ROWS {
             assert!(!r.keys.is_empty() || r.label.is_some(), "{:?}", r.help);

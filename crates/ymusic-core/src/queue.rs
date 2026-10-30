@@ -1,7 +1,7 @@
 //! The play queue: its tracks and position, where they come from, the repeat mode and random
 //! order. Only the order of things — nothing here talks to the player, the network or the screen.
 
-use ymusic_api::{random_below, Track};
+use ymusic_api::{random_below, StreamProgress, Track};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -61,6 +61,13 @@ pub struct Queue {
 impl Queue {
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    /// Keep resume state coherent when restoring the list's original order.
+    pub fn set_stream_progress(&mut self, id: &str, progress: StreamProgress) {
+        for track in self.tracks.iter_mut().chain(self.unshuffled.iter_mut().flatten()) {
+            if track.id == id { track.progress = Some(progress.clone()); }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -279,6 +286,9 @@ mod tests {
             available: true,
             cover: None,
             batch: None,
+            kind: ymusic_api::TrackKind::Music,
+            progress: None,
+            published: None,
         }
     }
 

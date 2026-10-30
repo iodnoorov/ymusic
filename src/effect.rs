@@ -5,7 +5,7 @@
 
 use crate::api::lastfm::{self, Scrobble};
 use crate::api::{Api, ApiError, Link, PlayContext, PlayReport, Playlist, Track};
-use crate::app::Msg;
+use crate::app::{Msg, PodcastMsg, PodcastTask};
 use crate::player::{Player, PlayerCmd};
 use crate::Lock;
 use serde_json::Value;
@@ -24,6 +24,7 @@ pub enum Effect {
 pub enum Task {
     /// «Мне нравится»: the ids first (`LikedIds`), then the tracks.
     Liked,
+    Podcast(PodcastTask),
     Playlists { req: u64 },
     Stations,
     /// «Меньше ИИ-музыки» of the account.
@@ -78,16 +79,14 @@ impl Task {
     /// Does the work; `send` takes what comes back.
     pub fn run(self, api: &Api, send: impl Fn(Msg)) {
         let msg = match self {
+            Task::Podcast(task) => Msg::Podcasts(task.run(api)),
             Task::Liked => {
-                let (ids, tracks) = match api.liked() {
+                let ids = match api.liked() {
                     Ok(r) => r,
                     Err(e) => return send(Msg::Liked(Err(text(e)))),
                 };
                 send(Msg::LikedIds(ids.clone()));
-                let tracks = match tracks {
-                    Some(t) => Ok(t),
-                    None => api.tracks(&ids),
-                };
+                let tracks = api.tracks(&ids);
                 Msg::Liked(tracks.map_err(text))
             }
             Task::Playlists { req } => Msg::Playlists { req, result: api.playlists().map_err(text) },
@@ -247,7 +246,16 @@ fn linked(api: &Api, intent: u64, link: Link) -> Msg {
         Err(e) => (format!("{kind} по ссылке"), Err(text(e))),
     };
     let (name, result) = match &link {
-        Link::Track(id) => ("Трек по ссылке".to_string(), api.tracks(std::slice::from_ref(id)).map_err(text)),
+        Link::Track(id) => {
+            let tracks = api.tracks(std::slice::from_ref(id)).map_err(text);
+            if let Ok(list) = &tracks
+                && list.first().is_some_and(Track::is_podcast) {
+                return Msg::Podcasts(PodcastMsg::Linked {
+                    intent, id: id.split(':').next().unwrap_or(id).to_string(),
+                });
+            }
+            ("Трек по ссылке".to_string(), tracks)
+        }
         Link::Album(id) => titled("Альбом", api.album_tracks(id)),
         Link::Playlist { .. } | Link::PlaylistUuid(_) => titled("Плейлист", api.linked_playlist(&link)),
     };
@@ -272,6 +280,7 @@ impl Task {
                 code: 0, message: "очередь фоновых задач заполнена".into(), blocked: false
             };
         match self {
+            Task::Podcast(task) => Msg::Podcasts(task.rejected(error())),
             Task::Liked => Msg::Liked(Err(error())),
             Task::Playlists { req } => Msg::Playlists { req: *req, result: Err(error()) },
             Task::LessAi => Msg::LessAi(Err(error())),
@@ -316,7 +325,7 @@ impl Task {
                 | Task::Artist { .. }
                 | Task::Album { .. }
                 | Task::Link { .. }
-        )
+        ) || matches!(self, Task::Podcast(task) if task.urgent())
     }
 
     /// A link asked for a track the user has already moved away from (`generation` is the app's

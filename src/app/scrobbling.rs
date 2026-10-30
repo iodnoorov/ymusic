@@ -102,6 +102,7 @@ impl App {
         let duration = self.duration;
         let Some(play) = &mut self.play else { return };
         let track = &play.report.track;
+        if !track.is_music() { return; }
         let artist = track.main_artist.as_ref().map_or(track.artists.clone(), |(_, name)| name.clone());
         let item = Scrobble {
             artist,

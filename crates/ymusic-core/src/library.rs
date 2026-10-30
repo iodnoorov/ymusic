@@ -40,7 +40,7 @@ impl Likes {
     pub fn set(&mut self, track: &Track, like: bool) {
         if like {
             self.ids.insert(track.id.clone());
-            if !self.tracks.iter().any(|t| t.id == track.id) {
+            if track.is_music() && !self.tracks.iter().any(|t| t.id == track.id) {
                 self.tracks.insert(0, track.clone());
             }
         } else {
@@ -56,7 +56,7 @@ impl Likes {
     #[cfg(any(test, feature = "testing"))]
     pub fn set_loaded(&mut self, tracks: Vec<Track>) {
         self.ids = tracks.iter().map(|t| t.id.clone()).collect();
-        self.tracks = tracks;
+        self.tracks = tracks.into_iter().filter(Track::is_music).collect();
         self.loading = false;
     }
 
@@ -76,7 +76,7 @@ impl Likes {
     pub fn loaded<E>(&mut self, result: Result<Vec<Track>, E>) -> Result<(), E> {
         self.loading = false;
         let pending = std::mem::take(&mut self.pending);
-        self.tracks = result?;
+        self.tracks = result?.into_iter().filter(Track::is_music).collect();
         for (t, like) in &pending {
             self.set(t, *like);
         }
@@ -313,6 +313,26 @@ mod tests {
         assert!(likes.begin_load());
         assert!(likes.loaded(Err("сеть")).is_err());
         assert_eq!(ids(likes.tracks()), ["5", "1"], "a failed load keeps the list");
+    }
+
+    #[test]
+    fn non_music_likes_never_enter_the_music_list() {
+        let mut podcast = track("podcast");
+        podcast.kind = ymusic_api::TrackKind::Podcast;
+        let mut book = track("book");
+        book.kind = ymusic_api::TrackKind::Book;
+        let mut likes = Likes::default();
+        likes.set(&podcast, true);
+        likes.set(&book, true);
+        assert!(likes.contains("podcast") && likes.contains("book"));
+        assert!(likes.tracks().is_empty());
+        likes.set_loaded(vec![track("music"), podcast.clone(), book.clone()]);
+        assert_eq!(ids(likes.tracks()), ["music"]);
+        assert!(likes.begin_load());
+        likes.set(&podcast, true);
+        likes.loaded::<()>(Ok(vec![track("music"), podcast, book])).unwrap();
+        assert_eq!(ids(likes.tracks()), ["music"]);
+        assert!(likes.contains("podcast") && likes.contains("book"));
     }
 
     #[test]
