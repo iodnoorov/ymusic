@@ -347,6 +347,5 @@ ymusic --no-icons            # без иконок Nerd Font
 
 ## Дополнительная информация
 
-- Проект доработан с помощью [Claude Code](https://claude.com/claude-code).
 - Лицензия — MIT (`LICENSE`). В программу входит декодер FDK AAC от Fraunhofer со своей лицензией: её текст —
   в `LICENSE-FDK-AAC`, он же лежит в архивах релизов и ставится пакетами AUR.
