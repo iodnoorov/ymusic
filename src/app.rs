@@ -2537,6 +2537,7 @@ mod tests {
         assert_eq!(QUALITIES[app.quality].id, "lq");
         app.on_key(key(KeyCode::Left));
         assert_eq!(app.quality, QUALITIES.len() - 1, "wraps around");
+        assert_eq!(QUALITIES[app.quality].id, "lossless");
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.eq, crate::eq::index("electronic"));

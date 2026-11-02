@@ -14,7 +14,7 @@ fdk-aac = "0.8"
 libc.workspace = true
 pulseaudio = "0.3.2"
 rustls.workspace = true
-symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "aac", "mp3"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["isomp4", "aac", "mp3", "flac"] }
 symphonia-adapter-fdk-aac = "0.2"
 ureq.workspace = true
 tempfile = "3"

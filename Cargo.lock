@@ -1661,6 +1661,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7edef6a96b696d4e0cab5ee9ebb7ca155ed95f30a6b45bbb8b97d2727f02424"
 dependencies = [
  "lazy_static",
+ "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
  "symphonia-codec-aac",
  "symphonia-core",
@@ -1677,6 +1678,18 @@ dependencies = [
  "fdk-aac",
  "log",
  "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-bundle-flac"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6405d5c34ff6f8f7ca08a4101efe66d21e180f7322ef9359900a0e55698a7892"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
 ]
 
 [[package]]
@@ -2244,7 +2257,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "ymusic-api"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2263,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "ymusic-cli"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2290,7 +2303,7 @@ dependencies = [
 
 [[package]]
 name = "ymusic-core"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2299,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "ymusic-player"
-version = "3.8.0"
+version = "3.9.0"
 dependencies = [
  "anyhow",
  "fdk-aac",

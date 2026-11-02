@@ -310,6 +310,10 @@ mod tests {
         assert_eq!(back["output"], "pulse");
         assert_eq!(back["lastfm"]["key"], "sk");
 
+        let lossless: Settings = serde_json::from_str(r#"{"quality":"lossless"}"#).unwrap();
+        assert_eq!(lossless.quality.id, "lossless");
+        assert_eq!(serde_json::to_value(&lossless).unwrap()["quality"], "lossless");
+
         // Stale or empty values, as older versions wrote them: defaults, the token stays.
         let cfg: Config =
             serde_json::from_str(r#"{"token": "t", "art": "", "eq": "gone", "quality": 5, "repeat": "", "output": "jack", "lastfm": "x", "covers": false}"#).unwrap();

@@ -1,4 +1,4 @@
-//! Demuxing (MP4, MP3) and decoding with symphonia. AAC-LC and MP3 use symphonia's own decoders;
+//! Demuxing (MP4, MP3, FLAC) and decoding with symphonia. AAC-LC, MP3 and FLAC use its own decoders;
 //! AAC with SBR (HE-AAC: the server sends it for «Экономия трафика») goes through fdk-aac, since
 //! symphonia's decoder would silently play only its 22 kHz core.
 
@@ -323,6 +323,30 @@ mod tests {
             // SBR recreates the high band only roughly (−5 dB here), but it must be there.
             let high = high_band(mid, 44100);
             assert!(high > 0.04, "{name}: {high}");
+        }
+    }
+
+    #[test]
+    fn flac_preserves_samples_and_seeks_in_both_containers() {
+        for (data, scale, modulus, offset) in [
+            (&include_bytes!("../tests/data/pcm16.flac")[..], 32768.0f32, 60001, 30000),
+            (&include_bytes!("../tests/data/pcm24.m4a")[..], 8388608.0f32, 6000001, 3000000),
+        ] {
+            let mut d = open(data);
+            assert!(!d.uses_fdk());
+            assert_eq!(d.sample_rate(), 44100);
+            let pcm = decode_all(&mut d);
+            assert_eq!(pcm.len(), 22050 * 2);
+            for (i, frame) in pcm.as_chunks::<2>().0.iter().enumerate() {
+                let expected = |step| ((i as i32 * step) % modulus - offset) as f32 / scale;
+                assert_eq!(*frame, [expected(97), expected(71)]);
+            }
+            let mut d = open(data);
+            let at = d.seek(0.25).unwrap();
+            assert!((at - 0.25).abs() < 1.0 / 44100.0);
+            let after = decode_all(&mut d);
+            let start = (at * 44100.0).round() as usize * 2;
+            assert_eq!(after, pcm[start..]);
         }
     }
 

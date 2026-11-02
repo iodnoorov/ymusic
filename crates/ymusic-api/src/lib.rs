@@ -66,6 +66,7 @@ pub struct Quality {
 pub const QUALITIES: &[Quality] = &[
     Quality { id: "lq", name: "Экономия трафика", note: "≈64 кбит/с" },
     Quality { id: "nq", name: "Обычное качество", note: "≈192 кбит/с" },
+    Quality { id: "lossless", name: "Без потерь", note: "FLAC, если доступен" },
 ];
 
 /// Index of the quality with this id (normal quality if unknown).
