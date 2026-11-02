@@ -53,6 +53,7 @@ pub struct Podcasts {
     favorite_pending: Option<String>,
     favorite_after_load: Option<Podcast>,
     checkpoint_at: Option<Instant>,
+    play_list: Option<(u64, Vec<Track>)>,
 }
 
 #[derive(Debug)]
@@ -282,6 +283,16 @@ impl App {
 
     pub(super) fn request_podcast_play(&mut self, id: &str, from_start: bool) {
         let intent = self.new_intent();
+        let tracks = if self.podcast_all {
+            match self.tab {
+                Tab::Podcasts => self.podcasts.open.as_ref().map(|o| o.tracks.as_slice()),
+                Tab::Search => Some(self.search.results()),
+                Tab::Playlists => self.playlists.open.as_ref().map(|o| o.tracks.as_slice()),
+                _ => None,
+            }
+        } else { None };
+        self.podcasts.play_list = tracks.filter(|tracks| tracks.iter().any(|t| t.id == id))
+            .map(|tracks| (intent, tracks.to_vec()));
         self.set_status("Чтение позиции подкаста…");
         self.checkpoint_podcast(false);
         let checkpoint = self.podcast_progress.pending.items.iter().find(|p| p.track_id == id).cloned();
@@ -463,7 +474,14 @@ impl App {
                         if from_start { track.progress = Some(StreamProgress { position: 0.0, finished: false }); }
                         let name = format!("Подкаст: {}", track.album);
                         let context = PlayContext::new("album", track.album_id.clone().unwrap_or_default());
-                        self.play_list(&name, context, tracks, 0);
+                        let selected = track.clone();
+                        let pending = self.podcasts.play_list.take().filter(|(request, _)| *request == intent);
+                        let (tracks, start) = if let Some((_, mut list)) = pending {
+                            let start = list.iter().position(|t| t.id == selected.id).unwrap_or(0);
+                            list[start] = selected;
+                            (list, start)
+                        } else { (tracks, 0) };
+                        self.play_list(&name, context, tracks, start);
                     }
                     Err(e) => self.set_error(format!("Не удалось прочитать выпуск: {e}")),
                 }
@@ -613,6 +631,65 @@ mod tests {
         assert!(pending.items[0].finished);
         assert_eq!(pending.items[0].position, 600.0);
         assert!(!app.take_player().iter().any(|c| c.starts_with("append ")));
+    }
+
+    #[test]
+    fn episode_list_is_captured_at_activation_and_selected_progress_is_refreshed() {
+        for all in [true, false] {
+            for from_start in [true, false] {
+                let mut app = App::for_test();
+                app.tab = Tab::Podcasts;
+                app.podcast_all = all;
+                app.podcasts.open = Some(OpenPodcast {
+                    show: show("show"), tracks: vec![episode("a", 10.0), episode("b", 20.0), episode("c", 30.0)],
+                    loading: false, total: 3, req: 0, pages: 1,
+                });
+                app.podcasts.episode_state.select(Some(1));
+                app.activate_podcast(from_start);
+                let intent = app.intent;
+                // Browsing and changing the preference cannot replace an in-flight selection.
+                app.podcasts.open = None;
+                app.podcast_all = !all;
+                app.on_msg(Msg::Podcasts(PodcastMsg::Play {
+                    intent, from_start, checkpoint: None, result: Ok(vec![episode("b", 240.0)]),
+                }));
+                let ids: Vec<_> = app.queue.tracks().iter().map(|t| t.id.as_str()).collect();
+                assert_eq!(ids, if all { vec!["a", "b", "c"] } else { vec!["b"] });
+                assert_eq!(app.queue.pos(), Some(usize::from(all)));
+                assert_eq!(resume_position(app.current().unwrap()), if from_start { 0.0 } else { 240.0 });
+                app.take_player();
+                app.next(End::Skip);
+                assert_eq!(app.current().map(|t| t.id.as_str()), if all { Some("c") } else { None });
+            }
+        }
+    }
+
+    #[test]
+    fn search_episode_list_ignores_stale_play_responses() {
+        let mut app = App::for_test();
+        app.tab = Tab::Search;
+        app.search.input = "podcast".into();
+        app.search.submit();
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(), query: "podcast".into(), page: 0,
+            result: Ok((vec![episode("a", 10.0), episode("b", 20.0)], Some(2))),
+        });
+        app.search_state.select(Some(0));
+        app.activate();
+        let old_intent = app.intent;
+        app.search_state.select(Some(1));
+        app.activate();
+        let intent = app.intent;
+        app.on_msg(Msg::Podcasts(PodcastMsg::Play {
+            intent: old_intent, from_start: false, checkpoint: None, result: Ok(vec![episode("a", 50.0)]),
+        }));
+        assert!(app.current().is_none());
+        app.on_msg(Msg::Podcasts(PodcastMsg::Play {
+            intent, from_start: false, checkpoint: None, result: Ok(vec![episode("b", 70.0)]),
+        }));
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.queue.pos(), Some(1));
+        assert_eq!(resume_position(app.current().unwrap()), 70.0);
     }
 
     #[test]

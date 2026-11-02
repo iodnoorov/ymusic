@@ -115,6 +115,7 @@ fn main() -> Result<()> {
     app.set_crossfade(s.crossfade);
     app.set_art(s.art.unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None }));
     app.finish_track = s.finish_track;
+    app.podcast_all = s.podcast_all;
     app.output = output;
     app.hide_account = s.hide_account;
     app.remaining_time = s.remaining_time;
@@ -391,6 +392,7 @@ fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config
         quality: &api::QUALITIES[app.quality],
         crossfade: app.crossfade,
         finish_track: app.finish_track,
+        podcast_all: app.podcast_all,
         repeat: app.queue.repeat(),
         web_api: app.api.web,
         output: own(app.output, run.output, saved.output),

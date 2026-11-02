@@ -201,6 +201,7 @@ pub enum Setting {
     Crossfade,
     Output,
     FinishTrack,
+    PodcastAll,
     Repeat,
     LessAi,
     Api,
@@ -214,12 +215,13 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 15] = [
+    pub const ALL: [Setting; 16] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
         Setting::Output,
         Setting::FinishTrack,
+        Setting::PodcastAll,
         Setting::Repeat,
         Setting::LessAi,
         Setting::Api,
@@ -412,6 +414,7 @@ pub struct App {
     pub crossfade: u8,
     /// A new list waits for the current track to end instead of cutting it off.
     pub finish_track: bool,
+    pub podcast_all: bool,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
     /// What «Сейчас играет» shows above the track; covers are downloaded only for `Art::Cover`.
@@ -525,6 +528,7 @@ impl App {
             quality: 1,
             crossfade: 0,
             finish_track: false,
+            podcast_all: true,
             icons: true,
             art: Art::Cover,
             output: Output::Auto,
@@ -1912,6 +1916,7 @@ impl App {
                 Some(on) => if on { "вкл" } else { "выкл" }.to_string(),
                 None => "…".to_string(),
             },
+            Setting::PodcastAll => if self.podcast_all { "все записи" } else { "только выбранная" }.to_string(),
             Setting::FinishTrack => if self.finish_track { "вкл" } else { "выкл" }.to_string(),
             Setting::Repeat => self.queue.repeat().name().to_string(),
             Setting::Api => if self.api.web { "сайт" } else { "мобильный" }.to_string(),
@@ -1957,6 +1962,7 @@ impl App {
                 }
                 None => self.set_status("Настройки аккаунта ещё загружаются"),
             },
+            Setting::PodcastAll => self.podcast_all = !self.podcast_all,
             Setting::FinishTrack => self.finish_track = !self.finish_track,
             Setting::Repeat => {
                 let i = Repeat::ALL.iter().position(|r| *r == self.queue.repeat()).unwrap_or(0);
@@ -2552,6 +2558,13 @@ mod tests {
         assert!(!app.finish_track);
 
         app.on_key(key(KeyCode::Char('j')));
+        assert!(app.podcast_all);
+        app.on_key(key(KeyCode::Right));
+        assert!(!app.podcast_all);
+        app.on_key(key(KeyCode::Left));
+        assert!(app.podcast_all);
+
+        app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.queue.repeat(), Repeat::All);
         app.on_key(key(KeyCode::Left));
@@ -2630,14 +2643,14 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 13 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel }) if sel == Setting::About.index()));
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel: 14 })));
+        assert!(matches!(app.modal, Some(Modal::Settings { sel }) if sel == Setting::Logout.index()));
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());

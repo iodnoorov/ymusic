@@ -53,6 +53,8 @@ pub struct Settings {
     pub crossfade: u8,
     /// A new list starts after the current track instead of cutting it off.
     pub finish_track: bool,
+    /// Add the current podcast episode list instead of only the selected episode.
+    pub podcast_all: bool,
     #[serde(deserialize_with = "lenient")]
     pub repeat: Repeat,
     /// Requests go to the API of the music.yandex.ru website instead of the mobile one.
@@ -78,6 +80,7 @@ impl Default for Settings {
             quality: &QUALITIES[quality_index("")],
             crossfade: 0,
             finish_track: false,
+            podcast_all: true,
             repeat: Repeat::Off,
             web_api: false,
             output: Output::Auto,
@@ -290,6 +293,10 @@ mod tests {
                 "hide_account": true, "remaining_time": true, "lastfm": {"name": "me", "key": "sk"}}"#,
         )
         .unwrap();
+        assert!(cfg.settings.podcast_all, "older configs default to the whole episode list");
+        let single: Settings = serde_json::from_str(r#"{"podcast_all":false}"#).unwrap();
+        assert!(!single.podcast_all);
+        assert_eq!(serde_json::to_value(&single).unwrap()["podcast_all"], false);
         let s = &cfg.settings;
         assert_eq!((s.volume, s.art, s.eq.id, s.quality.id, s.repeat), (40, Some(Art::Spectrum), "laptop", "lq", Repeat::One));
         assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5 && s.hide_account && s.remaining_time);
