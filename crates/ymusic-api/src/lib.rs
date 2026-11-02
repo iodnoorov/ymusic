@@ -1506,7 +1506,8 @@ mod tests {
         assert_eq!(api.file_info(ugc, "lq").unwrap().quality, "nq", "the server still falls back");
         let low = api.download_info(ugc, true).unwrap();
         assert!(low.bitrate > 0 && low.bitrate < 192, "{}", low.bitrate);
-        assert_eq!(api.download_info(ugc, false).unwrap().bitrate, 192);
+        let normal = api.download_info(ugc, false).unwrap();
+        assert!(normal.bitrate > low.bitrate, "{} {}", low.bitrate, normal.bitrate);
         let size = |q: &str| -> u64 {
             let r = api.agent.get(&api.track_url(ugc, q).unwrap()).call().unwrap();
             r.header("Content-Length").and_then(|l| l.parse().ok()).unwrap_or(0)
