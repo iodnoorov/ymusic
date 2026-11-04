@@ -65,6 +65,7 @@ pub struct Settings {
     pub hide_account: bool,
     /// The progress bar shows the time left instead of the track's length.
     pub remaining_time: bool,
+    pub show_audio_info: bool,
     /// The connected Last.fm account; its session key is a secret like the token.
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub lastfm: Option<LastfmSession>,
@@ -86,6 +87,7 @@ impl Default for Settings {
             output: Output::Auto,
             hide_account: false,
             remaining_time: false,
+            show_audio_info: false,
             lastfm: None,
         }
     }
@@ -293,6 +295,10 @@ mod tests {
                 "hide_account": true, "remaining_time": true, "lastfm": {"name": "me", "key": "sk"}}"#,
         )
         .unwrap();
+        assert!(!cfg.settings.show_audio_info);
+        let audio: Settings = serde_json::from_str(r#"{"show_audio_info":true}"#).unwrap();
+        assert!(audio.show_audio_info);
+        assert_eq!(serde_json::to_value(&audio).unwrap()["show_audio_info"], true);
         assert!(cfg.settings.podcast_all, "older configs default to the whole episode list");
         let single: Settings = serde_json::from_str(r#"{"podcast_all":false}"#).unwrap();
         assert!(!single.podcast_all);

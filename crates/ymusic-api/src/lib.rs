@@ -920,15 +920,20 @@ impl Api {
 
     /// Stream URL of a track in the given quality (`QUALITIES` id).
     pub fn track_url(&self, track_id: &str, quality: &str) -> Result<String> {
+        self.stream_info(track_id, quality).map(|info| info.url)
+    }
+
+    /// The selected stream, including its actual format after quality fallback.
+    pub fn stream_info(&self, track_id: &str, quality: &str) -> Result<FileInfo> {
         let low = quality == "lq";
         match self.file_info(track_id, quality) {
             // Uploaded tracks: here the server falls back to 192 kbit/s, the low quality (AAC 64)
             // is listed only by download-info.
-            Ok(info) if low && info.quality != "lq" => Ok(self.download_info(track_id, true).map_or(info.url, |i| i.url)),
-            Ok(info) => Ok(info.url),
+            Ok(info) if low && info.quality != "lq" => Ok(self.download_info(track_id, true).unwrap_or(info)),
+            Ok(info) => Ok(info),
             // A refused token is told as it is: the other method is refused too.
             Err(e) if ApiError::from_anyhow(&e).is_unauthorized() => Err(e),
-            Err(e) => self.download_info(track_id, low).map(|i| i.url).map_err(|e2| {
+            Err(e) => self.download_info(track_id, low).map_err(|e2| {
                 // Both messages, and the kind that tells whether to try again later.
                 let (first, second) = (ApiError::from_anyhow(&e), ApiError::from_anyhow(&e2));
                 let kind = if first.is_network() { first.kind } else { second.kind };
@@ -961,7 +966,12 @@ impl Api {
         let (host, path, ts, s) = (tag("host")?, tag("path")?, tag("ts")?, tag("s")?);
         let sign = Md5::digest(format!("{MD5_SALT}{}{s}", path.trim_start_matches('/')).as_bytes());
         let sign: String = sign.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(FileInfo { url: format!("https://{host}/get-mp3/{sign}/{ts}{path}"), quality: String::new(), bitrate: kbps(&best) })
+        Ok(FileInfo {
+            url: format!("https://{host}/get-mp3/{sign}/{ts}{path}"),
+            quality: String::new(),
+            bitrate: kbps(&best),
+            codec: best["codec"].as_str().unwrap_or_default().to_string(),
+        })
     }
 
     fn file_info(&self, track_id: &str, quality: &str) -> Result<FileInfo> {
@@ -984,16 +994,19 @@ impl Api {
             url: url.to_string(),
             quality: di["quality"].as_str().unwrap_or_default().to_string(),
             bitrate: di["bitrate"].as_u64().unwrap_or(0),
+            codec: di["codec"].as_str().unwrap_or_default().to_string(),
         })
     }
 }
 
-struct FileInfo {
-    url: String,
+#[derive(Clone, Debug, Default)]
+pub struct FileInfo {
+    pub url: String,
     /// The quality the server gave, which may differ from the one asked for.
-    quality: String,
-    #[cfg_attr(not(test), allow(dead_code))]
-    bitrate: u64,
+    pub quality: String,
+    /// Nominal bitrate in kbit/s, zero when the server does not provide it.
+    pub bitrate: u64,
+    pub codec: String,
 }
 
 pub fn category_name(ty: &str) -> &str {
@@ -1500,10 +1513,14 @@ mod tests {
         let lq = api.file_info("39089632", "lq").unwrap();
         let nq = api.file_info("39089632", "nq").unwrap();
         assert!(lq.bitrate > 0 && lq.bitrate < nq.bitrate, "{} {}", lq.bitrate, nq.bitrate);
-        assert!(api.track_url("39089632:60058", "lq").unwrap().starts_with("https://"));
+        let stream = api.stream_info("39089632:60058", "lq").unwrap();
+        assert!(stream.url.starts_with("https://"));
+        assert!(stream.bitrate > 0 && !stream.codec.is_empty());
         // Uploaded (UGC) tracks resolve too; their low quality comes from download-info.
         let ugc = "bfc384d6-bd20-47e0-89d7-7a8657a2236a";
-        assert!(api.track_url(ugc, "lq").unwrap().starts_with("https://"));
+        let stream = api.stream_info(ugc, "lq").unwrap();
+        assert!(stream.url.starts_with("https://"));
+        assert_eq!((stream.codec.as_str(), stream.bitrate), ("aac", 64));
         assert_eq!(api.file_info(ugc, "lq").unwrap().quality, "nq", "the server still falls back");
         let low = api.download_info(ugc, true).unwrap();
         assert!(low.bitrate > 0 && low.bitrate < 192, "{}", low.bitrate);

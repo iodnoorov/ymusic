@@ -1136,6 +1136,16 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
             }
             left.push(Span::styled(t.title.as_str(), Style::new().fg(Color::Reset).bold()));
             left.push(Span::styled(format!("  {}", t.artists), Style::new().fg(SUB)));
+            if let Some(info) = app.audio_info.as_ref().filter(|_| app.show_audio_info) {
+                let codec = info.codec.strip_suffix("-mp4").unwrap_or(&info.codec).to_uppercase();
+                let text = match (info.bitrate, codec.is_empty()) {
+                    (0, true) => String::new(),
+                    (0, false) => format!(" ({codec})"),
+                    (bitrate, true) => format!(" ({bitrate} кбит/с)"),
+                    (bitrate, false) => format!(" ({bitrate} кбит/с; {codec})"),
+                };
+                left.push(Span::styled(text, Style::new().fg(SUB)));
+            }
             if app.is_liked(t) {
                 left.push(Span::styled(format!("  {}", i.heart), Style::new().fg(HEART)));
             }
@@ -1455,6 +1465,7 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Output => "Вывод звука",
         Setting::HideAccount => "Скрыть аккаунт",
         Setting::RemainingTime => "Обратный отсчёт",
+        Setting::AudioInfo => "Показывать битрейт и кодек",
         Setting::Lastfm => "Last.fm",
         Setting::About => "О программе",
         Setting::Logout => "Выйти из аккаунта",
@@ -1477,6 +1488,7 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Output if cfg!(target_os = "macos") => "Системный вывод или PulseAudio, если он установлен".into(),
         Setting::Output => "Авто: PipeWire или PulseAudio, без них — прямо в ALSA".into(),
         Setting::HideAccount => "Без логина и значка Плюса в заголовке".into(),
+        Setting::AudioInfo => "Фактический формат потока рядом с исполнителем".into(),
         Setting::RemainingTime => "Справа от полосы — сколько осталось до конца трека".into(),
         Setting::Lastfm if !crate::api::lastfm::available() => "Ключ Last.fm не задан при сборке".into(),
         Setting::Lastfm => match app.lastfm {
@@ -1572,7 +1584,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .map(|&s| {
                     let name = setting_name(s);
                     let label = if s == Setting::Logout { Style::new().fg(ERROR) } else { Style::new() };
-                    let mut spans = vec![Span::styled(format!("{name:<20}"), label)];
+                    let mut spans = vec![Span::styled(format!("{name:<27}"), label)];
                     if let Some(v) = app.setting_value(s) {
                         spans.push(Span::styled("‹ ", Style::new().fg(MUTED)));
                         spans.push(Span::styled(v, Style::new().fg(ACCENT).bold()));
@@ -1647,6 +1659,34 @@ fn draw_modal(f: &mut Frame, app: &App) {
 mod tests {
     use crate::api::Track;
     use crate::app::{App, Tab};
+
+    #[test]
+    fn player_audio_info_toggle() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = App::for_test();
+        let track = Track::from_json(&serde_json::json!({"id": "1", "title": "Трек", "artists": [{"name": "Исполнитель"}]})).unwrap();
+        app.queue.replace(crate::queue::Source::None, vec![track]);
+        app.queue.select(0);
+        app.audio_info = Some(crate::api::FileInfo { codec: "aac-mp4".into(), bitrate: 256, ..Default::default() });
+        let mut term = Terminal::new(TestBackend::new(120, 3)).unwrap();
+        for (enabled, codec, bitrate, expected) in [
+            (false, "aac-mp4", 256, ""),
+            (true, "aac-mp4", 256, " (256 кбит/с; AAC)"),
+            (true, "flac-mp4", 0, " (FLAC)"),
+            (true, "", 0, ""),
+            (true, "he-aac-mp4", 64, " (64 кбит/с; HE-AAC)"),
+        ] {
+            app.show_audio_info = enabled;
+            let info = app.audio_info.as_mut().unwrap();
+            info.codec = codec.into();
+            info.bitrate = bitrate;
+            term.draw(|f| super::draw_player(f, &app, f.area())).unwrap();
+            let buf = term.backend().buffer();
+            let text: String = (0..120).map(|x| buf[(x, 1)].symbol()).collect();
+            assert!(text.contains(&format!("Трек  Исполнитель{expected}")), "{text}");
+            if expected.is_empty() { assert!(!text.contains("кбит/с") && !text.contains("AAC")); }
+        }
+    }
 
     #[test]
     fn spectrum_drawing() {

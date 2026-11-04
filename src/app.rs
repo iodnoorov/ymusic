@@ -34,7 +34,7 @@ pub enum Msg {
     Podcasts(PodcastMsg),
     /// A command from the desktop (media keys, player widgets).
     Remote(crate::media::Remote),
-    Url { generation: u64, result: Result<String, ApiError> },
+    Url { generation: u64, result: Result<crate::api::FileInfo, ApiError> },
     LikedIds(Vec<String>),
     Liked(Result<Vec<Track>, ApiError>),
     Stations(Vec<Station>),
@@ -57,7 +57,7 @@ pub enum Msg {
     WaveMore { wave: u64, result: Result<WaveBatch, ApiError> },
     LikeSet { id: String, req: u64, result: Result<(), ApiError> },
     Cover { url: String, result: Result<image::DynamicImage, ApiError> },
-    Preload { generation: u64, idx: usize, id: String, result: Result<String, ApiError> },
+    Preload { generation: u64, idx: usize, id: String, result: Result<crate::api::FileInfo, ApiError> },
     /// «Меньше ИИ-музыки» loaded from the account.
     LessAi(Result<bool, ApiError>),
     /// Result of switching «Меньше ИИ-музыки» to `on`.
@@ -208,6 +208,7 @@ pub enum Setting {
     Art,
     Icons,
     RemainingTime,
+    AudioInfo,
     HideAccount,
     Lastfm,
     About,
@@ -215,7 +216,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 16] = [
+    pub const ALL: [Setting; 17] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
@@ -228,6 +229,7 @@ impl Setting {
         Setting::Art,
         Setting::Icons,
         Setting::RemainingTime,
+        Setting::AudioInfo,
         Setting::HideAccount,
         Setting::Lastfm,
         Setting::About,
@@ -424,6 +426,7 @@ pub struct App {
     pub hide_account: bool,
     /// The progress bar shows the time left instead of the track's length.
     pub remaining_time: bool,
+    pub show_audio_info: bool,
     pub lastfm: Lastfm,
     scrobbles: ScrobbleQueue,
     lastfm_auth: u64,
@@ -460,6 +463,8 @@ pub struct App {
 
     /// Next track already resolved and appended to the player: (queue index, track id).
     preload: Option<(usize, String)>,
+    pub audio_info: Option<crate::api::FileInfo>,
+    preload_audio_info: Option<crate::api::FileInfo>,
     preload_pending: bool,
     /// The player is loading the current track: if it has not started playing by then, it is restarted.
     load_deadline: Option<Instant>,
@@ -534,6 +539,7 @@ impl App {
             output: Output::Auto,
             hide_account: false,
             remaining_time: false,
+            show_audio_info: false,
             lastfm: Lastfm::Off,
             scrobbles: ScrobbleQueue::default(),
             lastfm_auth: 0,
@@ -555,6 +561,8 @@ impl App {
             shown_cover: None,
             covers_loading: HashSet::new(),
             preload: None,
+            audio_info: None,
+            preload_audio_info: None,
             preload_pending: false,
             load_deadline: None,
             failures: 0,
@@ -997,6 +1005,8 @@ impl App {
     /// Updates state for a new current track. `preloaded`: the player already switched to it.
     fn begin_track(&mut self, mut idx: usize, preloaded: bool) -> bool {
         let Some(track) = self.queue.tracks().get(idx).cloned() else { return false };
+        self.audio_info = if preloaded { self.preload_audio_info.take() } else { None };
+        self.preload_audio_info = None;
         self.queue.select(idx);
         idx -= self.queue.trim_history(1000);
         self.queue_state.select(Some(idx));
@@ -1383,7 +1393,9 @@ impl App {
                     return;
                 }
                 match result {
-                    Ok(url) => {
+                    Ok(info) => {
+                        let url = info.url.clone();
+                        self.audio_info = Some(info);
                         let length = self.current().and_then(length);
                         let start = self.resume_at.take().unwrap_or(0.0);
                         let crossfade = self.current().is_some_and(Track::is_music);
@@ -1536,12 +1548,14 @@ impl App {
                     return;
                 }
                 self.preload_pending = false;
-                if let Ok(url) = result {
+                if let Ok(info) = result {
                     if self.following(End::Eof) == Some(idx) && self.queue.tracks()[idx].id == id {
                         let track = &self.queue.tracks()[idx];
                         let length = length(track);
                         let start = podcasts::resume_position(track);
                         let crossfade = track.is_music();
+                        let url = info.url.clone();
+                        self.preload_audio_info = Some(info);
                         self.play(PlayerCmd::Append(TrackFile { url, length, start, crossfade }));
                         self.preload = Some((idx, id));
                     } else {
@@ -1924,6 +1938,7 @@ impl App {
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::Output => self.output.name().to_string(),
             Setting::HideAccount => if self.hide_account { "вкл" } else { "выкл" }.to_string(),
+            Setting::AudioInfo => if self.show_audio_info { "вкл" } else { "выкл" }.to_string(),
             Setting::RemainingTime => if self.remaining_time { "вкл" } else { "выкл" }.to_string(),
             Setting::Lastfm if !lastfm::available() => "нет ключа".to_string(),
             Setting::Lastfm => match &self.lastfm {
@@ -1985,6 +2000,7 @@ impl App {
             }
             Setting::HideAccount => self.hide_account = !self.hide_account,
             Setting::RemainingTime => self.remaining_time = !self.remaining_time,
+            Setting::AudioInfo => self.show_audio_info = !self.show_audio_info,
             Setting::Lastfm if !lastfm::available() => self.set_status("В этой сборке нет ключа Last.fm"),
             Setting::Lastfm => match self.lastfm {
                 Lastfm::Off => self.connect_lastfm(),
@@ -2627,6 +2643,13 @@ mod tests {
         assert!(app.remaining_time);
         app.on_key(key(KeyCode::Left));
         assert!(!app.remaining_time);
+        // «Показывать битрейт и кодек» applies immediately in both directions.
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.show_audio_info);
+        assert_eq!(app.setting_value(Setting::AudioInfo).as_deref(), Some("вкл"));
+        app.on_key(key(KeyCode::Left));
+        assert!(!app.show_audio_info);
         // «Скрыть аккаунт».
         app.on_key(key(KeyCode::Char('j')));
         // «Last.fm»: without the program's key nothing is asked for (see `lastfm_scrobbles`).
@@ -2749,7 +2772,7 @@ mod tests {
         });
         app.begin_track(0, false);
         app.loading_track = false;
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
         app.take_player();
 
         // The playing track stays and comes first; the new list starts from the chosen track,
@@ -2760,7 +2783,7 @@ mod tests {
         assert_eq!((app.queue.pos(), app.source_name()), (Some(0), "Новый".to_string()));
         assert!(app.wave.is_none() && app.preload.is_none());
         assert_eq!(app.take_player(), ["clear"]);
-        app.on_msg(Msg::Preload { generation, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Preload { generation, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
         assert!(app.take_player().is_empty(), "late preload of the old list is dropped");
         assert!(app.queue.on_carried() && app.carried_wave.is_some(), "its end is reported to the old wave");
 
@@ -2793,6 +2816,28 @@ mod tests {
         app.next(End::Eof);
         app.play_list("Снова", PlayContext::default(), vec![t("u"), t("v")], 0);
         assert_eq!((ids(&app), app.queue.pos()), (vec!["u".to_string(), "v".to_string()], Some(0)));
+    }
+
+    #[test]
+    fn audio_info_follows_current_stream() {
+        use super::*;
+        let mut app = App::for_test();
+        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000})).unwrap();
+        let info = |codec: &str, bitrate| crate::api::FileInfo {
+            url: "http://x/audio".into(), codec: codec.into(), bitrate, ..Default::default()
+        };
+        app.play_list("test", PlayContext::new("playlist", "1:3"), vec![t("a"), t("b"), t("c")], 0);
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(info("aac-mp4", 256)) });
+        app.on_msg(Msg::Url { generation: app.generation - 1, result: Ok(info("mp3", 192)) });
+        assert_eq!(app.audio_info.as_ref().unwrap().codec, "aac-mp4");
+        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok(info("flac-mp4", 900)) });
+        assert_eq!(app.audio_info.as_ref().unwrap().bitrate, 256);
+        assert!(app.advance_preloaded(End::Eof, true));
+        assert_eq!(app.audio_info.as_ref().unwrap().codec, "flac-mp4");
+        app.play_index(2);
+        assert!(app.audio_info.is_none());
+        app.on_msg(Msg::Preload { generation: app.generation - 1, idx: 1, id: "b".into(), result: Ok(info("mp3", 192)) });
+        assert!(app.audio_info.is_none() && app.preload_audio_info.is_none());
     }
 
     /// Preload state machine.
@@ -2854,7 +2899,7 @@ mod tests {
         let mut app = App::for_test();
         let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
         app.play_list("test", PlayContext::default(), vec![t("1"), t("2")], 0);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/1".into()) });
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/1".into(), ..Default::default() }) });
         assert_eq!(app.take_player(), ["stop", "load http://x/1"]);
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(40.0)));
@@ -2871,7 +2916,7 @@ mod tests {
         app.tick();
         assert!(matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1"));
         assert_eq!(app.take_player(), ["stop"]);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/1b".into()) });
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/1b".into(), ..Default::default() }) });
         // With the length from the catalogue, for a file that does not tell its own.
         let [Effect::Player(PlayerCmd::Load(file))] = &app.effects[..] else { panic!("no load") };
         assert_eq!((file.start, file.length), (40.0, Some(200.0)));
@@ -2891,7 +2936,7 @@ mod tests {
         let mut app = App::for_test();
         let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
         app.play_list("test", PlayContext::default(), vec![t("1"), t("2"), t("3")], 0);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/1".into()) });
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/1".into(), ..Default::default() }) });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(199.5)));
@@ -2903,7 +2948,7 @@ mod tests {
         app.on_msg(Msg::Player(PlayerEvent::Error { message: "обрыв".into(), network: true }));
         assert_eq!((app.queue.pos(), app.failures, app.retry_at.is_none()), (Some(1), 0, true));
         app.on_msg(Msg::Player(PlayerEvent::Cleared));
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/2".into()) });
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/2".into(), ..Default::default() }) });
         assert_eq!(app.take_player(), ["load http://x/2"]);
         app.on_msg(Msg::Player(PlayerEvent::Cleared));
         // Now the player speaks of «2».
@@ -2972,11 +3017,11 @@ mod tests {
         app.take_player();
 
         // Stale response (older generation) is ignored.
-        app.on_msg(Msg::Preload { generation: app.generation - 1, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Preload { generation: app.generation - 1, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
         assert!(app.preload.is_none());
         assert!(app.take_player().is_empty());
         // Fresh response is appended.
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
         assert_eq!(app.preload, Some((1, "b".to_string())));
         assert_eq!(app.take_player(), ["append http://x/b"]);
 
@@ -2990,7 +3035,7 @@ mod tests {
 
         // Manual skip uses the preloaded entry too.
         app.loading_track = false;
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 2, id: "c".into(), result: Ok("http://x/c".into()) });
+        app.on_msg(Msg::Preload { generation: app.generation, idx: 2, id: "c".into(), result: Ok(crate::api::FileInfo { url: "http://x/c".into(), ..Default::default() }) });
         app.next(End::Skip);
         assert_eq!(app.queue.pos(), Some(2));
         assert_eq!(app.take_player(), ["append http://x/c", "next"]);
@@ -3079,14 +3124,14 @@ mod tests {
         assert_eq!(app.following(End::Eof), Some(0));
         assert_eq!(app.following(End::Skip), Some(1));
         assert_eq!(app.take_player(), ["clear"]);
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 0, id: "a".into(), result: Ok("http://x/a".into()) });
+        app.on_msg(Msg::Preload { generation: app.generation, idx: 0, id: "a".into(), result: Ok(crate::api::FileInfo { url: "http://x/a".into(), ..Default::default() }) });
         assert_eq!(app.preload, Some((0, "a".to_string())));
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.queue.pos(), Some(0));
         assert!(app.play.is_some(), "a new playback is reported");
         // Switching the mode drops the preloaded repeat.
         app.loading_track = false;
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 0, id: "a".into(), result: Ok("http://x/a".into()) });
+        app.on_msg(Msg::Preload { generation: app.generation, idx: 0, id: "a".into(), result: Ok(crate::api::FileInfo { url: "http://x/a".into(), ..Default::default() }) });
         app.take_player();
         app.set_repeat(Repeat::Off);
         assert!(app.preload.is_none());
@@ -3124,7 +3169,7 @@ mod tests {
         app.queue.replace(Source::List("test".into()), vec![t("a"), t("b")]);
         app.begin_track(0, false);
         let past = || Some(Instant::now() - Duration::from_secs(1));
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/a".into()) });
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/a".into(), ..Default::default() }) });
         assert_eq!(app.take_player(), ["load http://x/a"]);
 
         // Still loading while paused: the timer restarts instead of firing.
@@ -3143,7 +3188,7 @@ mod tests {
             app.retry_at = app.retry_at.map(|(_, from)| (Instant::now(), from));
             app.tick();
             assert_eq!((app.queue.pos(), app.generation, app.failures), (Some(0), generation + 1, n));
-            app.on_msg(Msg::Url { generation: app.generation, result: Ok(format!("http://x/a{n}")) });
+            app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: format!("http://x/a{n}"), ..Default::default() }) });
         }
 
         // The third one: the next track.
@@ -3154,7 +3199,7 @@ mod tests {
         assert!(app.failures == 0 && app.retry_at.is_none() && app.load_deadline.is_none());
 
         // Once playback starts, the watchdog is off.
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok("http://x/b".into()) });
+        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));

@@ -99,7 +99,7 @@ sudo dnf install ./ymusic-cli-*.x86_64.rpm   # на ARM64 — *.aarch64.rpm
 Установка в Linux:
 
 ```bash
-V=3.9.0
+V=3.10.0
 A=$(uname -m)   # x86_64 или aarch64
 curl -fLO "https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz"
 curl -fLO "https://github.com/iodnoorov/ymusic/releases/download/v$V/ymusic-$V-$A-linux.tar.gz.sha256"
@@ -123,10 +123,10 @@ xattr -d com.apple.quarantine ./ymusic
 Нужны Rust **1.89 или новее** и компилятор C++. В macOS предварительно установите Command Line Tools:
 `xcode-select --install`.
 
-Установка версии 3.9.0 через Cargo:
+Установка версии 3.10.0 через Cargo:
 
 ```bash
-cargo install --locked --git https://github.com/iodnoorov/ymusic --tag v3.9.0 ymusic-cli
+cargo install --locked --git https://github.com/iodnoorov/ymusic --tag v3.10.0 ymusic-cli
 ```
 
 Чтобы собрать текущую версию из репозитория:

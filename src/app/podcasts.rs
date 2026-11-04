@@ -616,7 +616,7 @@ mod tests {
         assert!(app.tab == Tab::Podcasts);
         let generation = app.generation;
         app.take_player();
-        app.on_msg(Msg::Url { generation, result: Ok("audio".into()) });
+        app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
         assert!(app.take_player().iter().any(|c| c == "load audio from 240.5"));
         app.on_msg(Msg::Player(PlayerEvent::Duration(600.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(241.0)));
@@ -760,7 +760,7 @@ mod tests {
             app.play_list("Music", PlayContext::default(), vec![music("a"), music("b")], 0);
             let generation = app.generation;
             app.take_player();
-            app.on_msg(Msg::Url { generation, result: Ok("audio".into()) });
+            app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
             app.take_player();
             app.take_tasks();
             app.errors_in_row = 3;
@@ -777,7 +777,7 @@ mod tests {
         app.play_list("Podcast", PlayContext::default(), vec![episode("e", 240.0)], 0);
         let generation = app.generation;
         app.take_player();
-        app.on_msg(Msg::Url { generation, result: Ok("audio".into()) });
+        app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(600.0)));
         app.on_msg(Msg::Player(PlayerEvent::Buffering(false)));
@@ -869,7 +869,7 @@ mod tests {
         app.play_list("Music", PlayContext::default(), vec![music], 0);
         let generation = app.generation;
         app.take_player();
-        app.on_msg(Msg::Url { generation, result: Ok("audio".into()) });
+        app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(600.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(1.0)));

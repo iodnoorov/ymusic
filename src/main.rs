@@ -119,6 +119,7 @@ fn main() -> Result<()> {
     app.output = output;
     app.hide_account = s.hide_account;
     app.remaining_time = s.remaining_time;
+    app.show_audio_info = s.show_audio_info;
     if let Some(session) = &s.lastfm {
         app.lastfm = app::Lastfm::On(session.clone());
     }
@@ -398,6 +399,7 @@ fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config
         output: own(app.output, run.output, saved.output),
         hide_account: app.hide_account,
         remaining_time: app.remaining_time,
+        show_audio_info: app.show_audio_info,
         lastfm: app.lastfm_session().cloned(),
     }
 }

@@ -112,10 +112,10 @@ impl Task {
                 Msg::WaveMore { wave, result: api.wave_more(&station, session.as_deref(), &recent).map_err(text) }
             }
             Task::TrackUrl { generation, full_id, quality } => {
-                Msg::Url { generation, result: api.track_url(&full_id, quality).map_err(text) }
+                Msg::Url { generation, result: api.stream_info(&full_id, quality).map_err(text) }
             }
             Task::Preload { generation, idx, track, quality } => {
-                let result = api.track_url(&track.full_id(), quality).map_err(text);
+                let result = api.stream_info(&track.full_id(), quality).map_err(text);
                 Msg::Preload { generation, idx, id: track.id, result }
             }
             Task::Cover(url) => {
