@@ -3,11 +3,11 @@
 //! the connection and sleeps in `poll` until the server asks for data, the ring gets some it was
 //! waiting for, or a command comes; the `pulseaudio` crate only encodes and decodes the messages.
 
-use crate::Lock;
-use anyhow::{anyhow, Context, Result};
-use pulseaudio::protocol::{self, Command, TagStructRead, TagStructReader};
-use super::ring::{Ring, Wake};
 use super::Options;
+use super::ring::{Ring, Wake};
+use crate::Lock;
+use anyhow::{Context, Result, anyhow};
+use pulseaudio::protocol::{self, Command, TagStructRead, TagStructReader};
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
 use std::os::fd::AsRawFd;
@@ -66,30 +66,49 @@ impl Conn {
             if self.rbuf.len() < protocol::DESCRIPTOR_SIZE {
                 return Ok(None);
             }
-            let desc = protocol::read_descriptor(&mut Cursor::new(&self.rbuf[..protocol::DESCRIPTOR_SIZE]))?;
-            if desc.length as usize > MAX_MESSAGE { return Err(anyhow!("слишком большое сообщение звукового сервера")); }
+            let desc = protocol::read_descriptor(&mut Cursor::new(
+                &self.rbuf[..protocol::DESCRIPTOR_SIZE],
+            ))?;
+            if desc.length as usize > MAX_MESSAGE {
+                return Err(anyhow!("слишком большое сообщение звукового сервера"));
+            }
             let len = protocol::DESCRIPTOR_SIZE + desc.length as usize;
             if self.rbuf.len() < len {
                 return Ok(None);
             }
-            let body: Vec<u8> = self.rbuf.drain(..len).skip(protocol::DESCRIPTOR_SIZE).collect();
+            let body: Vec<u8> = self
+                .rbuf
+                .drain(..len)
+                .skip(protocol::DESCRIPTOR_SIZE)
+                .collect();
             // Only control messages come to a client that does not record.
             if desc.channel != u32::MAX {
                 continue;
             }
             let mut payload = Cursor::new(body);
             // A notification the crate does not know is of no interest here.
-            let Ok((seq, command)) = Command::read_tag_prefixed(&mut payload, self.version) else { continue };
+            let Ok((seq, command)) = Command::read_tag_prefixed(&mut payload, self.version) else {
+                continue;
+            };
             if let Command::Request(r) = &command {
                 self.requested += r.length as usize;
             }
-            return Ok(Some(Message { seq, command, payload }));
+            return Ok(Some(Message {
+                seq,
+                command,
+                payload,
+            }));
         }
     }
 
     /// Sends a command and waits for its reply (while connecting, before the socket is
     /// non-blocking).
-    fn call<T: TagStructRead>(&mut self, seq: u32, command: &Command, deadline: Instant) -> Result<T> {
+    fn call<T: TagStructRead>(
+        &mut self,
+        seq: u32,
+        command: &Command,
+        deadline: Instant,
+    ) -> Result<T> {
         let mut bytes = Vec::new();
         protocol::write_command_message(&mut bytes, seq, command, self.version)?;
         let mut remaining = bytes.as_slice();
@@ -104,8 +123,15 @@ impl Conn {
             while let Some(mut m) = self.message()? {
                 time_left(deadline)?;
                 match m.command {
-                    Command::Reply if m.seq == seq => return Ok(T::read(&mut TagStructReader::new(&mut m.payload, self.version), self.version)?),
-                    Command::Error(e) if m.seq == seq => return Err(anyhow!("звуковой сервер ответил ошибкой: {e:?}")),
+                    Command::Reply if m.seq == seq => {
+                        return Ok(T::read(
+                            &mut TagStructReader::new(&mut m.payload, self.version),
+                            self.version,
+                        )?);
+                    }
+                    Command::Error(e) if m.seq == seq => {
+                        return Err(anyhow!("звуковой сервер ответил ошибкой: {e:?}"));
+                    }
                     _ => {}
                 }
             }
@@ -119,12 +145,21 @@ impl Conn {
 
 fn time_left(deadline: Instant) -> io::Result<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() { Err(io::Error::new(io::ErrorKind::TimedOut, "звуковой сервер не ответил вовремя")) }
-    else { Ok(left) }
+    if left.is_zero() {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "звуковой сервер не ответил вовремя",
+        ))
+    } else {
+        Ok(left)
+    }
 }
 
 /// A command for the output thread and where its reply goes (the latency for a timing query).
-type Request = (Command, Sender<Result<Option<protocol::PlaybackLatency>, String>>);
+type Request = (
+    Command,
+    Sender<Result<Option<protocol::PlaybackLatency>, String>>,
+);
 
 /// Output to a PulseAudio (or PipeWire) server.
 pub struct Pulse {
@@ -149,23 +184,41 @@ impl Pulse {
     fn open(ring: Arc<Ring>) -> Result<Pulse> {
         let none = || anyhow!("нет звукового сервера (PipeWire или PulseAudio)");
         let path = pulseaudio::socket_path_from_env().ok_or_else(none)?;
-        let sock = UnixStream::connect(&path).with_context(|| format!("нет связи со звуковым сервером ({})", path.display()))?;
-        let mut conn = Conn { sock, rbuf: Vec::new(), version: protocol::MAX_VERSION, requested: 0 };
+        let sock = UnixStream::connect(&path)
+            .with_context(|| format!("нет связи со звуковым сервером ({})", path.display()))?;
+        let mut conn = Conn {
+            sock,
+            rbuf: Vec::new(),
+            version: protocol::MAX_VERSION,
+            requested: 0,
+        };
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        let cookie = pulseaudio::cookie_path_from_env().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
-        let auth = protocol::AuthParams { version: protocol::MAX_VERSION, supports_shm: false, supports_memfd: false, cookie };
+        let cookie = pulseaudio::cookie_path_from_env()
+            .and_then(|p| std::fs::read(p).ok())
+            .unwrap_or_default();
+        let auth = protocol::AuthParams {
+            version: protocol::MAX_VERSION,
+            supports_shm: false,
+            supports_memfd: false,
+            cookie,
+        };
         let reply: protocol::AuthReply = conn.call(0, &Command::Auth(auth), deadline)?;
         conn.version = conn.version.min(reply.version);
         let mut props = protocol::Props::new();
         props.set(protocol::Prop::ApplicationName, c"ymusic");
-        let _: protocol::SetClientNameReply = conn.call(1, &Command::SetClientName(props), deadline)?;
+        let _: protocol::SetClientNameReply =
+            conn.call(1, &Command::SetClientName(props), deadline)?;
 
         let buffer = RATE * SERVER_BUFFER_MS / 1000 * FRAME as u32;
         let mut props = protocol::Props::new();
         props.set(protocol::Prop::MediaName, c"ymusic");
         props.set(protocol::Prop::MediaRole, c"music");
         let params = protocol::PlaybackStreamParams {
-            sample_spec: protocol::SampleSpec { format: protocol::SampleFormat::Float32Le, channels: 2, sample_rate: RATE },
+            sample_spec: protocol::SampleSpec {
+                format: protocol::SampleFormat::Float32Le,
+                channels: 2,
+                sample_rate: RATE,
+            },
             channel_map: protocol::ChannelMap::stereo(),
             cvolume: Some(protocol::ChannelVolume::norm(2)),
             // PULSE_SINK picks the device, as for any PulseAudio client.
@@ -182,12 +235,16 @@ impl Pulse {
                 minimum_request_length: buffer / 4,
                 fragment_size: u32::MAX,
             },
-            flags: protocol::stream::StreamFlags { adjust_latency: true, ..Default::default() },
+            flags: protocol::stream::StreamFlags {
+                adjust_latency: true,
+                ..Default::default()
+            },
             props,
             ..Default::default()
         };
-        let stream: protocol::CreatePlaybackStreamReply =
-            conn.call(2, &Command::CreatePlaybackStream(params), deadline).context("звуковой сервер не открыл поток")?;
+        let stream: protocol::CreatePlaybackStreamReply = conn
+            .call(2, &Command::CreatePlaybackStream(params), deadline)
+            .context("звуковой сервер не открыл поток")?;
         conn.requested += stream.requested_bytes as usize;
         conn.sock.set_read_timeout(None)?;
         conn.sock.set_write_timeout(None)?;
@@ -200,33 +257,59 @@ impl Pulse {
         let thread = std::thread::Builder::new()
             .name("player-output".into())
             .spawn(move || serve(conn, stream.channel, &r, &rx, &w))?;
-        Ok(Pulse { channel: stream.channel, requests: Some(tx), wake, thread: Some(thread), ring, clock: Mutex::default() })
+        Ok(Pulse {
+            channel: stream.channel,
+            requests: Some(tx),
+            wake,
+            thread: Some(thread),
+            ring,
+            clock: Mutex::default(),
+        })
     }
 
     fn call(&self, command: Command) -> Result<Option<protocol::PlaybackLatency>> {
         let lost = || anyhow!("нет связи со звуковым сервером");
         let (tx, rx) = mpsc::channel();
-        self.requests.as_ref().ok_or_else(lost)?.send((command, tx)).map_err(|_| lost())?;
+        self.requests
+            .as_ref()
+            .ok_or_else(lost)?
+            .send((command, tx))
+            .map_err(|_| lost())?;
         self.wake.signal();
-        rx.recv_timeout(Duration::from_secs(3)).map_err(|_| lost())?.map_err(|e| anyhow!("звуковой сервер: {e}"))
+        rx.recv_timeout(Duration::from_secs(3))
+            .map_err(|_| lost())?
+            .map_err(|e| anyhow!("звуковой сервер: {e}"))
     }
 
     /// Frames handed to the server that are not heard yet, as the server tells.
     fn server_delay(&self) -> Result<u64> {
         let t = self
-            .call(Command::GetPlaybackLatency(protocol::LatencyParams { channel: self.channel, now: SystemTime::now() }))?
+            .call(Command::GetPlaybackLatency(protocol::LatencyParams {
+                channel: self.channel,
+                now: SystemTime::now(),
+            }))?
             .ok_or_else(|| anyhow!("звуковой сервер не сообщил задержку"))?;
         let buffered = (t.write_offset - t.read_offset).max(0) as u64 / FRAME as u64;
-        let latency = if buffered > 0 { t.sink_usec * u64::from(RATE) / 1_000_000 } else { 0 };
+        let latency = if buffered > 0 {
+            t.sink_usec * u64::from(RATE) / 1_000_000
+        } else {
+            0
+        };
         Ok(buffered + latency)
     }
 }
 
 impl Sink for Pulse {
     fn set_paused(&self, paused: bool) -> Result<()> {
-        self.call(Command::CorkPlaybackStream(protocol::CorkStreamParams { channel: self.channel, cork: paused }))?;
+        self.call(Command::CorkPlaybackStream(protocol::CorkStreamParams {
+            channel: self.channel,
+            cork: paused,
+        }))?;
         let mut clock = self.clock.locked();
-        *clock = Clock { heard: None, paused };
+        *clock = Clock {
+            heard: None,
+            paused,
+        };
         Ok(())
     }
 
@@ -243,7 +326,11 @@ impl Sink for Pulse {
         let mut clock = self.clock.locked();
         let heard = match clock.heard {
             Some((heard, at)) if at.elapsed() < DELAY_REFRESH => {
-                let gone = if clock.paused { 0 } else { (at.elapsed().as_secs_f64() * f64::from(RATE)) as u64 };
+                let gone = if clock.paused {
+                    0
+                } else {
+                    (at.elapsed().as_secs_f64() * f64::from(RATE)) as u64
+                };
                 (heard + gone).min(handed)
             }
             _ => {
@@ -287,11 +374,15 @@ impl Output {
         let pulse = |ring| Pulse::open(ring).map(|p| Output(Box::new(p)));
         #[cfg(target_os = "linux")]
         {
-            let alsa = |ring| super::alsa::Alsa::open(ring, options.alsa_device.as_deref()).map(|a| Output(Box::new(a)));
+            let alsa = |ring| {
+                super::alsa::Alsa::open(ring, options.alsa_device.as_deref())
+                    .map(|a| Output(Box::new(a)))
+            };
             match options.output.as_deref() {
                 Some("alsa") => alsa(ring),
                 Some("pulse") => pulse(ring),
-                _ => pulse(ring.clone()).or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
+                _ => pulse(ring.clone())
+                    .or_else(|e| alsa(ring).map_err(|e2| anyhow!("{e:#}; {e2:#}"))),
             }
         }
         #[cfg(target_os = "macos")]
@@ -320,7 +411,8 @@ impl Output {
 fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>, wake: &Wake) {
     let mut out: Vec<u8> = Vec::new();
     let mut chunk = Vec::new();
-    let mut pending: HashMap<u32, Sender<Result<Option<protocol::PlaybackLatency>, String>>> = HashMap::new();
+    let mut pending: HashMap<u32, Sender<Result<Option<protocol::PlaybackLatency>, String>>> =
+        HashMap::new();
     let mut seq = 100u32;
     let result = (|| -> Result<()> {
         loop {
@@ -355,8 +447,16 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
 
             let sock_events = libc::POLLIN | if out.is_empty() { 0 } else { libc::POLLOUT };
             let mut fds = [
-                libc::pollfd { fd: conn.sock.as_raw_fd(), events: sock_events, revents: 0 },
-                libc::pollfd { fd: wake.fd(), events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd: conn.sock.as_raw_fd(),
+                    events: sock_events,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake.fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             // SAFETY: two valid pollfd entries of a live array.
             if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
@@ -378,7 +478,11 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
                         Command::Reply => {
                             if let Some(reply) = pending.remove(&m.seq) {
                                 // Only the timing query has a reply worth reading.
-                                let latency = protocol::PlaybackLatency::read(&mut TagStructReader::new(&mut m.payload, conn.version), conn.version).ok();
+                                let latency = protocol::PlaybackLatency::read(
+                                    &mut TagStructReader::new(&mut m.payload, conn.version),
+                                    conn.version,
+                                )
+                                .ok();
                                 let _ = reply.send(Ok(latency));
                             }
                         }
@@ -404,7 +508,12 @@ fn serve(mut conn: Conn, channel: u32, ring: &Ring, requests: &Receiver<Request>
 mod tests {
     use super::*;
     fn conn(sock: UnixStream) -> Conn {
-        Conn { sock, rbuf: vec![], version: protocol::MAX_VERSION, requested: 0 }
+        Conn {
+            sock,
+            rbuf: vec![],
+            version: protocol::MAX_VERSION,
+            requested: 0,
+        }
     }
     #[test]
     fn silent_server_and_unrelated_messages_have_a_total_deadline() {
@@ -413,10 +522,17 @@ mod tests {
             let mut c = conn(client);
             let start = Instant::now();
             let peer = std::thread::spawn(move || {
-                server.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
+                server
+                    .set_write_timeout(Some(Duration::from_millis(200)))
+                    .unwrap();
                 if noisy {
-                    while protocol::write_command_message(&mut server, 999, &Command::Reply, protocol::MAX_VERSION)
-                        .is_ok()
+                    while protocol::write_command_message(
+                        &mut server,
+                        999,
+                        &Command::Reply,
+                        protocol::MAX_VERSION,
+                    )
+                    .is_ok()
                     {}
                 } else {
                     std::thread::sleep(Duration::from_millis(300));
@@ -425,7 +541,10 @@ mod tests {
             assert!(
                 c.call::<protocol::AuthReply>(
                     1,
-                    &Command::GetPlaybackLatency(protocol::LatencyParams { channel: 0, now: SystemTime::now() }),
+                    &Command::GetPlaybackLatency(protocol::LatencyParams {
+                        channel: 0,
+                        now: SystemTime::now()
+                    }),
                     start + Duration::from_millis(100)
                 )
                 .is_err()

@@ -1,9 +1,9 @@
 //! The play queue: its tracks and position, where they come from, the repeat mode and random
 //! order. Only the order of things — nothing here talks to the player, the network or the screen.
 
-use ymusic_api::{random_below, StreamProgress, Track};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use ymusic_api::{StreamProgress, Track, random_below};
 
 /// Where the queue comes from.
 #[derive(PartialEq, Eq, Debug, Default)]
@@ -65,8 +65,14 @@ impl Queue {
 
     /// Keep resume state coherent when restoring the list's original order.
     pub fn set_stream_progress(&mut self, id: &str, progress: StreamProgress) {
-        for track in self.tracks.iter_mut().chain(self.unshuffled.iter_mut().flatten()) {
-            if track.id == id { track.progress = Some(progress.clone()); }
+        for track in self
+            .tracks
+            .iter_mut()
+            .chain(self.unshuffled.iter_mut().flatten())
+        {
+            if track.id == id {
+                track.progress = Some(progress.clone());
+            }
         }
     }
 
@@ -126,7 +132,12 @@ impl Queue {
 
     /// A new queue: nothing plays from it yet.
     pub fn replace(&mut self, source: Source, tracks: Vec<Track>) {
-        *self = Queue { tracks, source, repeat: self.repeat, ..Queue::default() };
+        *self = Queue {
+            tracks,
+            source,
+            repeat: self.repeat,
+            ..Queue::default()
+        };
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -145,7 +156,9 @@ impl Queue {
     pub fn after_current(&mut self, source: Source, tracks: Vec<Track>) -> Option<AfterCurrent> {
         let cur = self.current()?.clone();
         let was_carried = self.on_carried();
-        self.tracks = std::iter::once(cur.clone()).chain(tracks.into_iter().filter(|t| t.id != cur.id)).collect();
+        self.tracks = std::iter::once(cur.clone())
+            .chain(tracks.into_iter().filter(|t| t.id != cur.id))
+            .collect();
         self.pos = Some(0);
         self.source = source;
         self.unshuffled = None;
@@ -192,7 +205,10 @@ impl Queue {
     /// order they are shuffled in, and the list's own order gets them too.
     pub fn append(&mut self, tracks: Vec<Track>) {
         let mut known: HashSet<String> = self.tracks.iter().map(|t| t.id.clone()).collect();
-        let mut new: Vec<Track> = tracks.into_iter().filter(|t| known.insert(t.id.clone())).collect();
+        let mut new: Vec<Track> = tracks
+            .into_iter()
+            .filter(|t| known.insert(t.id.clone()))
+            .collect();
         if let Some(own) = &mut self.unshuffled {
             own.extend(new.iter().cloned());
             shuffle(&mut new);
@@ -202,7 +218,9 @@ impl Queue {
 
     /// Bound a wave's old history; keeps `keep` predecessors for Previous. Lists are untouched.
     pub fn trim_history(&mut self, keep: usize) -> usize {
-        if !self.is_wave() { return 0; }
+        if !self.is_wave() {
+            return 0;
+        }
         let removed = self.pos.unwrap_or(0).saturating_sub(keep);
         if removed > 0 {
             self.tracks.drain(..removed);
@@ -219,7 +237,9 @@ impl Queue {
         if on == self.shuffled() {
             return false;
         }
-        let Some(pos) = self.pos.filter(|_| self.is_list()) else { return false };
+        let Some(pos) = self.pos.filter(|_| self.is_list()) else {
+            return false;
+        };
         let cur = self.tracks[pos].clone();
         if on {
             // A track carried over from another list stays first; any other moves there now.
@@ -230,7 +250,11 @@ impl Queue {
             self.tracks = shuffled_from(std::mem::take(&mut self.tracks), pos);
             self.pos = Some(0);
         } else if let Some(own) = self.unshuffled.take() {
-            match own.iter().position(|t| t.id == cur.id).filter(|_| !self.is_carried(pos)) {
+            match own
+                .iter()
+                .position(|t| t.id == cur.id)
+                .filter(|_| !self.is_carried(pos))
+            {
                 Some(i) => {
                     self.tracks = own;
                     self.pos = Some(i);
@@ -238,7 +262,9 @@ impl Queue {
                 // Carried over from another list: it stays first, the list follows in its order.
                 None => {
                     let id = cur.id.clone();
-                    self.tracks = std::iter::once(cur).chain(own.into_iter().filter(|t| t.id != id)).collect();
+                    self.tracks = std::iter::once(cur)
+                        .chain(own.into_iter().filter(|t| t.id != id))
+                        .collect();
                     self.pos = Some(0);
                 }
             }
@@ -294,7 +320,10 @@ mod tests {
 
     fn list(ids: &[&str]) -> Queue {
         let mut q = Queue::default();
-        q.replace(Source::List("list".into()), ids.iter().map(|id| track(id)).collect());
+        q.replace(
+            Source::List("list".into()),
+            ids.iter().map(|id| track(id)).collect(),
+        );
         q
     }
 
@@ -306,9 +335,17 @@ mod tests {
     fn following_and_repeat() {
         let mut q = list(&["a", "b", "c"]);
         q.tracks[1].available = false;
-        assert_eq!(q.following(true, false), Some(0), "nothing plays: the first one");
+        assert_eq!(
+            q.following(true, false),
+            Some(0),
+            "nothing plays: the first one"
+        );
         q.select(0);
-        assert_eq!(q.following(true, false), Some(2), "unavailable ones are skipped");
+        assert_eq!(
+            q.following(true, false),
+            Some(2),
+            "unavailable ones are skipped"
+        );
         assert_eq!(q.previous(), None);
         q.select(2);
         assert_eq!(q.previous(), Some(0));
@@ -330,14 +367,31 @@ mod tests {
     #[test]
     fn carried_track() {
         let mut q = list(&["a", "b"]);
-        assert!(q.after_current(Source::List("new".into()), vec![track("x")]).is_none(), "nothing plays");
+        assert!(
+            q.after_current(Source::List("new".into()), vec![track("x")])
+                .is_none(),
+            "nothing plays"
+        );
         q.select(1);
-        let after = q.after_current(Source::List("new".into()), vec![track("b"), track("x"), track("y")]).unwrap();
+        let after = q
+            .after_current(
+                Source::List("new".into()),
+                vec![track("b"), track("x"), track("y")],
+            )
+            .unwrap();
         assert!(!after.was_carried);
-        assert_eq!(ids(&q), ["b", "x", "y"], "the playing track first, not twice");
+        assert_eq!(
+            ids(&q),
+            ["b", "x", "y"],
+            "the playing track first, not twice"
+        );
         assert!(q.on_carried());
         // Switched again before it ended: still carried from its first list.
-        assert!(q.after_current(Source::List("third".into()), vec![track("z")]).unwrap().was_carried);
+        assert!(
+            q.after_current(Source::List("third".into()), vec![track("z")])
+                .unwrap()
+                .was_carried
+        );
         // Repeat starts the list over without the carried track.
         q.set_repeat(Repeat::All);
         q.select(1);
@@ -362,7 +416,11 @@ mod tests {
         q.select(3);
         let playing = q.current().unwrap().id.clone();
         assert!(q.set_shuffled(false));
-        assert_eq!(q.current().unwrap().id, playing, "the current track goes on");
+        assert_eq!(
+            q.current().unwrap().id,
+            playing,
+            "the current track goes on"
+        );
         assert_eq!(ids(&q)[30], "new");
         assert_eq!(&ids(&q)[..3], ["0", "1", "2"]);
         // Not for a wave.
@@ -375,18 +433,28 @@ mod tests {
     fn shuffle_keeps_a_carried_track_first() {
         let mut q = list(&["a", "b"]);
         q.select(0);
-        q.after_current(Source::List("new".into()), vec![track("x"), track("y"), track("z")]);
+        q.after_current(
+            Source::List("new".into()),
+            vec![track("x"), track("y"), track("z")],
+        );
         assert!(q.set_shuffled(true));
         assert_eq!(q.current().unwrap().id, "a");
         assert!(q.on_carried());
         assert!(q.set_shuffled(false));
-        assert_eq!(ids(&q), ["a", "x", "y", "z"], "it stays first, the list follows in its order");
+        assert_eq!(
+            ids(&q),
+            ["a", "x", "y", "z"],
+            "it stays first, the list follows in its order"
+        );
     }
 
     #[test]
     fn wave_history_is_bounded_and_previous_still_works() {
         let mut q = Queue::default();
-        q.replace(Source::Wave, (0..1100).map(|i| track(&i.to_string())).collect());
+        q.replace(
+            Source::Wave,
+            (0..1100).map(|i| track(&i.to_string())).collect(),
+        );
         q.select(1050);
         assert_eq!(q.trim_history(1000), 50);
         assert_eq!(q.current().unwrap().id, "1050");

@@ -1,49 +1,71 @@
 //! Application state and logic.
 
-use crate::api::{
-    ApiError,
-    default_stations, iso_now, my_wave, random_uuid, Account, Api, PlayContext, PlayReport, Playlist, Station, Track,
-    WaveBatch, MY_WAVE, QUALITIES,
-};
 use crate::api::lastfm::{self, Scrobble};
+use crate::api::{
+    Account, Api, ApiError, MY_WAVE, PlayContext, PlayReport, Playlist, QUALITIES, Station, Track,
+    WaveBatch, default_stations, iso_now, my_wave, random_uuid,
+};
 mod scrobbling;
 pub use scrobbling::PendingScrobbles;
 use scrobbling::ScrobbleQueue;
 mod wave;
+mod ynison;
 pub use wave::Wave;
 mod podcasts;
-pub use podcasts::{PendingPodcastProgress, PodcastSection, Podcasts};
-pub use podcasts::{PodcastMsg, PodcastTask};
-use podcasts::ProgressOutbox;
 use crate::effect::{Effect, Task};
-use crate::player::{PlayerCmd, PlayerEvent, TrackFile};
 use crate::input::Press;
 use crate::keymap::{self, Action};
 use crate::library::{Likes, Page, Playlists, Search};
-pub use crate::queue::{Repeat, Source};
+use crate::player::{PlayerCmd, PlayerEvent, TrackFile};
 use crate::queue::Queue;
+pub use crate::queue::{Repeat, Source};
+use podcasts::ProgressOutbox;
+pub use podcasts::{PendingPodcastProgress, PodcastSection, Podcasts};
+pub use podcasts::{PodcastMsg, PodcastTask};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 pub enum Msg {
     Player(PlayerEvent),
+    Ynison {
+        epoch: u64,
+        event: crate::ynison::Event,
+    },
     Podcasts(PodcastMsg),
     /// A command from the desktop (media keys, player widgets).
     Remote(crate::media::Remote),
-    Url { generation: u64, result: Result<crate::api::FileInfo, ApiError> },
+    Url {
+        generation: u64,
+        result: Result<crate::api::FileInfo, ApiError>,
+    },
     LikedIds(Vec<String>),
     Liked(Result<Vec<Track>, ApiError>),
     Stations(Vec<Station>),
     /// Page `page` of the search for `query`: (tracks, total found).
-    Search { generation: u64, query: String, page: usize, result: Result<(Vec<Track>, Option<usize>), ApiError> },
-    Playlists { req: u64, result: Result<Vec<Playlist>, ApiError> },
-    PlaylistOpened { key: String, req: u64, result: Result<Vec<Track>, ApiError> },
+    Search {
+        generation: u64,
+        query: String,
+        page: usize,
+        result: Result<(Vec<Track>, Option<usize>), ApiError>,
+    },
+    Playlists {
+        req: u64,
+        result: Result<Vec<Playlist>, ApiError>,
+    },
+    PlaylistOpened {
+        key: String,
+        req: u64,
+        result: Result<Vec<Track>, ApiError>,
+    },
     /// Result of renaming a playlist or changing its tracks: status text on success.
-    PlaylistEdited { key: String, result: Result<String, ApiError> },
+    PlaylistEdited {
+        key: String,
+        result: Result<String, ApiError>,
+    },
     /// Tracks loaded in the background to be played as a list named `name`.
     ListLoaded {
         intent: u64,
@@ -53,28 +75,67 @@ pub enum Msg {
         playlist: Option<String>,
         result: Result<Vec<Track>, ApiError>,
     },
-    WaveStarted { intent: u64, station: String, name: String, result: Result<WaveBatch, ApiError> },
-    WaveMore { wave: u64, result: Result<WaveBatch, ApiError> },
-    LikeSet { id: String, req: u64, result: Result<(), ApiError> },
-    Cover { url: String, result: Result<image::DynamicImage, ApiError> },
-    Preload { generation: u64, idx: usize, id: String, result: Result<crate::api::FileInfo, ApiError> },
+    WaveStarted {
+        intent: u64,
+        station: String,
+        name: String,
+        result: Result<WaveBatch, ApiError>,
+    },
+    WaveMore {
+        wave: u64,
+        result: Result<WaveBatch, ApiError>,
+    },
+    LikeSet {
+        id: String,
+        req: u64,
+        result: Result<(), ApiError>,
+    },
+    Cover {
+        url: String,
+        result: Result<image::DynamicImage, ApiError>,
+    },
+    Preload {
+        generation: u64,
+        idx: usize,
+        id: String,
+        result: Result<crate::api::FileInfo, ApiError>,
+    },
     /// «Меньше ИИ-музыки» loaded from the account.
     LessAi(Result<bool, ApiError>),
     /// Result of switching «Меньше ИИ-музыки» to `on`.
-    LessAiSet { on: bool, result: Result<(), ApiError> },
+    LessAiSet {
+        on: bool,
+        result: Result<(), ApiError>,
+    },
     Error(String),
     /// The link was sent to the terminal and, if `by_tool`, copied by a clipboard utility too.
-    Copied { url: String, by_tool: bool },
+    Copied {
+        url: String,
+        by_tool: bool,
+    },
     /// A Yandex Music link found in the clipboard for «Играть по ссылке».
     ClipboardLink(String),
     /// A link opened in the browser (`ok`) or not.
-    Opened { url: String, ok: bool },
+    Opened {
+        url: String,
+        ok: bool,
+    },
     /// A Last.fm token to be confirmed in the browser.
-    LastfmToken { req: u64, result: Result<String, lastfm::Error> },
+    LastfmToken {
+        req: u64,
+        result: Result<String, lastfm::Error>,
+    },
     /// The session for a confirmed `token`: (user name, session key).
-    LastfmSession { token: String, result: Result<(String, String), lastfm::Error> },
+    LastfmSession {
+        token: String,
+        result: Result<(String, String), lastfm::Error>,
+    },
     /// «Now playing» (no `tracks`) or scrobbles were sent with `session`.
-    LastfmSent { session: String, req: Option<u64>, result: Result<usize, lastfm::Error> },
+    LastfmSent {
+        session: String,
+        req: Option<u64>,
+        result: Result<usize, lastfm::Error>,
+    },
     /// For the main loop (never passed to `App::on_msg`): a key or pasted text, the window
     /// resized, SIGTERM.
     Input(crate::input::Input),
@@ -123,7 +184,14 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::Wave, Tab::Stations, Tab::Liked, Tab::Search, Tab::Playlists, Tab::Podcasts];
+    pub const ALL: [Tab; 6] = [
+        Tab::Wave,
+        Tab::Stations,
+        Tab::Liked,
+        Tab::Search,
+        Tab::Playlists,
+        Tab::Podcasts,
+    ];
     pub fn index(self) -> usize {
         Tab::ALL.iter().position(|t| *t == self).unwrap()
     }
@@ -170,7 +238,13 @@ const LASTFM_POLL: Duration = Duration::from_secs(3);
 pub enum Lastfm {
     Off,
     /// Waiting for a token (`None`), then for the user to confirm it in the browser by `until`.
-    Connecting { req: u64, token: Option<String>, until: Instant, poll_at: Instant, polling: bool },
+    Connecting {
+        req: u64,
+        token: Option<String>,
+        until: Instant,
+        poll_at: Instant,
+        polling: bool,
+    },
     On(LastfmSession),
 }
 
@@ -180,16 +254,36 @@ const PARTIAL_PLAY_SECS: f64 = 30.1;
 /// Pop-up dialogs; while one is shown it receives all keys.
 pub enum Modal {
     /// Choose a playlist to add `track` to.
-    AddTo { track: Track, choices: Vec<Playlist>, sel: usize },
-    ConfirmRemove { pl: Playlist, index: usize, track: Track },
-    ConfirmDelete { pl: Playlist },
-    Rename { pl: Playlist, input: String },
+    AddTo {
+        track: Track,
+        choices: Vec<Playlist>,
+        sel: usize,
+    },
+    ConfirmRemove {
+        pl: Playlist,
+        index: usize,
+        track: Track,
+    },
+    ConfirmDelete {
+        pl: Playlist,
+    },
+    Rename {
+        pl: Playlist,
+        input: String,
+    },
     /// Name of a new playlist; `track` is added to it once created.
-    NewPlaylist { input: String, track: Option<Track> },
+    NewPlaylist {
+        input: String,
+        track: Option<Track>,
+    },
     /// Link to a track to play.
-    OpenLink { input: String },
+    OpenLink {
+        input: String,
+    },
     /// Settings window; `sel` is an index into `Setting::ALL`.
-    Settings { sel: usize },
+    Settings {
+        sel: usize,
+    },
     ConfirmLogout,
 }
 
@@ -209,6 +303,8 @@ pub enum Setting {
     Icons,
     RemainingTime,
     AudioInfo,
+    Ynison,
+    Autoplay,
     HideAccount,
     Lastfm,
     About,
@@ -216,7 +312,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 17] = [
+    pub const ALL: [Setting; 19] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
@@ -231,6 +327,8 @@ impl Setting {
         Setting::RemainingTime,
         Setting::AudioInfo,
         Setting::HideAccount,
+        Setting::Ynison,
+        Setting::Autoplay,
         Setting::Lastfm,
         Setting::About,
         Setting::Logout,
@@ -308,7 +406,11 @@ impl Output {
             Some("alsa") => Output::Alsa,
             _ => Output::Auto,
         };
-        if Output::ALL.contains(&o) { o } else { Output::Auto }
+        if Output::ALL.contains(&o) {
+            o
+        } else {
+            Output::Auto
+        }
     }
 }
 
@@ -427,6 +529,7 @@ pub struct App {
     /// The progress bar shows the time left instead of the track's length.
     pub remaining_time: bool,
     pub show_audio_info: bool,
+    pub ynison: ynison::Sync,
     pub lastfm: Lastfm,
     scrobbles: ScrobbleQueue,
     lastfm_auth: u64,
@@ -540,6 +643,7 @@ impl App {
             hide_account: false,
             remaining_time: false,
             show_audio_info: false,
+            ynison: ynison::Sync::default(),
             lastfm: Lastfm::Off,
             scrobbles: ScrobbleQueue::default(),
             lastfm_auth: 0,
@@ -595,7 +699,12 @@ impl App {
     /// An app for tests: nothing carries its effects out — no sound, no requests.
     #[cfg(test)]
     pub fn for_test() -> App {
-        let acc = Account { uid: "1".into(), login: "tester".into(), name: "Tester".into(), has_plus: true };
+        let acc = Account {
+            uid: "1".into(),
+            login: "tester".into(),
+            name: "Tester".into(),
+            has_plus: true,
+        };
         let mut api = Api::new("x");
         api.uid = "1".into();
         App::new(api, acc, 50)
@@ -632,7 +741,16 @@ impl App {
     #[cfg(test)]
     pub fn plays_sent(&mut self) -> Vec<PlayReport> {
         self.log_effects();
-        self.tasks_log.iter().filter_map(|t| if let Task::SendPlay(r) = t { Some(r.clone()) } else { None }).collect()
+        self.tasks_log
+            .iter()
+            .filter_map(|t| {
+                if let Task::SendPlay(r) = t {
+                    Some(r.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     // ------------------------------------------------------------ helpers
@@ -657,7 +775,10 @@ impl App {
             || self.podcasts.editing
             || self.podcasts.loading
             || self.podcasts.open.as_ref().is_some_and(|o| o.loading)
-            || matches!(self.modal, Some(Modal::Rename { .. } | Modal::NewPlaylist { .. } | Modal::OpenLink { .. }))
+            || matches!(
+                self.modal,
+                Some(Modal::Rename { .. } | Modal::NewPlaylist { .. } | Modal::OpenLink { .. })
+            )
             || self.search.loading()
             || self.likes.loading()
             || self.wave.as_ref().is_some_and(|w| w.fetching)
@@ -671,7 +792,11 @@ impl App {
 
     /// A track is heard right now.
     fn playing(&self) -> bool {
-        self.queue.pos().is_some() && !self.paused && !self.loading_track && !self.buffering && !self.stopped
+        self.queue.pos().is_some()
+            && !self.paused
+            && !self.loading_track
+            && !self.buffering
+            && !self.stopped
     }
 
     /// New band levels (dBFS): bars rise at once and fall slowly.
@@ -680,7 +805,10 @@ impl App {
             return;
         }
         for (i, (bar, &db)) in self.spectrum.iter_mut().zip(levels).enumerate() {
-            let tilt = SPECTRUM_TILT_DB * (crate::player::spectrum_freq(i) / SPECTRUM_TILT_FROM).log2().max(0.0);
+            let tilt = SPECTRUM_TILT_DB
+                * (crate::player::spectrum_freq(i) / SPECTRUM_TILT_FROM)
+                    .log2()
+                    .max(0.0);
             let db = db + tilt as f32;
             let v = ((db - SPECTRUM_FLOOR) / (SPECTRUM_CEIL - SPECTRUM_FLOOR)).clamp(0.0, 1.0);
             *bar = v.max(*bar - SPECTRUM_FALL);
@@ -703,7 +831,8 @@ impl App {
     }
 
     pub fn visible_status(&self) -> Option<&str> {
-        (!self.status.is_empty() && self.status_at.elapsed().as_secs() < 6).then_some(self.status.as_str())
+        (!self.status.is_empty() && self.status_at.elapsed().as_secs() < 6)
+            .then_some(self.status.as_str())
     }
 
     fn play(&mut self, cmd: PlayerCmd) {
@@ -746,7 +875,11 @@ impl App {
             title: t.title.clone(),
             artists: t.artists.clone(),
             album: t.album.clone(),
-            length: if self.duration > 0.0 { self.duration } else { t.duration_ms as f64 / 1000.0 },
+            length: if self.duration > 0.0 {
+                self.duration
+            } else {
+                t.duration_ms as f64 / 1000.0
+            },
             art_url: t.cover.clone(),
             url: t.web_url(),
         });
@@ -757,11 +890,20 @@ impl App {
         };
         let volume = if self.muted { 0.0 } else { self.volume };
         let podcast = self.current().is_some_and(Track::is_podcast);
-        (State {
-            track, status, volume,
-            repeat: if podcast { Repeat::Off } else { self.queue.repeat() },
-            shuffle: !podcast && self.queue.shuffled(),
-        }, self.time_pos)
+        (
+            State {
+                track,
+                status,
+                volume,
+                repeat: if podcast {
+                    Repeat::Off
+                } else {
+                    self.queue.repeat()
+                },
+                shuffle: !podcast && self.queue.shuffled(),
+            },
+            self.time_pos,
+        )
     }
 
     /// A command from the desktop: the same as the matching key.
@@ -769,16 +911,23 @@ impl App {
         use crate::media::Remote;
         let has_track = self.queue.pos().is_some() && !self.stopped;
         match r {
-            Remote::PlayPause if has_track => self.play(PlayerCmd::TogglePause),
-            Remote::Play if has_track && self.paused => self.play(PlayerCmd::TogglePause),
+            Remote::PlayPause if has_track => self.toggle_playback(),
+            Remote::PlayPause | Remote::Play if self.ynison.restored_position.is_some() => {
+                self.toggle_playback()
+            }
+            Remote::Play if has_track && self.paused => self.toggle_playback(),
             Remote::Pause if has_track && !self.paused => self.play(PlayerCmd::TogglePause),
             Remote::Next => self.next(End::Skip),
             Remote::Previous => self.prev(),
             Remote::Seek(d) if has_track => self.play(PlayerCmd::Seek(d)),
             Remote::SeekTo(t) if has_track => self.play(PlayerCmd::Seek(t - self.time_pos)),
             Remote::Volume(v) => self.change_volume(v - self.volume),
-            Remote::Repeat(r) if !self.current().is_some_and(Track::is_podcast) => self.set_repeat(r),
-            Remote::Shuffle(on) if !self.current().is_some_and(Track::is_podcast) => self.set_shuffled(on),
+            Remote::Repeat(r) if !self.current().is_some_and(Track::is_podcast) => {
+                self.set_repeat(r)
+            }
+            Remote::Shuffle(on) if !self.current().is_some_and(Track::is_podcast) => {
+                self.set_shuffled(on)
+            }
             Remote::Quit => self.quit = true,
             _ => {}
         }
@@ -842,7 +991,11 @@ impl App {
             rows.push(StationRow::Station(s));
         }
         self.stations = rows;
-        let sel = self.stations_state.selected().unwrap_or(0).min(self.stations.len().saturating_sub(1));
+        let sel = self
+            .stations_state
+            .selected()
+            .unwrap_or(0)
+            .min(self.stations.len().saturating_sub(1));
         self.stations_state.select(Some(sel));
         self.fix_station_selection(1);
     }
@@ -880,12 +1033,18 @@ impl App {
             _ if self.queue.is_wave() => self.wave.as_ref(),
             _ => None,
         };
-        let (Some(w), Some(t)) = (wave, self.current()) else { return };
+        let (Some(w), Some(t)) = (wave, self.current()) else {
+            return;
+        };
         let ev = match end {
-            End::Eof => json!({"type": "trackFinished", "timestamp": iso_now(), "trackId": t.full_id(),
-                "totalPlayedSeconds": self.duration.max(self.time_pos)}),
-            End::Skip | End::Back | End::Dislike | End::Other => json!({"type": "skip", "timestamp": iso_now(),
-                "trackId": t.full_id(), "totalPlayedSeconds": self.time_pos}),
+            End::Eof => {
+                json!({"type": "trackFinished", "timestamp": iso_now(), "trackId": t.full_id(),
+                "totalPlayedSeconds": self.duration.max(self.time_pos)})
+            }
+            End::Skip | End::Back | End::Dislike | End::Other => {
+                json!({"type": "skip", "timestamp": iso_now(),
+                "trackId": t.full_id(), "totalPlayedSeconds": self.time_pos})
+            }
             End::Silent => return,
         };
         let task = feedback(w, ev, t.batch.clone());
@@ -899,7 +1058,10 @@ impl App {
         let (context, radio) = match (self.queue.source(), &self.wave) {
             (Source::Wave, Some(w)) => (
                 PlayContext::new("radio", w.station.clone()),
-                Some((w.session.clone().unwrap_or_default(), track.batch.clone().unwrap_or_else(|| w.batch.clone()))),
+                Some((
+                    w.session.clone().unwrap_or_default(),
+                    track.batch.clone().unwrap_or_else(|| w.batch.clone()),
+                )),
             ),
             _ => (self.context.clone(), None),
         };
@@ -916,8 +1078,17 @@ impl App {
             reason: None,
         };
         self.send_play(report.clone());
-        let started_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        self.play = Some(Play { report, last_pos: 0.0, partial_sent: false, started_unix, now_playing_sent: false, scrobbled: false });
+        let started_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.play = Some(Play {
+            report,
+            last_pos: 0.0,
+            partial_sent: false,
+            started_unix,
+            now_playing_sent: false,
+            scrobbled: false,
+        });
     }
 
     /// The position moved to `t`: counts the time played; sends a report once 30 s are played.
@@ -936,7 +1107,10 @@ impl App {
         play.report.end_position = t;
         if !play.partial_sent && play.report.played >= PARTIAL_PLAY_SECS {
             play.partial_sent = true;
-            let report = PlayReport { reason: Some("in_progress"), ..play.report.clone() };
+            let report = PlayReport {
+                reason: Some("in_progress"),
+                ..play.report.clone()
+            };
             self.send_play(report);
         }
         self.lastfm_play();
@@ -956,14 +1130,20 @@ impl App {
         self.checkpoint_podcast(false);
         let Some(play) = &mut self.play else { return };
         play.report.pause = true;
-        let report = PlayReport { reason: None, ..play.report.clone() };
+        let report = PlayReport {
+            reason: None,
+            ..play.report.clone()
+        };
         self.send_play(report);
     }
 
     /// The playback of the current track is over (`reason`: why), or the program quits (`None`).
     fn end_play(&mut self, reason: Option<&'static str>) -> Option<PlayReport> {
         let play = self.play.take()?;
-        let report = PlayReport { reason, ..play.report };
+        let report = PlayReport {
+            reason,
+            ..play.report
+        };
         if reason.is_some() {
             self.send_play(report.clone());
         }
@@ -999,13 +1179,29 @@ impl App {
         let generation = self.generation;
         let id = self.queue.tracks()[idx].full_id();
         let q = QUALITIES[self.quality].id;
-        self.task(Task::TrackUrl { generation, full_id: id, quality: q });
+        self.task(Task::TrackUrl {
+            generation,
+            full_id: id,
+            quality: q,
+        });
     }
 
     /// Updates state for a new current track. `preloaded`: the player already switched to it.
     fn begin_track(&mut self, mut idx: usize, preloaded: bool) -> bool {
-        let Some(track) = self.queue.tracks().get(idx).cloned() else { return false };
-        self.audio_info = if preloaded { self.preload_audio_info.take() } else { None };
+        let Some(track) = self.queue.tracks().get(idx).cloned() else {
+            return false;
+        };
+        if !self.ynison.owned {
+            self.ynison.claim = self.ynison.claim.wrapping_add(1);
+        }
+        self.ynison.owned = true;
+        self.ynison.restore_allowed = false;
+        self.ynison.restored_position = None;
+        self.audio_info = if preloaded {
+            self.preload_audio_info.take()
+        } else {
+            None
+        };
         self.preload_audio_info = None;
         self.queue.select(idx);
         idx -= self.queue.trim_history(1000);
@@ -1021,7 +1217,8 @@ impl App {
         self.confirmed_time_pos = None;
         self.preload = None;
         self.preload_pending = false;
-        self.load_deadline = (preloaded && !track.is_podcast()).then(|| Instant::now() + LOAD_TIMEOUT);
+        self.load_deadline =
+            (preloaded && !track.is_podcast()).then(|| Instant::now() + LOAD_TIMEOUT);
         self.failures = 0;
         self.retry_at = None;
         self.resume_at = (start > 0.0).then_some(start);
@@ -1030,7 +1227,11 @@ impl App {
         self.load_cover(track.cover.clone());
         self.maybe_extend_search_queue();
         // A restart of the same track (after an error) goes on with its playback.
-        if self.play.as_ref().is_none_or(|p| p.report.track.id != track.id) {
+        if self
+            .play
+            .as_ref()
+            .is_none_or(|p| p.report.track.id != track.id)
+        {
             self.end_play(Some("skip"));
             self.start_play(&track);
         }
@@ -1050,8 +1251,12 @@ impl App {
     /// The track to play after the current one (see `Queue::following`).
     fn following(&self, end: End) -> Option<usize> {
         if self.current().is_some_and(Track::is_podcast) {
-            if matches!(end, End::Eof) { return None; }
-            return self.queue.pos().and_then(|p| ((p + 1)..self.queue.len()).find(|&i| self.queue.tracks()[i].available));
+            if matches!(end, End::Eof) {
+                return None;
+            }
+            return self.queue.pos().and_then(|p| {
+                ((p + 1)..self.queue.len()).find(|&i| self.queue.tracks()[i].available)
+            });
         }
         // A search queue goes on with its next pages first.
         let more_coming = self.search.feeds_queue && self.search.can_load_more();
@@ -1067,16 +1272,27 @@ impl App {
 
     /// Resolves the next track's URL in advance and appends it to the player.
     fn schedule_preload(&mut self) {
-        if self.preload.is_some() || self.preload_pending || self.loading_track || self.queue.pos().is_none() {
+        if self.preload.is_some()
+            || self.preload_pending
+            || self.loading_track
+            || self.queue.pos().is_none()
+        {
             return;
         }
-        let Some(idx) = self.following(End::Eof) else { return };
+        let Some(idx) = self.following(End::Eof) else {
+            return;
+        };
         let track = self.queue.tracks()[idx].clone();
         self.preload_pending = true;
         self.load_cover(track.cover.clone());
         let generation = self.generation;
         let q = QUALITIES[self.quality].id;
-        self.task(Task::Preload { generation, idx, track, quality: q });
+        self.task(Task::Preload {
+            generation,
+            idx,
+            track,
+            quality: q,
+        });
     }
 
     /// Switches to the preloaded track if it is the next one. Returns false if there is none.
@@ -1139,9 +1355,15 @@ impl App {
             return;
         }
         self.new_intent();
-        let start = (start..tracks.len()).find(|&i| tracks[i].available).unwrap_or(start);
+        let start = (start..tracks.len())
+            .find(|&i| tracks[i].available)
+            .unwrap_or(start);
         if self.finishing_track() {
-            self.queue_after_current(tracks.into_iter().skip(start).collect(), Source::List(name.to_string()), None);
+            self.queue_after_current(
+                tracks.into_iter().skip(start).collect(),
+                Source::List(name.to_string()),
+                None,
+            );
             self.context = context;
             self.set_status(format!("После этого трека: {name}"));
             return;
@@ -1160,14 +1382,20 @@ impl App {
     /// «Доигрывать трек»: a new list waits for the playing track to end (a paused one is
     /// switched at once: it is not being listened to).
     fn finishing_track(&self) -> bool {
-        self.finish_track && self.queue.pos().is_some() && !self.paused && !self.loading_track && !self.stopped
+        self.finish_track
+            && self.queue.pos().is_some()
+            && !self.paused
+            && !self.loading_track
+            && !self.stopped
     }
 
     /// Replaces the queue with `tracks` but keeps the playing track as its first entry, so the
     /// list goes on from there when the track ends (`n` switches at once).
     fn queue_after_current(&mut self, tracks: Vec<Track>, source: Source, wave: Option<Wave>) {
         let from_wave = self.queue.is_wave();
-        let Some(after) = self.queue.after_current(source, tracks) else { return };
+        let Some(after) = self.queue.after_current(source, tracks) else {
+            return;
+        };
         // Switched again before the track ended: it still belongs to its first list.
         if !after.was_carried {
             self.carried_wave = if from_wave { self.wave.take() } else { None };
@@ -1186,6 +1414,7 @@ impl App {
 
     /// The user started something new to play; returns its number for the async reply.
     fn new_intent(&mut self) -> u64 {
+        self.ynison.restore_allowed = false;
         self.intent += 1;
         self.intent
     }
@@ -1193,7 +1422,9 @@ impl App {
     fn load_cover(&mut self, url: Option<String>) {
         let Some(url) = url else { return };
         if self.art != Art::Cover
-            || self.picker.is_none() || self.covers.iter().any(|(u, _)| *u == url) || !self.covers_loading.insert(url.clone())
+            || self.picker.is_none()
+            || self.covers.iter().any(|(u, _)| *u == url)
+            || !self.covers_loading.insert(url.clone())
         {
             return;
         }
@@ -1224,12 +1455,15 @@ impl App {
     }
 
     pub fn start_station_id(&mut self, id: &str) {
-        let st = default_stations().into_iter().find(|s| s.id == id).unwrap_or_else(|| Station {
-            id: id.to_string(),
-            name: id.to_string(),
-            category: String::new(),
-            settings: None,
-        });
+        let st = default_stations()
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| Station {
+                id: id.to_string(),
+                name: id.to_string(),
+                category: String::new(),
+                settings: None,
+            });
         self.start_wave(st);
     }
 
@@ -1240,10 +1474,21 @@ impl App {
         self.apply_like(&track, like);
         if track.is_music() && self.queue.is_wave() && self.queue.contains(&track.id) {
             let kind = if like { "like" } else { "unlike" };
-            self.wave_feedback(json!({"type": kind, "timestamp": iso_now(), "trackId": track.full_id()}), track.batch.clone());
+            self.wave_feedback(
+                json!({"type": kind, "timestamp": iso_now(), "trackId": track.full_id()}),
+                track.batch.clone(),
+            );
         }
         self.set_status(if track.is_podcast() {
-            format!("{}: {}", if like { "Лайк выпуску" } else { "Лайк с выпуска снят" }, track.title)
+            format!(
+                "{}: {}",
+                if like {
+                    "Лайк выпуску"
+                } else {
+                    "Лайк с выпуска снят"
+                },
+                track.title
+            )
         } else if like {
             format!("♥ Добавлено в «Мне нравится»: {}", track.title)
         } else {
@@ -1255,15 +1500,25 @@ impl App {
             edit.desired = like;
             edit.latest = req;
         } else {
-            self.like_edits.insert(track.id.clone(), LikeEdit {
-                track: track.clone(), confirmed: !like, desired: like, sent: like, req, latest: req,
-            });
+            self.like_edits.insert(
+                track.id.clone(),
+                LikeEdit {
+                    track: track.clone(),
+                    confirmed: !like,
+                    desired: like,
+                    sent: like,
+                    req,
+                    latest: req,
+                },
+            );
             self.task(Task::SetLike { track, like, req });
         }
     }
 
     fn on_like_set(&mut self, id: String, req: u64, result: Result<(), ApiError>) {
-        let Some(mut edit) = self.like_edits.remove(&id) else { return };
+        let Some(mut edit) = self.like_edits.remove(&id) else {
+            return;
+        };
         if edit.req != req {
             self.like_edits.insert(id, edit);
             return;
@@ -1275,7 +1530,11 @@ impl App {
         if (result.is_err() && newer) || (result.is_ok() && edit.desired != edit.confirmed) {
             edit.req = edit.latest;
             edit.sent = edit.desired;
-            self.task(Task::SetLike { track: edit.track.clone(), like: edit.sent, req: edit.req });
+            self.task(Task::SetLike {
+                track: edit.track.clone(),
+                like: edit.sent,
+                req: edit.req,
+            });
             self.like_edits.insert(id, edit);
         } else if let Err(e) = result {
             self.apply_like(&edit.track, edit.confirmed);
@@ -1291,19 +1550,28 @@ impl App {
         self.likes.set(track, like);
         let n = self.likes.tracks().len();
         if let Some(s) = self.liked_state.selected() {
-            self.liked_state.select(if n == 0 { None } else { Some(s.min(n - 1)) });
+            self.liked_state
+                .select(if n == 0 { None } else { Some(s.min(n - 1)) });
         }
     }
 
     fn dislike_current(&mut self) {
-        let Some(track) = self.current().filter(|t| t.is_music()).cloned() else { return };
+        let Some(track) = self.current().filter(|t| t.is_music()).cloned() else {
+            return;
+        };
         if self.is_liked(&track) {
             self.apply_like(&track, false);
         }
         if self.queue.is_wave() {
-            self.wave_feedback(json!({"type": "dislike", "timestamp": iso_now(), "trackId": track.full_id()}), track.batch.clone());
+            self.wave_feedback(
+                json!({"type": "dislike", "timestamp": iso_now(), "trackId": track.full_id()}),
+                track.batch.clone(),
+            );
         }
-        self.set_status(format!("✗ Не нравится: {} — больше не попадётся", track.title));
+        self.set_status(format!(
+            "✗ Не нравится: {} — больше не попадётся",
+            track.title
+        ));
         let t = track.clone();
         self.task(Task::Dislike(t));
         self.next(End::Dislike);
@@ -1316,6 +1584,7 @@ impl App {
             self.unauthorized = true;
         }
         match msg {
+            Msg::Ynison { epoch, event } => self.on_ynison(epoch, event),
             Msg::Podcasts(msg) => self.on_podcast_msg(msg),
             Msg::Remote(r) => self.on_remote(r),
             Msg::Player(ev) => match ev {
@@ -1334,7 +1603,9 @@ impl App {
                     self.time_pos = t;
                     if !self.seeking && !self.buffering {
                         self.confirmed_time_pos = Some(t);
-                        if !self.loading_track || t > 0.0 { self.track_play(t); }
+                        if !self.loading_track || t > 0.0 {
+                            self.track_play(t);
+                        }
                     }
                     if self.loading_track && !self.buffering && !self.seeking && t > 0.0 {
                         self.loading_track = false;
@@ -1352,8 +1623,11 @@ impl App {
                 }
                 PlayerEvent::Pause(p) => {
                     if p && !self.paused {
-                        if !self.loading_track { self.pause_play(); }
-                        else { self.checkpoint_podcast(false); }
+                        if !self.loading_track {
+                            self.pause_play();
+                        } else {
+                            self.checkpoint_podcast(false);
+                        }
                     }
                     self.paused = p;
                 }
@@ -1362,11 +1636,15 @@ impl App {
                 PlayerEvent::Mute(m) => self.muted = m,
                 PlayerEvent::Seeking(seeking) => {
                     self.seeking = seeking;
-                    if seeking { self.loading_track = true; }
+                    if seeking {
+                        self.loading_track = true;
+                    }
                 }
                 PlayerEvent::Buffering(waiting) => {
                     self.buffering = waiting;
-                    if waiting { self.loading_track = true; }
+                    if waiting {
+                        self.loading_track = true;
+                    }
                     // TimePos completes loading, including success accounting and music preload.
                 }
                 PlayerEvent::Eof => {
@@ -1399,8 +1677,16 @@ impl App {
                         let length = self.current().and_then(length);
                         let start = self.resume_at.take().unwrap_or(0.0);
                         let crossfade = self.current().is_some_and(Track::is_music);
-                        self.play(PlayerCmd::Load(TrackFile { url, length, start, crossfade }));
-                        self.load_deadline = self.current().filter(|t| !t.is_podcast()).map(|_| Instant::now() + LOAD_TIMEOUT);
+                        self.play(PlayerCmd::Load(TrackFile {
+                            url,
+                            length,
+                            start,
+                            crossfade,
+                        }));
+                        self.load_deadline = self
+                            .current()
+                            .filter(|t| !t.is_podcast())
+                            .map(|_| Instant::now() + LOAD_TIMEOUT);
                     }
                     Err(e) => {
                         self.set_error(format!("Не удалось получить трек: {e}"));
@@ -1410,14 +1696,19 @@ impl App {
             }
             Msg::LikedIds(ids) => {
                 self.likes.ids_loaded(&ids);
-                for edit in self.like_edits.values() { self.likes.set(&edit.track, edit.desired); }
+                for edit in self.like_edits.values() {
+                    self.likes.set(&edit.track, edit.desired);
+                }
             }
             Msg::Liked(r) => {
                 let result = self.likes.loaded(r);
-                for edit in self.like_edits.values() { self.likes.set(&edit.track, edit.desired); }
+                for edit in self.like_edits.values() {
+                    self.likes.set(&edit.track, edit.desired);
+                }
                 match result {
                     Ok(()) => {
-                        if !self.likes.tracks().is_empty() && self.liked_state.selected().is_none() {
+                        if !self.likes.tracks().is_empty() && self.liked_state.selected().is_none()
+                        {
                             self.liked_state.select(Some(0));
                         }
                     }
@@ -1429,11 +1720,21 @@ impl App {
                 all.retain(|s| s.id == MY_WAVE);
                 let mut rest = list;
                 let order = ["Жанры", "Настроение", "Занятия", "Эпохи"];
-                rest.sort_by_key(|s| order.iter().position(|c| *c == s.category).unwrap_or(order.len()));
+                rest.sort_by_key(|s| {
+                    order
+                        .iter()
+                        .position(|c| *c == s.category)
+                        .unwrap_or(order.len())
+                });
                 all.extend(rest.into_iter().filter(|s| s.id != MY_WAVE));
                 self.set_stations(all);
             }
-            Msg::Search { generation, query, page, result } => match self.search.page_loaded(generation, &query, page, result) {
+            Msg::Search {
+                generation,
+                query,
+                page,
+                result,
+            } => match self.search.page_loaded(generation, &query, page, result) {
                 Page::Stale => {}
                 Page::Failed(e) => self.set_error(format!("Ошибка поиска: {e}")),
                 Page::Loaded { first, new } => {
@@ -1457,26 +1758,41 @@ impl App {
                 }
                 Some(Err(e)) => self.set_error(format!("Не удалось загрузить плейлисты: {e}")),
             },
-            Msg::PlaylistOpened { key, req, result } => match self.playlists.open_loaded(&key, req, result) {
-                None => {}
-                Some(Ok(n)) => {
-                    let sel = self.open_state.selected().unwrap_or(0);
-                    self.open_state.select((n > 0).then(|| sel.min(n - 1)));
+            Msg::PlaylistOpened { key, req, result } => {
+                match self.playlists.open_loaded(&key, req, result) {
+                    None => {}
+                    Some(Ok(n)) => {
+                        let sel = self.open_state.selected().unwrap_or(0);
+                        self.open_state.select((n > 0).then(|| sel.min(n - 1)));
+                    }
+                    Some(Err(e)) => self.set_error(format!("Не удалось открыть плейлист: {e}")),
                 }
-                Some(Err(e)) => self.set_error(format!("Не удалось открыть плейлист: {e}")),
-            },
+            }
             Msg::PlaylistEdited { key, result } => match result {
                 Ok(status) => {
                     self.set_status(status);
                     self.load_playlists();
-                    if self.playlists.open.as_ref().is_some_and(|o| o.pl.key() == key) {
+                    if self
+                        .playlists
+                        .open
+                        .as_ref()
+                        .is_some_and(|o| o.pl.key() == key)
+                    {
                         self.reload_open_playlist();
                     }
                 }
                 Err(e) => self.set_error(format!("Ошибка: {e}")),
             },
-            Msg::ListLoaded { intent, .. } | Msg::WaveStarted { intent, .. } if intent != self.intent => {}
-            Msg::ListLoaded { name, context, shuffle, playlist, result, .. } => match result {
+            Msg::ListLoaded { intent, .. } | Msg::WaveStarted { intent, .. }
+                if intent != self.intent => {}
+            Msg::ListLoaded {
+                name,
+                context,
+                shuffle,
+                playlist,
+                result,
+                ..
+            } => match result {
                 Ok(list) if list.is_empty() => self.set_status(format!("{name}: нет треков")),
                 Ok(list) => {
                     if shuffle {
@@ -1489,7 +1805,12 @@ impl App {
                 }
                 Err(e) => self.set_error(format!("{name}: не удалось загрузить треки: {e}")),
             },
-            Msg::WaveStarted { intent, station, name, result } => self.on_wave_started(intent, station, name, result),
+            Msg::WaveStarted {
+                intent,
+                station,
+                name,
+                result,
+            } => self.on_wave_started(intent, station, name, result),
             Msg::WaveMore { wave, result } => self.on_wave_more(wave, result),
             Msg::LikeSet { id, req, result } => self.on_like_set(id, req, result),
             Msg::Error(s) => self.set_error(s),
@@ -1513,13 +1834,19 @@ impl App {
             Msg::Opened { url, ok } => {
                 if !ok {
                     crate::clipboard::osc52(&url);
-                    self.set_status(format!("Браузер не открылся — откройте ссылку сами (скопирована): {url}"));
+                    self.set_status(format!(
+                        "Браузер не открылся — откройте ссылку сами (скопирована): {url}"
+                    ));
                     self.task(Task::CopyWithTool(url));
                 }
             }
             Msg::LastfmToken { req, result } => self.on_lastfm_token(req, result),
             Msg::LastfmSession { token, result } => self.on_lastfm_session(token, result),
-            Msg::LastfmSent { session, req, result } => self.on_lastfm_sent(session, req, result),
+            Msg::LastfmSent {
+                session,
+                req,
+                result,
+            } => self.on_lastfm_sent(session, req, result),
             Msg::LessAi(r) => match r {
                 Ok(on) => self.less_ai = Some(on),
                 Err(e) => self.set_error(format!("Не удалось загрузить настройки аккаунта: {e}")),
@@ -1543,7 +1870,12 @@ impl App {
                     self.covers.push((url, img));
                 }
             }
-            Msg::Preload { generation, idx, id, result } => {
+            Msg::Preload {
+                generation,
+                idx,
+                id,
+                result,
+            } => {
                 if generation != self.generation {
                     return;
                 }
@@ -1556,7 +1888,12 @@ impl App {
                         let crossfade = track.is_music();
                         let url = info.url.clone();
                         self.preload_audio_info = Some(info);
-                        self.play(PlayerCmd::Append(TrackFile { url, length, start, crossfade }));
+                        self.play(PlayerCmd::Append(TrackFile {
+                            url,
+                            length,
+                            start,
+                            crossfade,
+                        }));
                         self.preload = Some((idx, id));
                     } else {
                         // The queue or the repeat mode changed meanwhile.
@@ -1582,7 +1919,9 @@ impl App {
             self.restart(p, from);
             return;
         }
-        let Some(deadline) = self.load_deadline else { return };
+        let Some(deadline) = self.load_deadline else {
+            return;
+        };
         if self.paused {
             // A paused track is not expected to start: count from the moment it is resumed.
             self.load_deadline = Some(Instant::now() + LOAD_TIMEOUT);
@@ -1617,14 +1956,20 @@ impl App {
                 self.play(PlayerCmd::Stop);
                 self.loading_track = true;
                 self.retry_at = Some((Instant::now() + RETRY_DELAY, from));
-                self.set_error(format!("Нет связи с сервером: повтор {} из {}…", self.failures, tries - 1));
+                self.set_error(format!(
+                    "Нет связи с сервером: повтор {} из {}…",
+                    self.failures,
+                    tries - 1
+                ));
             } else if let Some(p) = self.queue.pos() {
                 self.restart(p, from);
             }
             return;
         }
         if network {
-            self.set_error(format!("Трек не загрузился за {tries} попытки: нет связи с сервером"));
+            self.set_error(format!(
+                "Трек не загрузился за {tries} попытки: нет связи с сервером"
+            ));
         }
         self.loading_track = false;
         if self.current().is_some_and(Track::is_podcast) {
@@ -1660,12 +2005,16 @@ impl App {
     pub fn on_paste(&mut self, text: &str) {
         let text: String = text.trim().chars().filter(|c| !c.is_control()).collect();
         match &mut self.modal {
-            Some(Modal::Rename { input, .. } | Modal::NewPlaylist { input, .. } | Modal::OpenLink { input }) => {
-                input.push_str(&text)
-            }
+            Some(
+                Modal::Rename { input, .. }
+                | Modal::NewPlaylist { input, .. }
+                | Modal::OpenLink { input },
+            ) => input.push_str(&text),
             Some(_) => {}
             None if self.search.editing => self.search.input.push_str(&text),
-            None if self.tab == Tab::Podcasts && self.podcasts.editing => self.podcasts.input.push_str(&text),
+            None if self.tab == Tab::Podcasts && self.podcasts.editing => {
+                self.podcasts.input.push_str(&text)
+            }
             None if self.show_help || self.show_about => {}
             None => match crate::api::parse_link(&text) {
                 Ok(_) => self.modal = Some(Modal::OpenLink { input: text }),
@@ -1693,7 +2042,9 @@ impl App {
             self.show_help = false;
             self.show_about = false;
             if std::mem::take(&mut self.about_from_settings) {
-                self.modal = Some(Modal::Settings { sel: Setting::About.index() });
+                self.modal = Some(Modal::Settings {
+                    sel: Setting::About.index(),
+                });
             }
             return;
         }
@@ -1709,17 +2060,28 @@ impl App {
     pub fn act(&mut self, action: Action) {
         let playlists = self.tab == Tab::Playlists;
         let open = playlists && self.playlists.open.is_some();
-        if self.tab == Tab::Podcasts && matches!(action,
-            Action::Shuffle | Action::Dislike
-            | Action::TrackWave | Action::Artist | Action::Album | Action::Repeat
-            | Action::AddToPlaylist | Action::Remove | Action::Rename | Action::NewPlaylist) {
+        if self.tab == Tab::Podcasts
+            && matches!(
+                action,
+                Action::Shuffle
+                    | Action::Dislike
+                    | Action::TrackWave
+                    | Action::Artist
+                    | Action::Album
+                    | Action::Repeat
+                    | Action::AddToPlaylist
+                    | Action::Remove
+                    | Action::Rename
+                    | Action::NewPlaylist
+            )
+        {
             return;
         }
         match action {
             Action::Quit => self.quit = true,
             Action::Help => self.show_help = true,
             Action::Settings => self.modal = Some(Modal::Settings { sel: 0 }),
-            Action::PlayPause => self.play(PlayerCmd::TogglePause),
+            Action::PlayPause => self.toggle_playback(),
             Action::Next => self.next(End::Skip),
             Action::Prev => self.prev(),
             Action::SeekBack => self.play(PlayerCmd::Seek(-10.0)),
@@ -1729,19 +2091,32 @@ impl App {
             Action::Mute => self.play(PlayerCmd::ToggleMute),
             Action::Repeat => self.set_repeat(self.queue.repeat().next()),
             Action::LikeCurrent => {
-                if let Some(t) = self.current().filter(|t| t.is_music() || t.is_podcast()).cloned() {
+                if let Some(t) = self
+                    .current()
+                    .filter(|t| t.is_music() || t.is_podcast())
+                    .cloned()
+                {
                     self.toggle_like(t);
                 }
             }
             Action::LikeSelected => {
-                if let Some(t) = self.selected_track().filter(|t| t.is_music() || t.is_podcast()).cloned() {
+                if let Some(t) = self
+                    .selected_track()
+                    .filter(|t| t.is_music() || t.is_podcast())
+                    .cloned()
+                {
                     self.toggle_like(t);
                 }
             }
             Action::Dislike => self.dislike_current(),
             Action::MyWave => self.start_wave(my_wave()),
             Action::TrackWave => {
-                if let Some(t) = self.selected_track().or(self.current()).filter(|t| t.is_music()).cloned() {
+                if let Some(t) = self
+                    .selected_track()
+                    .or(self.current())
+                    .filter(|t| t.is_music())
+                    .cloned()
+                {
                     self.start_wave(Station {
                         id: format!("track:{}", t.id),
                         name: format!("Волна по треку «{}»", t.title),
@@ -1754,7 +2129,9 @@ impl App {
             Action::Album => self.play_album(),
             Action::Tab(i) => self.select_tab(i),
             Action::NextTab => self.select_tab((self.tab.index() + 1) % Tab::ALL.len()),
-            Action::PrevTab => self.select_tab((self.tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len()),
+            Action::PrevTab => {
+                self.select_tab((self.tab.index() + Tab::ALL.len() - 1) % Tab::ALL.len())
+            }
             Action::Down => self.move_sel(1),
             Action::Up => self.move_sel(-1),
             Action::PageDown => self.move_sel(10),
@@ -1767,7 +2144,9 @@ impl App {
             Action::Shuffle => self.shuffle_play(),
             Action::CopyLink => self.copy_link(),
             Action::OpenLink => self.ask_link(),
-            Action::Search | Action::EditSearch if self.tab == Tab::Podcasts => self.edit_podcast_search(),
+            Action::Search | Action::EditSearch if self.tab == Tab::Podcasts => {
+                self.edit_podcast_search()
+            }
             Action::Search => {
                 self.tab = Tab::Search;
                 self.search.editing = true;
@@ -1782,7 +2161,12 @@ impl App {
             Action::Remove if open => self.ask_remove_from_playlist(),
             Action::Remove if playlists => self.ask_delete_playlist(),
             Action::Rename if playlists => self.ask_rename_playlist(),
-            Action::NewPlaylist => self.modal = Some(Modal::NewPlaylist { input: String::new(), track: None }),
+            Action::NewPlaylist => {
+                self.modal = Some(Modal::NewPlaylist {
+                    input: String::new(),
+                    track: None,
+                })
+            }
             Action::Back if self.tab == Tab::Podcasts => self.podcasts.open = None,
             Action::PodcastPreviousSection if self.tab == Tab::Podcasts => self.podcast_section(-1),
             Action::PodcastNextSection if self.tab == Tab::Podcasts => self.podcast_section(1),
@@ -1791,22 +2175,33 @@ impl App {
             Action::PodcastFavorite if self.tab == Tab::Podcasts => self.toggle_podcast_favorite(),
             Action::Back if playlists => self.playlists.open = None,
             Action::EditSearch | Action::Remove | Action::Rename | Action::Back => {}
-            Action::PodcastPreviousSection | Action::PodcastNextSection | Action::PodcastFromStart
-            | Action::PodcastDescription | Action::PodcastFavorite => {}
+            Action::PodcastPreviousSection
+            | Action::PodcastNextSection
+            | Action::PodcastFromStart
+            | Action::PodcastDescription
+            | Action::PodcastFavorite => {}
         }
     }
 
     fn select_tab(&mut self, index: usize) {
-        let Some(tab) = Tab::ALL.get(index).copied() else { return };
+        let Some(tab) = Tab::ALL.get(index).copied() else {
+            return;
+        };
         self.tab = tab;
-        if tab == Tab::Podcasts { self.ensure_podcasts(); }
+        if tab == Tab::Podcasts {
+            self.ensure_podcasts();
+        }
     }
 
     /// Requests the next page of the current search.
     fn load_search_page(&mut self) {
         let (query, page) = self.search.next_page();
         let generation = self.search.generation();
-        self.task(Task::Search { generation, query, page });
+        self.task(Task::Search {
+            generation,
+            query,
+            page,
+        });
     }
 
     /// Loads the next search page when the queue played from the search is close to its end.
@@ -1897,7 +2292,11 @@ impl App {
         self.play_list(name, context, shuffled, 0);
         if matches!(self.queue.source(), Source::List(n) if n == name) {
             self.queue.keep_own_order(tracks);
-            let when = if finishing { "После этого трека" } else { "Играет" };
+            let when = if finishing {
+                "После этого трека"
+            } else {
+                "Играет"
+            };
             self.set_status(format!("{when}: {}", self.source_name()));
         }
     }
@@ -1909,13 +2308,20 @@ impl App {
         }
         self.queue_state.select(self.queue.pos());
         self.following_changed();
-        self.set_status(format!("В случайном порядке: {}", if on { "вкл" } else { "выкл" }));
+        self.set_status(format!(
+            "В случайном порядке: {}",
+            if on { "вкл" } else { "выкл" }
+        ));
     }
 
     pub fn set_repeat(&mut self, repeat: Repeat) {
         self.queue.set_repeat(repeat);
         self.following_changed();
-        let wave = if repeat == Repeat::All && self.queue.is_wave() { " · волна и так бесконечна" } else { "" };
+        let wave = if repeat == Repeat::All && self.queue.is_wave() {
+            " · волна и так бесконечна"
+        } else {
+            ""
+        };
         self.set_status(format!("Повтор: {}{wave}", repeat.name()));
     }
 
@@ -1930,16 +2336,58 @@ impl App {
                 Some(on) => if on { "вкл" } else { "выкл" }.to_string(),
                 None => "…".to_string(),
             },
-            Setting::PodcastAll => if self.podcast_all { "все записи" } else { "только выбранная" }.to_string(),
-            Setting::FinishTrack => if self.finish_track { "вкл" } else { "выкл" }.to_string(),
+            Setting::PodcastAll => if self.podcast_all {
+                "все записи"
+            } else {
+                "только выбранная"
+            }
+            .to_string(),
+            Setting::FinishTrack => if self.finish_track {
+                "вкл"
+            } else {
+                "выкл"
+            }
+            .to_string(),
             Setting::Repeat => self.queue.repeat().name().to_string(),
-            Setting::Api => if self.api.web { "сайт" } else { "мобильный" }.to_string(),
+            Setting::Api => if self.api.web {
+                "сайт"
+            } else {
+                "мобильный"
+            }
+            .to_string(),
             Setting::Art => self.art.name().to_string(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::Output => self.output.name().to_string(),
-            Setting::HideAccount => if self.hide_account { "вкл" } else { "выкл" }.to_string(),
-            Setting::AudioInfo => if self.show_audio_info { "вкл" } else { "выкл" }.to_string(),
-            Setting::RemainingTime => if self.remaining_time { "вкл" } else { "выкл" }.to_string(),
+            Setting::HideAccount => if self.hide_account {
+                "вкл"
+            } else {
+                "выкл"
+            }
+            .to_string(),
+            Setting::Ynison => if self.ynison.enabled {
+                "вкл"
+            } else {
+                "выкл"
+            }
+            .to_string(),
+            Setting::Autoplay => if self.ynison.enabled && self.ynison.autoplay {
+                "вкл"
+            } else {
+                "выкл"
+            }
+            .to_string(),
+            Setting::AudioInfo => if self.show_audio_info {
+                "вкл"
+            } else {
+                "выкл"
+            }
+            .to_string(),
+            Setting::RemainingTime => if self.remaining_time {
+                "вкл"
+            } else {
+                "выкл"
+            }
+            .to_string(),
             Setting::Lastfm if !lastfm::available() => "нет ключа".to_string(),
             Setting::Lastfm => match &self.lastfm {
                 Lastfm::Off => "выкл".to_string(),
@@ -1952,7 +2400,9 @@ impl App {
 
     /// Switches a settings row to the next (`d` > 0) or previous value, wrapping around.
     fn change_setting(&mut self, s: Setting, d: i32) {
-        let cycle = |cur: usize, len: usize| (cur as i64 + i64::from(d.signum())).rem_euclid(len as i64) as usize;
+        let cycle = |cur: usize, len: usize| {
+            (cur as i64 + i64::from(d.signum())).rem_euclid(len as i64) as usize
+        };
         match s {
             // The current (and already preloaded) track keeps its stream.
             Setting::Quality => self.quality = cycle(self.quality, QUALITIES.len()),
@@ -1962,9 +2412,18 @@ impl App {
                 // A value from the config may lie between the steps.
                 let cur = self.crossfade;
                 let next = if d > 0 {
-                    CROSSFADE_STEPS.iter().find(|&&s| s > cur).copied().unwrap_or(CROSSFADE_STEPS[0])
+                    CROSSFADE_STEPS
+                        .iter()
+                        .find(|&&s| s > cur)
+                        .copied()
+                        .unwrap_or(CROSSFADE_STEPS[0])
                 } else {
-                    CROSSFADE_STEPS.iter().rev().find(|&&s| s < cur).copied().unwrap_or(CROSSFADE_STEPS[CROSSFADE_STEPS.len() - 1])
+                    CROSSFADE_STEPS
+                        .iter()
+                        .rev()
+                        .find(|&&s| s < cur)
+                        .copied()
+                        .unwrap_or(CROSSFADE_STEPS[CROSSFADE_STEPS.len() - 1])
                 };
                 self.set_crossfade(next);
             }
@@ -1980,13 +2439,23 @@ impl App {
             Setting::PodcastAll => self.podcast_all = !self.podcast_all,
             Setting::FinishTrack => self.finish_track = !self.finish_track,
             Setting::Repeat => {
-                let i = Repeat::ALL.iter().position(|r| *r == self.queue.repeat()).unwrap_or(0);
+                let i = Repeat::ALL
+                    .iter()
+                    .position(|r| *r == self.queue.repeat())
+                    .unwrap_or(0);
                 self.set_repeat(Repeat::ALL[cycle(i, Repeat::ALL.len())]);
             }
             Setting::Api => {
                 self.api.web = !self.api.web;
                 self.reload_all();
-                self.set_status(format!("API: {} · списки обновляются…", if self.api.web { "сайт" } else { "мобильный" }));
+                self.set_status(format!(
+                    "API: {} · списки обновляются…",
+                    if self.api.web {
+                        "сайт"
+                    } else {
+                        "мобильный"
+                    }
+                ));
             }
             Setting::Art => {
                 let i = Art::ALL.iter().position(|a| *a == self.art).unwrap_or(0);
@@ -1994,14 +2463,24 @@ impl App {
             }
             Setting::Icons => self.set_icons(!self.icons),
             Setting::Output => {
-                let i = Output::ALL.iter().position(|o| *o == self.output).unwrap_or(0);
+                let i = Output::ALL
+                    .iter()
+                    .position(|o| *o == self.output)
+                    .unwrap_or(0);
                 self.output = Output::ALL[cycle(i, Output::ALL.len())];
                 self.play(PlayerCmd::Output(self.output.id()));
             }
             Setting::HideAccount => self.hide_account = !self.hide_account,
             Setting::RemainingTime => self.remaining_time = !self.remaining_time,
+            Setting::Ynison => self.set_ynison(!self.ynison.enabled),
+            Setting::Autoplay if self.ynison.enabled => {
+                self.ynison.autoplay = !self.ynison.autoplay
+            }
+            Setting::Autoplay => {}
             Setting::AudioInfo => self.show_audio_info = !self.show_audio_info,
-            Setting::Lastfm if !lastfm::available() => self.set_status("В этой сборке нет ключа Last.fm"),
+            Setting::Lastfm if !lastfm::available() => {
+                self.set_status("В этой сборке нет ключа Last.fm")
+            }
             Setting::Lastfm => match self.lastfm {
                 Lastfm::Off => self.connect_lastfm(),
                 Lastfm::Connecting { .. } => {
@@ -2025,9 +2504,18 @@ impl App {
 
     fn selected_track(&self) -> Option<&Track> {
         match self.tab {
-            Tab::Liked => self.liked_state.selected().and_then(|i| self.likes.tracks().get(i)),
-            Tab::Search => self.search_state.selected().and_then(|i| self.search.results().get(i)),
-            Tab::Wave => self.queue_state.selected().and_then(|i| self.queue.tracks().get(i)),
+            Tab::Liked => self
+                .liked_state
+                .selected()
+                .and_then(|i| self.likes.tracks().get(i)),
+            Tab::Search => self
+                .search_state
+                .selected()
+                .and_then(|i| self.search.results().get(i)),
+            Tab::Wave => self
+                .queue_state
+                .selected()
+                .and_then(|i| self.queue.tracks().get(i)),
             Tab::Playlists => {
                 let open = self.playlists.open.as_ref()?;
                 self.open_state.selected().and_then(|i| open.tracks.get(i))
@@ -2039,48 +2527,77 @@ impl App {
 
     fn move_sel(&mut self, d: i32) {
         let step = |cur: Option<usize>, len: usize| -> Option<usize> {
-            (len > 0).then(|| (cur.unwrap_or(0) as i64 + i64::from(d)).clamp(0, len as i64 - 1) as usize)
+            (len > 0)
+                .then(|| (cur.unwrap_or(0) as i64 + i64::from(d)).clamp(0, len as i64 - 1) as usize)
         };
         match self.tab {
             Tab::Podcasts => self.move_podcast_selection(d),
-            Tab::Wave => self.queue_state.select(step(self.queue_state.selected(), self.queue.len())),
-            Tab::Liked => self.liked_state.select(step(self.liked_state.selected(), self.likes.tracks().len())),
+            Tab::Wave => self
+                .queue_state
+                .select(step(self.queue_state.selected(), self.queue.len())),
+            Tab::Liked => self
+                .liked_state
+                .select(step(self.liked_state.selected(), self.likes.tracks().len())),
             Tab::Search => {
-                self.search_state.select(step(self.search_state.selected(), self.search.results().len()));
+                self.search_state.select(step(
+                    self.search_state.selected(),
+                    self.search.results().len(),
+                ));
                 self.maybe_load_more_search();
             }
             Tab::Playlists => match &self.playlists.open {
-                Some(open) => self.open_state.select(step(self.open_state.selected(), open.tracks.len())),
-                None => self.playlists_state.select(step(self.playlists_state.selected(), self.playlists.list().len())),
+                Some(open) => self
+                    .open_state
+                    .select(step(self.open_state.selected(), open.tracks.len())),
+                None => self.playlists_state.select(step(
+                    self.playlists_state.selected(),
+                    self.playlists.list().len(),
+                )),
             },
             Tab::Stations => {
-                self.stations_state.select(step(self.stations_state.selected(), self.stations.len()));
+                self.stations_state
+                    .select(step(self.stations_state.selected(), self.stations.len()));
                 self.fix_station_selection(if d >= 0 { 1 } else { -1 });
             }
         }
     }
 
     fn activate(&mut self) {
-        if self.tab != Tab::Podcasts && let Some(track) = self.selected_track().filter(|t| t.is_podcast()).cloned() {
+        if self.tab != Tab::Podcasts
+            && let Some(track) = self.selected_track().filter(|t| t.is_podcast()).cloned()
+        {
             self.request_podcast_play(&track.id, false);
             return;
         }
         match self.tab {
             Tab::Podcasts => self.activate_podcast(false),
             Tab::Wave => {
-                if let Some(i) = self.queue_state.selected().filter(|&i| i < self.queue.len()) {
+                if let Some(i) = self
+                    .queue_state
+                    .selected()
+                    .filter(|&i| i < self.queue.len())
+                {
                     self.report_end(End::Other);
                     self.play_index(i);
                 }
             }
             Tab::Stations => {
-                if let Some(StationRow::Station(s)) = self.stations_state.selected().and_then(|i| self.stations.get(i)) {
+                if let Some(StationRow::Station(s)) = self
+                    .stations_state
+                    .selected()
+                    .and_then(|i| self.stations.get(i))
+                {
                     self.start_wave(s.clone());
                 }
             }
             Tab::Liked => {
                 if let Some(i) = self.liked_state.selected() {
-                    self.play_list("Мне нравится", self.liked_context(), self.likes.tracks().to_vec(), i);
+                    self.play_list(
+                        "Мне нравится",
+                        self.liked_context(),
+                        self.likes.tracks().to_vec(),
+                        i,
+                    );
                 }
             }
             Tab::Search => {
@@ -2096,11 +2613,15 @@ impl App {
     // ------------------------------------------------------------ playlists
 
     fn selected_playlist(&self) -> Option<&Playlist> {
-        self.playlists_state.selected().and_then(|i| self.playlists.list().get(i))
+        self.playlists_state
+            .selected()
+            .and_then(|i| self.playlists.list().get(i))
     }
 
     fn open_selected_playlist(&mut self) {
-        let Some(pl) = self.selected_playlist().cloned() else { return };
+        let Some(pl) = self.selected_playlist().cloned() else {
+            return;
+        };
         self.playlists.open(pl);
         self.open_state = TableState::default();
         self.reload_open_playlist();
@@ -2114,8 +2635,14 @@ impl App {
 
     /// Plays the opened playlist from the selected track (or all of it shuffled).
     fn play_open(&mut self, shuffle: bool) {
-        let Some(open) = &self.playlists.open else { return };
-        let (key, name, tracks) = (open.pl.key(), format!("Плейлист: {}", open.pl.title), open.tracks.clone());
+        let Some(open) = &self.playlists.open else {
+            return;
+        };
+        let (key, name, tracks) = (
+            open.pl.key(),
+            format!("Плейлист: {}", open.pl.title),
+            open.tracks.clone(),
+        );
         if tracks.is_empty() {
             return;
         }
@@ -2152,21 +2679,39 @@ impl App {
             self.set_status("Плейлисты ещё загружаются…");
             return;
         }
-        self.modal = Some(Modal::AddTo { track, choices, sel: 0 });
+        self.modal = Some(Modal::AddTo {
+            track,
+            choices,
+            sel: 0,
+        });
     }
 
     fn ask_remove_from_playlist(&mut self) {
-        let Some(open) = &self.playlists.open else { return };
-        let Some(index) = self.open_state.selected().filter(|&i| i < open.tracks.len()) else { return };
+        let Some(open) = &self.playlists.open else {
+            return;
+        };
+        let Some(index) = self
+            .open_state
+            .selected()
+            .filter(|&i| i < open.tracks.len())
+        else {
+            return;
+        };
         if open.pl.owner != self.api.uid {
             self.set_status("Можно менять только свои плейлисты");
             return;
         }
-        self.modal = Some(Modal::ConfirmRemove { pl: open.pl.clone(), index, track: open.tracks[index].clone() });
+        self.modal = Some(Modal::ConfirmRemove {
+            pl: open.pl.clone(),
+            index,
+            track: open.tracks[index].clone(),
+        });
     }
 
     fn ask_delete_playlist(&mut self) {
-        let Some(pl) = self.selected_playlist().cloned() else { return };
+        let Some(pl) = self.selected_playlist().cloned() else {
+            return;
+        };
         if pl.owner != self.api.uid {
             self.set_status("Можно менять только свои плейлисты");
             return;
@@ -2175,7 +2720,9 @@ impl App {
     }
 
     fn ask_rename_playlist(&mut self) {
-        let Some(pl) = self.target_playlist() else { return };
+        let Some(pl) = self.target_playlist() else {
+            return;
+        };
         if pl.owner != self.api.uid {
             self.set_status("Можно менять только свои плейлисты");
             return;
@@ -2185,7 +2732,9 @@ impl App {
     }
 
     fn on_modal_key(&mut self, press: Press) {
-        let Some(modal) = self.modal.take() else { return };
+        let Some(modal) = self.modal.take() else {
+            return;
+        };
         let key = press.typed;
         // Text input gets characters as typed; elsewhere keys go by the physical key.
         let code = match &modal {
@@ -2194,26 +2743,47 @@ impl App {
         };
         let clear = is_ctrl(&press.hotkey, 'u');
         match modal {
-            Modal::AddTo { track, choices, mut sel } => match code {
+            Modal::AddTo {
+                track,
+                choices,
+                mut sel,
+            } => match code {
                 KeyCode::Esc | KeyCode::Char('q') => {}
                 KeyCode::Down | KeyCode::Char('j') => {
                     // The row after the playlists is «+ Новый плейлист».
                     sel = (sel + 1).min(choices.len());
-                    self.modal = Some(Modal::AddTo { track, choices, sel });
+                    self.modal = Some(Modal::AddTo {
+                        track,
+                        choices,
+                        sel,
+                    });
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     sel = sel.saturating_sub(1);
-                    self.modal = Some(Modal::AddTo { track, choices, sel });
+                    self.modal = Some(Modal::AddTo {
+                        track,
+                        choices,
+                        sel,
+                    });
                 }
                 KeyCode::Enter if sel == choices.len() => {
-                    self.modal = Some(Modal::NewPlaylist { input: String::new(), track: Some(track) });
+                    self.modal = Some(Modal::NewPlaylist {
+                        input: String::new(),
+                        track: Some(track),
+                    });
                 }
                 KeyCode::Enter => {
                     let pl = choices[sel].clone();
                     self.set_status(format!("Добавление в «{}»…", pl.title));
                     self.task(Task::AddToPlaylist { pl, track });
                 }
-                _ => self.modal = Some(Modal::AddTo { track, choices, sel }),
+                _ => {
+                    self.modal = Some(Modal::AddTo {
+                        track,
+                        choices,
+                        sel,
+                    })
+                }
             },
             Modal::ConfirmRemove { pl, index, track } => {
                 if code == KeyCode::Enter {
@@ -2231,7 +2801,9 @@ impl App {
                 let row = Setting::ALL[sel];
                 match code {
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => return,
-                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(Setting::ALL.len() - 1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        sel = (sel + 1).min(Setting::ALL.len() - 1)
+                    }
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Left | KeyCode::Char('h') => self.change_setting(row, -1),
                     KeyCode::Right | KeyCode::Char('l') => self.change_setting(row, 1),
@@ -2256,7 +2828,9 @@ impl App {
                     self.logout = true;
                     self.quit = true;
                 } else {
-                    self.modal = Some(Modal::Settings { sel: Setting::Logout.index() });
+                    self.modal = Some(Modal::Settings {
+                        sel: Setting::Logout.index(),
+                    });
                 }
             }
             Modal::Rename { pl, mut input } => match code {
@@ -2272,7 +2846,12 @@ impl App {
                     input.pop();
                     self.modal = Some(Modal::Rename { pl, input });
                 }
-                _ if clear => self.modal = Some(Modal::Rename { pl, input: String::new() }),
+                _ if clear => {
+                    self.modal = Some(Modal::Rename {
+                        pl,
+                        input: String::new(),
+                    })
+                }
                 KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::Rename { pl, input });
@@ -2294,7 +2873,12 @@ impl App {
                     input.pop();
                     self.modal = Some(Modal::NewPlaylist { input, track });
                 }
-                _ if clear => self.modal = Some(Modal::NewPlaylist { input: String::new(), track }),
+                _ if clear => {
+                    self.modal = Some(Modal::NewPlaylist {
+                        input: String::new(),
+                        track,
+                    })
+                }
                 KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::NewPlaylist { input, track });
@@ -2308,7 +2892,11 @@ impl App {
                     input.pop();
                     self.modal = Some(Modal::OpenLink { input });
                 }
-                _ if clear => self.modal = Some(Modal::OpenLink { input: String::new() }),
+                _ if clear => {
+                    self.modal = Some(Modal::OpenLink {
+                        input: String::new(),
+                    })
+                }
                 KeyCode::Char(c) if is_typed(&key) => {
                     input.push(c);
                     self.modal = Some(Modal::OpenLink { input });
@@ -2320,12 +2908,21 @@ impl App {
 
     /// Loads the selected playlist and plays it (in order or shuffled).
     fn play_playlist(&mut self, shuffle: bool) {
-        let Some(pl) = self.playlists_state.selected().and_then(|i| self.playlists.list().get(i)).cloned() else {
+        let Some(pl) = self
+            .playlists_state
+            .selected()
+            .and_then(|i| self.playlists.list().get(i))
+            .cloned()
+        else {
             return;
         };
         self.set_status(format!("Загрузка плейлиста «{}»…", pl.title));
         let intent = self.new_intent();
-        self.task(Task::PlayPlaylist { intent, pl, shuffle });
+        self.task(Task::PlayPlaylist {
+            intent,
+            pl,
+            shuffle,
+        });
     }
 
     /// Copies the link to the selected (or current) track to the clipboard.
@@ -2343,7 +2940,9 @@ impl App {
     /// Asks for a link; a Yandex Music link from the clipboard is filled in once read
     /// (clipboard tools may take a while, so the window opens at once).
     fn ask_link(&mut self) {
-        self.modal = Some(Modal::OpenLink { input: String::new() });
+        self.modal = Some(Modal::OpenLink {
+            input: String::new(),
+        });
         self.task(Task::ReadClipboard);
     }
 
@@ -2364,7 +2963,9 @@ impl App {
             self.set_status("Нет выбранного трека");
             return;
         };
-        if !t.is_music() { return; }
+        if !t.is_music() {
+            return;
+        }
         let Some((id, name)) = t.main_artist.clone() else {
             self.set_status("У трека не указан исполнитель");
             return;
@@ -2380,7 +2981,9 @@ impl App {
             self.set_status("Нет выбранного трека");
             return;
         };
-        if !t.is_music() { return; }
+        if !t.is_music() {
+            return;
+        }
         let Some(id) = t.album_id.clone() else {
             self.set_status("У трека не указан альбом");
             return;
@@ -2388,14 +2991,22 @@ impl App {
         let fallback = t.album.clone();
         self.set_status(format!("Загрузка альбома: {fallback}…"));
         let intent = self.new_intent();
-        self.task(Task::Album { intent, id, fallback });
+        self.task(Task::Album {
+            intent,
+            id,
+            fallback,
+        });
     }
 
     fn shuffle_play(&mut self) {
         if self.tab == Tab::Search {
             self.play_search("Поиск", self.search.results().to_vec(), 0, true);
         } else {
-            self.play_shuffled("Мне нравится", self.liked_context(), self.likes.tracks().to_vec());
+            self.play_shuffled(
+                "Мне нравится",
+                self.liked_context(),
+                self.likes.tracks().to_vec(),
+            );
         }
     }
 
@@ -2418,12 +3029,18 @@ fn length(t: &Track) -> Option<f64> {
 /// An event of the wave session `w`, for the track batch `batch` (the session's latest if none).
 fn feedback(w: &Wave, event: Value, batch: Option<String>) -> Task {
     let batch = batch.unwrap_or_else(|| w.batch.clone());
-    Task::WaveFeedback { station: w.station.clone(), session: w.session.clone(), batch, event }
+    Task::WaveFeedback {
+        station: w.station.clone(),
+        session: w.session.clone(),
+        batch,
+        event,
+    }
 }
 
 /// A key that types its character into a text field (not a Ctrl/Alt shortcut).
 fn is_typed(key: &KeyEvent) -> bool {
-    !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    !key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
 }
 
 /// Ctrl + the key `c` (by the physical key).
@@ -2440,25 +3057,41 @@ mod tests {
         use ratatui::crossterm::event::KeyEvent;
         let mut app = App::for_test();
         let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
-        let pl = |k: &str, owner: &str| Playlist { owner: owner.into(), kind: k.into(), title: format!("P{k}"), track_count: 0 };
-        app.playlists.set_loaded(vec![pl("1", "1"), pl("2", "999"), pl("3", "1")]);
-        let t = Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: "7".into(),
-        album_id: Some("8".into()),
-        title: "T".into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
+        let pl = |k: &str, owner: &str| Playlist {
+            owner: owner.into(),
+            kind: k.into(),
+            title: format!("P{k}"),
+            track_count: 0,
+        };
+        app.playlists
+            .set_loaded(vec![pl("1", "1"), pl("2", "999"), pl("3", "1")]);
+        let t = Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: "7".into(),
+            album_id: Some("8".into()),
+            title: "T".into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
         app.queue.replace(Source::None, vec![t.clone()]);
         app.queue_state.select(Some(0));
 
         // `a` (and `ф`) offers only own playlists; selection stays in bounds; Esc closes.
         app.on_key(key(KeyCode::Char('ф')));
-        let Some(Modal::AddTo { choices, .. }) = &app.modal else { panic!("no picker") };
-        assert_eq!(choices.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(), ["1", "3"]);
+        let Some(Modal::AddTo { choices, .. }) = &app.modal else {
+            panic!("no picker")
+        };
+        assert_eq!(
+            choices.iter().map(|p| p.kind.as_str()).collect::<Vec<_>>(),
+            ["1", "3"]
+        );
         for _ in 0..5 {
             app.on_key(key(KeyCode::Char('j')));
         }
@@ -2477,7 +3110,9 @@ mod tests {
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
-        assert!(matches!(&app.modal, Some(Modal::NewPlaylist { track: Some(t), .. }) if t.id == "7"));
+        assert!(
+            matches!(&app.modal, Some(Modal::NewPlaylist { track: Some(t), .. }) if t.id == "7")
+        );
         app.on_key(key(KeyCode::Enter));
         assert!(app.modal.is_some() && app.take_tasks().is_empty());
         for c in "Новый".chars() {
@@ -2485,12 +3120,16 @@ mod tests {
         }
         app.on_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
-        assert!(matches!(&app.take_tasks()[..], [Task::CreatePlaylist { title, track: Some(_) }] if title == "Новый"));
+        assert!(
+            matches!(&app.take_tasks()[..], [Task::CreatePlaylist { title, track: Some(_) }] if title == "Новый")
+        );
         // `N` (by the physical key, also as `Т`): a playlist without a track.
         app.on_key(key(KeyCode::Char('Т')));
         app.on_paste("Ещё");
         app.on_key(key(KeyCode::Enter));
-        assert!(matches!(&app.take_tasks()[..], [Task::CreatePlaylist { title, track: None }] if title == "Ещё"));
+        assert!(
+            matches!(&app.take_tasks()[..], [Task::CreatePlaylist { title, track: None }] if title == "Ещё")
+        );
 
         // Rename: Russian letters are typed as is (no layout mapping), Esc cancels.
         app.tab = Tab::Playlists;
@@ -2502,7 +3141,9 @@ mod tests {
         // Ctrl/Alt shortcuts do not type their letter.
         app.on_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
         app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-        let Some(Modal::Rename { input, .. }) = &app.modal else { panic!("no rename") };
+        let Some(Modal::Rename { input, .. }) = &app.modal else {
+            panic!("no rename")
+        };
         assert_eq!(input, "P1да");
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
@@ -2513,21 +3154,33 @@ mod tests {
         assert!(app.modal.is_none());
 
         // A link to another site is rejected without any request; text is typed as is.
-        app.modal = Some(Modal::OpenLink { input: String::new() });
+        app.modal = Some(Modal::OpenLink {
+            input: String::new(),
+        });
         for c in "https://evil.com/track/1".chars() {
             app.on_key(key(KeyCode::Char(c)));
         }
-        let Some(Modal::OpenLink { input }) = &app.modal else { panic!("no link input") };
+        let Some(Modal::OpenLink { input }) = &app.modal else {
+            panic!("no link input")
+        };
         assert_eq!(input, "https://evil.com/track/1");
         app.on_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert_eq!(app.status, "Это не ссылка на Яндекс Музыку");
 
         // `x` asks for confirmation; any key other than Enter cancels.
-        app.playlists.open = Some(crate::library::OpenPlaylist { pl: app.playlists.list()[0].clone(), tracks: vec![t], loading: false, req: 0 });
+        app.playlists.open = Some(crate::library::OpenPlaylist {
+            pl: app.playlists.list()[0].clone(),
+            tracks: vec![t],
+            loading: false,
+            req: 0,
+        });
         app.open_state.select(Some(0));
         app.on_key(key(KeyCode::Char('x')));
-        assert!(matches!(app.modal, Some(Modal::ConfirmRemove { index: 0, .. })));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::ConfirmRemove { index: 0, .. })
+        ));
         app.on_key(key(KeyCode::Char('n')));
         assert!(app.modal.is_none());
         // Esc leaves the opened playlist.
@@ -2564,7 +3217,10 @@ mod tests {
         assert_eq!(app.crossfade, 5);
         app.crossfade = 7;
         app.on_key(key(KeyCode::Left));
-        assert_eq!(app.crossfade, 5, "a config value between steps snaps to the nearest one");
+        assert_eq!(
+            app.crossfade, 5,
+            "a config value between steps snaps to the nearest one"
+        );
         // «Вывод звука»: see `output_and_account_settings`.
         app.on_key(key(KeyCode::Char('j')));
 
@@ -2596,15 +3252,24 @@ mod tests {
         app.on_msg(Msg::LessAi(Ok(false)));
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.less_ai, Some(true));
-        app.on_msg(Msg::LessAiSet { on: true, result: Err("нет сети".into()) });
+        app.on_msg(Msg::LessAiSet {
+            on: true,
+            result: Err("нет сети".into()),
+        });
         assert_eq!(app.less_ai, Some(false));
         app.on_key(key(KeyCode::Enter));
-        app.on_msg(Msg::LessAiSet { on: true, result: Ok(()) });
+        app.on_msg(Msg::LessAiSet {
+            on: true,
+            result: Ok(()),
+        });
         assert_eq!(app.less_ai, Some(true));
 
         // API: switched at once, both ways.
         app.on_key(key(KeyCode::Char('j')));
-        assert_eq!(app.setting_value(Setting::Api).as_deref(), Some("мобильный"));
+        assert_eq!(
+            app.setting_value(Setting::Api).as_deref(),
+            Some("мобильный")
+        );
         app.on_key(key(KeyCode::Right));
         assert!(app.api.web);
         assert_eq!(app.setting_value(Setting::Api).as_deref(), Some("сайт"));
@@ -2622,7 +3287,10 @@ mod tests {
         app.load_cover(Some("http://x/cover".into()));
         assert!(app.covers_loading.is_empty());
         app.on_key(key(KeyCode::Right));
-        assert_eq!((app.art, app.take_player()), (Art::None, vec!["spectrum false".to_string()]));
+        assert_eq!(
+            (app.art, app.take_player()),
+            (Art::None, vec!["spectrum false".to_string()])
+        );
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.art, Art::Cover);
         app.load_cover(Some("http://x/cover".into()));
@@ -2647,10 +3315,16 @@ mod tests {
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(app.show_audio_info);
-        assert_eq!(app.setting_value(Setting::AudioInfo).as_deref(), Some("вкл"));
+        assert_eq!(
+            app.setting_value(Setting::AudioInfo).as_deref(),
+            Some("вкл")
+        );
         app.on_key(key(KeyCode::Left));
         assert!(!app.show_audio_info);
         // «Скрыть аккаунт».
+        app.on_key(key(KeyCode::Char('j')));
+        // Skip the two Ynison settings; their behavior is covered separately.
+        app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Char('j')));
         // «Last.fm»: without the program's key nothing is asked for (see `lastfm_scrobbles`).
         app.on_key(key(KeyCode::Char('j')));
@@ -2658,7 +3332,10 @@ mod tests {
             app.take_tasks();
             app.on_key(key(KeyCode::Enter));
             assert!(matches!(app.lastfm, Lastfm::Off) && app.take_tasks().is_empty());
-            assert_eq!(app.setting_value(Setting::Lastfm).as_deref(), Some("нет ключа"));
+            assert_eq!(
+                app.setting_value(Setting::Lastfm).as_deref(),
+                Some("нет ключа")
+            );
         }
 
         // «О программе» opens from the settings and returns there.
@@ -2667,14 +3344,18 @@ mod tests {
         assert!(app.show_about && app.modal.is_none());
         app.on_key(key(KeyCode::Char('x')));
         assert!(!app.show_about);
-        assert!(matches!(app.modal, Some(Modal::Settings { sel }) if sel == Setting::About.index()));
+        assert!(
+            matches!(app.modal, Some(Modal::Settings { sel }) if sel == Setting::About.index())
+        );
 
         // Logout asks first; Esc goes back to the settings.
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.modal, Some(Modal::ConfirmLogout)));
         app.on_key(key(KeyCode::Esc));
-        assert!(matches!(app.modal, Some(Modal::Settings { sel }) if sel == Setting::Logout.index()));
+        assert!(
+            matches!(app.modal, Some(Modal::Settings { sel }) if sel == Setting::Logout.index())
+        );
         assert!(!app.logout && !app.quit);
         app.on_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
@@ -2694,18 +3375,31 @@ mod tests {
         use super::*;
         let mut app = App::for_test();
         app.picker = Some(Picker::from_fontsize((8, 16)));
-        let t = |id: &str, cover: Option<&str>| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: cover.map(String::from),
-        batch: None, };
-        app.queue.replace(Source::Wave, vec![t("a", Some("http://x/a")), t("b", None), t("c", Some("http://x/c"))]);
-        app.covers.push(("http://x/a".into(), image::DynamicImage::new_rgb8(2, 2)));
+        let t = |id: &str, cover: Option<&str>| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: cover.map(String::from),
+            batch: None,
+        };
+        app.queue.replace(
+            Source::Wave,
+            vec![
+                t("a", Some("http://x/a")),
+                t("b", None),
+                t("c", Some("http://x/c")),
+            ],
+        );
+        app.covers
+            .push(("http://x/a".into(), image::DynamicImage::new_rgb8(2, 2)));
         app.queue.select(0);
         assert!(app.current_cover().is_some());
         app.queue.select(1);
@@ -2727,18 +3421,31 @@ mod tests {
         use ratatui::crossterm::event::KeyEvent;
         let key = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
         let mut app = App::for_test();
-        app.modal = Some(Modal::Settings { sel: Setting::Output.index() });
+        app.modal = Some(Modal::Settings {
+            sel: Setting::Output.index(),
+        });
         app.on_key(key(KeyCode::Right));
-        assert_eq!((app.output, app.take_player()), (Output::Pulse, vec!["output pulse".to_string()]));
+        assert_eq!(
+            (app.output, app.take_player()),
+            (Output::Pulse, vec!["output pulse".to_string()])
+        );
         app.on_key(key(KeyCode::Left));
         app.on_key(key(KeyCode::Left));
         let last = *Output::ALL.last().unwrap();
         assert_eq!(app.output, last);
-        assert_eq!(app.take_player().last().map(String::as_str), Some(format!("output {}", last.id().unwrap()).as_str()));
-        app.on_msg(Msg::Player(PlayerEvent::OutputFailed { kept: Some("pulse".into()), error: "занято".into() }));
+        assert_eq!(
+            app.take_player().last().map(String::as_str),
+            Some(format!("output {}", last.id().unwrap()).as_str())
+        );
+        app.on_msg(Msg::Player(PlayerEvent::OutputFailed {
+            kept: Some("pulse".into()),
+            error: "занято".into(),
+        }));
         assert_eq!(app.output, Output::Pulse);
         assert!(app.status_error);
-        app.modal = Some(Modal::Settings { sel: Setting::HideAccount.index() });
+        app.modal = Some(Modal::Settings {
+            sel: Setting::HideAccount.index(),
+        });
         app.on_key(key(KeyCode::Enter));
         assert!(app.hide_account);
         assert_eq!(Output::from_id(Some("jack")), Output::Auto);
@@ -2748,17 +3455,28 @@ mod tests {
     fn finish_track() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
-        let ids = |app: &App| app.queue.tracks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let ids = |app: &App| {
+            app.queue
+                .tracks()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>()
+        };
         app.finish_track = true;
         app.queue.replace(Source::Wave, vec![t("a"), t("b")]);
         app.wave = Some(Wave {
@@ -2772,20 +3490,50 @@ mod tests {
         });
         app.begin_track(0, false);
         app.loading_track = false;
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation,
+            idx: 1,
+            id: "b".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/b".into(),
+                ..Default::default()
+            }),
+        });
         app.take_player();
 
         // The playing track stays and comes first; the new list starts from the chosen track,
         // without a second copy of the playing one; the player drops the preloaded old next track.
         let generation = app.generation;
-        app.play_list("Новый", PlayContext::default(), vec![t("x"), t("y"), t("a"), t("z")], 1);
+        app.play_list(
+            "Новый",
+            PlayContext::default(),
+            vec![t("x"), t("y"), t("a"), t("z")],
+            1,
+        );
         assert_eq!(ids(&app), ["a", "y", "z"]);
-        assert_eq!((app.queue.pos(), app.source_name()), (Some(0), "Новый".to_string()));
+        assert_eq!(
+            (app.queue.pos(), app.source_name()),
+            (Some(0), "Новый".to_string())
+        );
         assert!(app.wave.is_none() && app.preload.is_none());
         assert_eq!(app.take_player(), ["clear"]);
-        app.on_msg(Msg::Preload { generation, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
-        assert!(app.take_player().is_empty(), "late preload of the old list is dropped");
-        assert!(app.queue.on_carried() && app.carried_wave.is_some(), "its end is reported to the old wave");
+        app.on_msg(Msg::Preload {
+            generation,
+            idx: 1,
+            id: "b".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/b".into(),
+                ..Default::default()
+            }),
+        });
+        assert!(
+            app.take_player().is_empty(),
+            "late preload of the old list is dropped"
+        );
+        assert!(
+            app.queue.on_carried() && app.carried_wave.is_some(),
+            "its end is reported to the old wave"
+        );
 
         // Another list before the track ends replaces the waiting one; the track keeps its wave.
         app.play_list("Ещё", PlayContext::default(), vec![t("p"), t("q")], 0);
@@ -2800,7 +3548,10 @@ mod tests {
         // Paused: switched at once.
         app.paused = true;
         app.play_list("Сразу", PlayContext::default(), vec![t("m"), t("n")], 1);
-        assert_eq!((ids(&app), app.queue.pos()), (vec!["m".to_string(), "n".to_string()], Some(1)));
+        assert_eq!(
+            (ids(&app), app.queue.pos()),
+            (vec!["m".to_string(), "n".to_string()], Some(1))
+        );
         assert!(!app.queue.on_carried());
         app.paused = false;
         app.loading_track = false;
@@ -2808,35 +3559,67 @@ mod tests {
         // Off: switched at once.
         app.finish_track = false;
         app.play_list("Выкл", PlayContext::default(), vec![t("k")], 0);
-        assert_eq!((ids(&app), app.queue.pos()), (vec!["k".to_string()], Some(0)));
+        assert_eq!(
+            (ids(&app), app.queue.pos()),
+            (vec!["k".to_string()], Some(0))
+        );
 
         // Nothing plays after the queue ran out: switched at once.
         app.finish_track = true;
         app.loading_track = false;
         app.next(End::Eof);
         app.play_list("Снова", PlayContext::default(), vec![t("u"), t("v")], 0);
-        assert_eq!((ids(&app), app.queue.pos()), (vec!["u".to_string(), "v".to_string()], Some(0)));
+        assert_eq!(
+            (ids(&app), app.queue.pos()),
+            (vec!["u".to_string(), "v".to_string()], Some(0))
+        );
     }
 
     #[test]
     fn audio_info_follows_current_stream() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000})).unwrap();
-        let info = |codec: &str, bitrate| crate::api::FileInfo {
-            url: "http://x/audio".into(), codec: codec.into(), bitrate, ..Default::default()
+        let t = |id: &str| {
+            Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000})).unwrap()
         };
-        app.play_list("test", PlayContext::new("playlist", "1:3"), vec![t("a"), t("b"), t("c")], 0);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(info("aac-mp4", 256)) });
-        app.on_msg(Msg::Url { generation: app.generation - 1, result: Ok(info("mp3", 192)) });
+        let info = |codec: &str, bitrate| crate::api::FileInfo {
+            url: "http://x/audio".into(),
+            codec: codec.into(),
+            bitrate,
+            ..Default::default()
+        };
+        app.play_list(
+            "test",
+            PlayContext::new("playlist", "1:3"),
+            vec![t("a"), t("b"), t("c")],
+            0,
+        );
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(info("aac-mp4", 256)),
+        });
+        app.on_msg(Msg::Url {
+            generation: app.generation - 1,
+            result: Ok(info("mp3", 192)),
+        });
         assert_eq!(app.audio_info.as_ref().unwrap().codec, "aac-mp4");
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok(info("flac-mp4", 900)) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation,
+            idx: 1,
+            id: "b".into(),
+            result: Ok(info("flac-mp4", 900)),
+        });
         assert_eq!(app.audio_info.as_ref().unwrap().bitrate, 256);
         assert!(app.advance_preloaded(End::Eof, true));
         assert_eq!(app.audio_info.as_ref().unwrap().codec, "flac-mp4");
         app.play_index(2);
         assert!(app.audio_info.is_none());
-        app.on_msg(Msg::Preload { generation: app.generation - 1, idx: 1, id: "b".into(), result: Ok(info("mp3", 192)) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation - 1,
+            idx: 1,
+            id: "b".into(),
+            result: Ok(info("mp3", 192)),
+        });
         assert!(app.audio_info.is_none() && app.preload_audio_info.is_none());
     }
 
@@ -2849,10 +3632,31 @@ mod tests {
         let mut app = App::for_test();
         app.start();
         let started: Vec<_> = app.take_tasks();
-        assert!(matches!(started[..], [Task::Liked, Task::Stations, Task::Playlists { .. }, Task::LessAi]), "{started:?}");
+        assert!(
+            matches!(
+                started[..],
+                [
+                    Task::Liked,
+                    Task::Stations,
+                    Task::Playlists { .. },
+                    Task::LessAi
+                ]
+            ),
+            "{started:?}"
+        );
 
-        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
-        app.play_list("test", PlayContext::new("playlist", "1:3"), vec![t("1"), t("2")], 0);
+        let t = |id: &str| {
+            Track::from_json(
+                &json!({"id": id, "title": id, "durationMs": 200_000, "available": true}),
+            )
+            .unwrap()
+        };
+        app.play_list(
+            "test",
+            PlayContext::new("playlist", "1:3"),
+            vec![t("1"), t("2")],
+            0,
+        );
         let tasks = app.take_tasks();
         let generation = app.generation;
         assert!(
@@ -2865,7 +3669,10 @@ mod tests {
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
         let tasks = app.take_tasks();
-        assert!(matches!(&tasks[..], [Task::Preload { idx: 1, track, .. }] if track.id == "2"), "{tasks:?}");
+        assert!(
+            matches!(&tasks[..], [Task::Preload { idx: 1, track, .. }] if track.id == "2"),
+            "{tasks:?}"
+        );
 
         // A dislike in a wave: the server learns it twice (the dislike and the wave event), and
         // the next track is asked for.
@@ -2883,13 +3690,28 @@ mod tests {
         app.take_tasks();
         app.on_key(KeyCode::Char('d'));
         let tasks = app.take_tasks();
-        assert!(tasks.iter().any(|t| matches!(t, Task::Dislike(track) if track.id == "w1")), "{tasks:?}");
+        assert!(
+            tasks
+                .iter()
+                .any(|t| matches!(t, Task::Dislike(track) if track.id == "w1")),
+            "{tasks:?}"
+        );
         let events: Vec<&str> = tasks
             .iter()
-            .filter_map(|t| if let Task::WaveFeedback { event, .. } = t { event["type"].as_str() } else { None })
+            .filter_map(|t| {
+                if let Task::WaveFeedback { event, .. } = t {
+                    event["type"].as_str()
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(events, ["dislike", "skip", "trackStarted"]);
-        assert!(tasks.iter().any(|t| matches!(t, Task::TrackUrl { full_id, .. } if full_id == "w2")));
+        assert!(
+            tasks
+                .iter()
+                .any(|t| matches!(t, Task::TrackUrl { full_id, .. } if full_id == "w2"))
+        );
     }
 
     /// A download broken off midway: a fresh link, and the track goes on from where it stopped.
@@ -2897,14 +3719,28 @@ mod tests {
     fn resume_after_failure() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
+        let t = |id: &str| {
+            Track::from_json(
+                &json!({"id": id, "title": id, "durationMs": 200_000, "available": true}),
+            )
+            .unwrap()
+        };
         app.play_list("test", PlayContext::default(), vec![t("1"), t("2")], 0);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/1".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/1".into(),
+                ..Default::default()
+            }),
+        });
         assert_eq!(app.take_player(), ["stop", "load http://x/1"]);
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(40.0)));
         app.take_tasks();
-        let error = PlayerEvent::Error { message: "соединение оборвалось".into(), network: true };
+        let error = PlayerEvent::Error {
+            message: "соединение оборвалось".into(),
+            network: true,
+        };
         app.on_msg(Msg::Player(error));
         // A moment for the connection to come back, in silence.
         assert!(app.take_tasks().is_empty());
@@ -2914,16 +3750,29 @@ mod tests {
         assert!(app.take_tasks().is_empty(), "not yet");
         app.retry_at = app.retry_at.map(|(_, from)| (Instant::now(), from));
         app.tick();
-        assert!(matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1"));
+        assert!(
+            matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1")
+        );
         assert_eq!(app.take_player(), ["stop"]);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/1b".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/1b".into(),
+                ..Default::default()
+            }),
+        });
         // With the length from the catalogue, for a file that does not tell its own.
-        let [Effect::Player(PlayerCmd::Load(file))] = &app.effects[..] else { panic!("no load") };
+        let [Effect::Player(PlayerCmd::Load(file))] = &app.effects[..] else {
+            panic!("no load")
+        };
         assert_eq!((file.start, file.length), (40.0, Some(200.0)));
         assert_eq!(app.take_player(), ["load http://x/1b from 40"]);
         assert_eq!(app.failures, 1);
         // Failing again before it goes on: still from there.
-        app.on_msg(Msg::Player(PlayerEvent::Error { message: "нет сети".into(), network: true }));
+        app.on_msg(Msg::Player(PlayerEvent::Error {
+            message: "нет сети".into(),
+            network: true,
+        }));
         assert_eq!(app.retry_at.map(|(_, from)| from), Some(40.0));
         assert_eq!(app.queue.pos(), Some(0));
     }
@@ -2934,9 +3783,25 @@ mod tests {
     fn switch_while_link_comes() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "durationMs": 200_000, "available": true})).unwrap();
-        app.play_list("test", PlayContext::default(), vec![t("1"), t("2"), t("3")], 0);
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/1".into(), ..Default::default() }) });
+        let t = |id: &str| {
+            Track::from_json(
+                &json!({"id": id, "title": id, "durationMs": 200_000, "available": true}),
+            )
+            .unwrap()
+        };
+        app.play_list(
+            "test",
+            PlayContext::default(),
+            vec![t("1"), t("2"), t("3")],
+            0,
+        );
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/1".into(),
+                ..Default::default()
+            }),
+        });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(199.5)));
@@ -2945,10 +3810,22 @@ mod tests {
         // Sent by the player before the stop reached it.
         app.player_behind = 1;
         app.on_msg(Msg::Player(PlayerEvent::Eof));
-        app.on_msg(Msg::Player(PlayerEvent::Error { message: "обрыв".into(), network: true }));
-        assert_eq!((app.queue.pos(), app.failures, app.retry_at.is_none()), (Some(1), 0, true));
+        app.on_msg(Msg::Player(PlayerEvent::Error {
+            message: "обрыв".into(),
+            network: true,
+        }));
+        assert_eq!(
+            (app.queue.pos(), app.failures, app.retry_at.is_none()),
+            (Some(1), 0, true)
+        );
         app.on_msg(Msg::Player(PlayerEvent::Cleared));
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/2".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/2".into(),
+                ..Default::default()
+            }),
+        });
         assert_eq!(app.take_player(), ["load http://x/2"]);
         app.on_msg(Msg::Player(PlayerEvent::Cleared));
         // Now the player speaks of «2».
@@ -2961,21 +3838,36 @@ mod tests {
     fn broken_track() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "available": true})).unwrap();
+        let t = |id: &str| {
+            Track::from_json(&json!({"id": id, "title": id, "available": true})).unwrap()
+        };
         app.play_list("test", PlayContext::default(), vec![t("1"), t("2")], 0);
         app.take_player();
         app.take_tasks();
-        let broken = || Msg::Player(PlayerEvent::Error { message: "не тот формат".into(), network: false });
+        let broken = || {
+            Msg::Player(PlayerEvent::Error {
+                message: "не тот формат".into(),
+                network: false,
+            })
+        };
         app.on_msg(broken());
         assert!(app.retry_at.is_none(), "at once");
-        assert!(matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1"));
+        assert!(
+            matches!(&app.take_tasks()[..], [Task::TrackUrl { full_id, .. }] if full_id == "1")
+        );
         app.take_player();
         app.on_msg(broken());
         assert_eq!(app.queue.pos(), Some(1));
         // A link that does not come because of the server is waited for.
         let busy = ApiError::new(crate::api::ErrorKind::Http(503), "HTTP 503");
-        app.on_msg(Msg::Url { generation: app.generation, result: Err(busy) });
-        assert_eq!((app.queue.pos(), app.failures, app.retry_at.is_some()), (Some(1), 1, true));
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Err(busy),
+        });
+        assert_eq!(
+            (app.queue.pos(), app.failures, app.retry_at.is_some()),
+            (Some(1), 1, true)
+        );
     }
 
     /// A refused token stops playback at once instead of trying track after track.
@@ -2983,14 +3875,30 @@ mod tests {
     fn refused_token() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track::from_json(&json!({"id": id, "title": id, "available": true})).unwrap();
-        app.play_list("test", PlayContext::default(), vec![t("1"), t("2"), t("3")], 0);
+        let t = |id: &str| {
+            Track::from_json(&json!({"id": id, "title": id, "available": true})).unwrap()
+        };
+        app.play_list(
+            "test",
+            PlayContext::default(),
+            vec![t("1"), t("2"), t("3")],
+            0,
+        );
         // An ordinary failure: the link is asked for again.
-        app.on_msg(Msg::Url { generation: app.generation, result: Err("нет сети".into()) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Err("нет сети".into()),
+        });
         assert!(!app.stopped && app.failures == 1);
-        let refused = ApiError::new(crate::api::ErrorKind::Unauthorized, "HTTP 401: токен недействителен, выполните `ymusic login` (x)");
+        let refused = ApiError::new(
+            crate::api::ErrorKind::Unauthorized,
+            "HTTP 401: токен недействителен, выполните `ymusic login` (x)",
+        );
         app.take_player();
-        app.on_msg(Msg::Url { generation: app.generation, result: Err(refused) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Err(refused),
+        });
         assert!(app.stopped);
         assert_eq!(app.take_player(), ["stop"]);
         assert_eq!(app.queue.pos(), Some(0), "no next track tried");
@@ -3001,27 +3909,49 @@ mod tests {
     fn preload_flow() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
-        app.queue.replace(Source::List("test".into()), vec![t("a"), t("b"), t("c")]);
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue
+            .replace(Source::List("test".into()), vec![t("a"), t("b"), t("c")]);
         app.begin_track(0, false);
         app.loading_track = false;
         app.take_player();
 
         // Stale response (older generation) is ignored.
-        app.on_msg(Msg::Preload { generation: app.generation - 1, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation - 1,
+            idx: 1,
+            id: "b".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/b".into(),
+                ..Default::default()
+            }),
+        });
         assert!(app.preload.is_none());
         assert!(app.take_player().is_empty());
         // Fresh response is appended.
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 1, id: "b".into(), result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation,
+            idx: 1,
+            id: "b".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/b".into(),
+                ..Default::default()
+            }),
+        });
         assert_eq!(app.preload, Some((1, "b".to_string())));
         assert_eq!(app.take_player(), ["append http://x/b"]);
 
@@ -3031,11 +3961,23 @@ mod tests {
         assert_eq!(app.queue.pos(), Some(1));
         assert!(app.failures == 0 && app.preload.is_none());
         assert!(app.take_player().is_empty());
-        assert!(!app.take_tasks().iter().any(|t| matches!(t, Task::TrackUrl { .. })));
+        assert!(
+            !app.take_tasks()
+                .iter()
+                .any(|t| matches!(t, Task::TrackUrl { .. }))
+        );
 
         // Manual skip uses the preloaded entry too.
         app.loading_track = false;
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 2, id: "c".into(), result: Ok(crate::api::FileInfo { url: "http://x/c".into(), ..Default::default() }) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation,
+            idx: 2,
+            id: "c".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/c".into(),
+                ..Default::default()
+            }),
+        });
         app.next(End::Skip);
         assert_eq!(app.queue.pos(), Some(2));
         assert_eq!(app.take_player(), ["append http://x/c", "next"]);
@@ -3050,19 +3992,35 @@ mod tests {
     fn shuffle_from_system() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
-        let ids = |app: &App| app.queue.tracks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let ids = |app: &App| {
+            app.queue
+                .tracks()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>()
+        };
         let own: Vec<String> = (0..20).map(|i| i.to_string()).collect();
-        app.play_list("Альбом", PlayContext::default(), own.iter().map(|id| t(id)).collect(), 5);
+        app.play_list(
+            "Альбом",
+            PlayContext::default(),
+            own.iter().map(|id| t(id)).collect(),
+            5,
+        );
         app.loading_track = false;
         assert!(!app.queue.shuffled());
 
@@ -3070,7 +4028,10 @@ mod tests {
         use crate::media::Remote;
         app.on_remote(Remote::Shuffle(true));
         assert!(app.queue.shuffled());
-        assert_eq!((app.queue.pos(), app.queue.tracks()[0].id.as_str()), (Some(0), "5"));
+        assert_eq!(
+            (app.queue.pos(), app.queue.tracks()[0].id.as_str()),
+            (Some(0), "5")
+        );
         assert_ne!(ids(&app), own);
         let mut sorted = ids(&app);
         sorted.sort_by_key(|id| id.parse::<u32>().unwrap());
@@ -3104,17 +4065,23 @@ mod tests {
     fn repeat_modes() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
-        app.queue.replace(Source::List("test".into()), vec![t("a"), t("b"), t("c")]);
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue
+            .replace(Source::List("test".into()), vec![t("a"), t("b"), t("c")]);
         app.begin_track(0, false);
         app.loading_track = false;
         app.take_player();
@@ -3124,14 +4091,30 @@ mod tests {
         assert_eq!(app.following(End::Eof), Some(0));
         assert_eq!(app.following(End::Skip), Some(1));
         assert_eq!(app.take_player(), ["clear"]);
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 0, id: "a".into(), result: Ok(crate::api::FileInfo { url: "http://x/a".into(), ..Default::default() }) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation,
+            idx: 0,
+            id: "a".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/a".into(),
+                ..Default::default()
+            }),
+        });
         assert_eq!(app.preload, Some((0, "a".to_string())));
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert_eq!(app.queue.pos(), Some(0));
         assert!(app.play.is_some(), "a new playback is reported");
         // Switching the mode drops the preloaded repeat.
         app.loading_track = false;
-        app.on_msg(Msg::Preload { generation: app.generation, idx: 0, id: "a".into(), result: Ok(crate::api::FileInfo { url: "http://x/a".into(), ..Default::default() }) });
+        app.on_msg(Msg::Preload {
+            generation: app.generation,
+            idx: 0,
+            id: "a".into(),
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/a".into(),
+                ..Default::default()
+            }),
+        });
         app.take_player();
         app.set_repeat(Repeat::Off);
         assert!(app.preload.is_none());
@@ -3156,20 +4139,32 @@ mod tests {
     fn stalled_load() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
-        app.queue.replace(Source::List("test".into()), vec![t("a"), t("b")]);
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.queue
+            .replace(Source::List("test".into()), vec![t("a"), t("b")]);
         app.begin_track(0, false);
         let past = || Some(Instant::now() - Duration::from_secs(1));
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/a".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/a".into(),
+                ..Default::default()
+            }),
+        });
         assert_eq!(app.take_player(), ["load http://x/a"]);
 
         // Still loading while paused: the timer restarts instead of firing.
@@ -3187,8 +4182,17 @@ mod tests {
             assert!(app.status_error && app.load_deadline.is_none() && app.retry_at.is_some());
             app.retry_at = app.retry_at.map(|(_, from)| (Instant::now(), from));
             app.tick();
-            assert_eq!((app.queue.pos(), app.generation, app.failures), (Some(0), generation + 1, n));
-            app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: format!("http://x/a{n}"), ..Default::default() }) });
+            assert_eq!(
+                (app.queue.pos(), app.generation, app.failures),
+                (Some(0), generation + 1, n)
+            );
+            app.on_msg(Msg::Url {
+                generation: app.generation,
+                result: Ok(crate::api::FileInfo {
+                    url: format!("http://x/a{n}"),
+                    ..Default::default()
+                }),
+            });
         }
 
         // The third one: the next track.
@@ -3199,7 +4203,13 @@ mod tests {
         assert!(app.failures == 0 && app.retry_at.is_none() && app.load_deadline.is_none());
 
         // Once playback starts, the watchdog is off.
-        app.on_msg(Msg::Url { generation: app.generation, result: Ok(crate::api::FileInfo { url: "http://x/b".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "http://x/b".into(),
+                ..Default::default()
+            }),
+        });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
@@ -3219,7 +4229,10 @@ mod tests {
         app.on_msg(Msg::Player(PlayerEvent::Spectrum(vec![0.0; n])));
         assert!(!app.spectrum_moving() && !app.take_player().contains(&"spectrum?".to_string()));
 
-        app.queue.replace(Source::None, vec![Track::from_json(&json!({"id": 1})).unwrap()]);
+        app.queue.replace(
+            Source::None,
+            vec![Track::from_json(&json!({"id": 1})).unwrap()],
+        );
         app.queue.select(0);
         app.spectrum_asked -= SPECTRUM_PERIOD;
         app.tick();
@@ -3229,7 +4242,10 @@ mod tests {
         levels[0] = SPECTRUM_CEIL + 5.0;
         levels[1] = (SPECTRUM_FLOOR + SPECTRUM_CEIL) / 2.0;
         app.on_msg(Msg::Player(PlayerEvent::Spectrum(levels.clone())));
-        assert_eq!((app.spectrum[0], app.spectrum[1], app.spectrum[2]), (1.0, 0.5, 0.0));
+        assert_eq!(
+            (app.spectrum[0], app.spectrum[1], app.spectrum[2]),
+            (1.0, 0.5, 0.0)
+        );
         levels[0] = SPECTRUM_FLOOR;
         app.on_msg(Msg::Player(PlayerEvent::Spectrum(levels)));
         assert!((app.spectrum[0] - (1.0 - SPECTRUM_FALL)).abs() < 1e-6);
@@ -3277,17 +4293,27 @@ mod tests {
     fn positions_of_the_previous_track_are_ignored() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: String::new(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 200_000,
-        available: true,
-        cover: None,
-        batch: None, };
-        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a"), t("b")], 0);
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: String::new(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 200_000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        app.play_list(
+            "Альбом",
+            PlayContext::new("album", "9"),
+            vec![t("a"), t("b")],
+            0,
+        );
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(180.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(120.0)));
@@ -3316,32 +4342,60 @@ mod tests {
         // Connecting: a token, the browser, then polls until the user has confirmed.
         app.connect_lastfm();
         assert!(matches!(app.take_tasks()[..], [Task::LastfmToken { .. }]));
-        app.on_msg(Msg::LastfmToken { req: app.lastfm_auth, result: Ok("tok".into()) });
-        assert!(matches!(&app.take_tasks()[..], [Task::OpenUrl(url)] if url.ends_with("&token=tok")));
-        assert!(matches!(app.lastfm, Lastfm::Connecting { token: Some(_), .. }));
-        let Lastfm::Connecting { poll_at, .. } = &mut app.lastfm else { panic!() };
+        app.on_msg(Msg::LastfmToken {
+            req: app.lastfm_auth,
+            result: Ok("tok".into()),
+        });
+        assert!(
+            matches!(&app.take_tasks()[..], [Task::OpenUrl(url)] if url.ends_with("&token=tok"))
+        );
+        assert!(matches!(
+            app.lastfm,
+            Lastfm::Connecting { token: Some(_), .. }
+        ));
+        let Lastfm::Connecting { poll_at, .. } = &mut app.lastfm else {
+            panic!()
+        };
         *poll_at = Instant::now();
         app.tick();
         assert!(matches!(&app.take_tasks()[..], [Task::LastfmSession(t)] if t == "tok"));
         app.tick();
         assert!(app.take_tasks().is_empty(), "one question at a time");
-        let pending = lastfm::Error { code: 14, message: "not authorized".into(), blocked: false };
-        app.on_msg(Msg::LastfmSession { token: "tok".into(), result: Err(pending) });
+        let pending = lastfm::Error {
+            code: 14,
+            message: "not authorized".into(),
+            blocked: false,
+        };
+        app.on_msg(Msg::LastfmSession {
+            token: "tok".into(),
+            result: Err(pending),
+        });
         app.tick();
         assert!(app.take_tasks().is_empty(), "asked again a while later");
-        app.on_msg(Msg::LastfmSession { token: "tok".into(), result: Ok(("me".into(), "sk".into())) });
-        assert!(app.lastfm_session().is_some_and(|s| s.name == "me" && s.key == "sk"));
+        app.on_msg(Msg::LastfmSession {
+            token: "tok".into(),
+            result: Ok(("me".into(), "sk".into())),
+        });
+        assert!(
+            app.lastfm_session()
+                .is_some_and(|s| s.name == "me" && s.key == "sk")
+        );
 
-        let t = |id: &str, secs: u64| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.to_string(),
-        album_id: Some("9".into()),
-        title: format!("Трек {id}"),
-        artists: "A, B".into(),
-        main_artist: Some(("1".into(), "A".into())),
-        album: "Альбом".into(),
-        duration_ms: secs * 1000,
-        available: true,
-        cover: None,
-        batch: None, };
+        let t = |id: &str, secs: u64| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.to_string(),
+            album_id: Some("9".into()),
+            title: format!("Трек {id}"),
+            artists: "A, B".into(),
+            main_artist: Some(("1".into(), "A".into())),
+            album: "Альбом".into(),
+            duration_ms: secs * 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
         let pos = |app: &mut App, d: f64, t: f64| {
             app.take_player();
             app.on_msg(Msg::Player(PlayerEvent::Duration(d)));
@@ -3350,47 +4404,85 @@ mod tests {
         let lastfm_tasks = |app: &mut App| -> Vec<Task> {
             app.take_tasks()
                 .into_iter()
-                .filter(|t| matches!(t, Task::LastfmNowPlaying { .. } | Task::LastfmScrobble { .. }))
+                .filter(|t| {
+                    matches!(
+                        t,
+                        Task::LastfmNowPlaying { .. } | Task::LastfmScrobble { .. }
+                    )
+                })
                 .collect()
         };
-        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a", 100), t("b", 20), t("c", 100)], 0);
+        app.play_list(
+            "Альбом",
+            PlayContext::new("album", "9"),
+            vec![t("a", 100), t("b", 20), t("c", 100)],
+            0,
+        );
         assert!(lastfm_tasks(&mut app).is_empty(), "nothing until it plays");
         pos(&mut app, 100.0, 0.5);
         let now = lastfm_tasks(&mut app);
-        let [Task::LastfmNowPlaying { session, track }] = &now[..] else { panic!("{now:?}") };
-        assert_eq!((session.as_str(), track.artist.as_str(), track.track.as_str(), track.duration), ("sk", "A", "Трек a", 100));
+        let [Task::LastfmNowPlaying { session, track }] = &now[..] else {
+            panic!("{now:?}")
+        };
+        assert_eq!(
+            (
+                session.as_str(),
+                track.artist.as_str(),
+                track.track.as_str(),
+                track.duration
+            ),
+            ("sk", "A", "Трек a", 100)
+        );
         for i in 2..=100 {
             pos(&mut app, 100.0, f64::from(i) * 0.5);
         }
         let sent = lastfm_tasks(&mut app);
-        let [Task::LastfmScrobble { tracks, .. }] = &sent[..] else { panic!("{sent:?}") };
+        let [Task::LastfmScrobble { tracks, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
         assert_eq!(tracks.len(), 1);
         let a = tracks[0].clone();
         // The network failed: it goes again with the next scrobble.
         app.on_msg(Msg::LastfmSent {
             session: "sk".into(),
             req: app.scrobbles.in_flight(),
-            result: Err(lastfm::Error { code: 0, message: "нет сети".into(), blocked: false }),
+            result: Err(lastfm::Error {
+                code: 0,
+                message: "нет сети".into(),
+                blocked: false,
+            }),
         });
         // A track of 30 s or shorter is only shown as playing.
         app.on_key(KeyEvent::from(KeyCode::Char('n')));
         for i in 1..=40 {
             pos(&mut app, 20.0, f64::from(i) * 0.5);
         }
-        assert!(matches!(&lastfm_tasks(&mut app)[..], [Task::LastfmNowPlaying { .. }]));
+        assert!(matches!(
+            &lastfm_tasks(&mut app)[..],
+            [Task::LastfmNowPlaying { .. }]
+        ));
         app.on_key(KeyEvent::from(KeyCode::Char('n')));
         for i in 1..=101 {
             pos(&mut app, 100.0, f64::from(i) * 0.5);
         }
         let sent = lastfm_tasks(&mut app);
-        let [_, Task::LastfmScrobble { tracks, .. }] = &sent[..] else { panic!("{sent:?}") };
-        assert_eq!((tracks.len(), &tracks[0], tracks[1].track.as_str()), (2, &a, "Трек c"));
+        let [_, Task::LastfmScrobble { tracks, .. }] = &sent[..] else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(
+            (tracks.len(), &tracks[0], tracks[1].track.as_str()),
+            (2, &a, "Трек c")
+        );
 
         // A revoked session disconnects.
         app.on_msg(Msg::LastfmSent {
             session: "sk".into(),
             req: None,
-            result: Err(lastfm::Error { code: 9, message: "Invalid session key".into(), blocked: false }),
+            result: Err(lastfm::Error {
+                code: 9,
+                message: "Invalid session key".into(),
+                blocked: false,
+            }),
         });
         assert!(matches!(app.lastfm, Lastfm::Off) && app.status_error);
     }
@@ -3401,16 +4493,21 @@ mod tests {
         use super::*;
         let mut app = App::for_test();
         assert_eq!(app.window_title(), "ymusic");
-        let t = Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: "1".into(),
-        album_id: None,
-        title: "Выхода нет".into(),
-        artists: "Сплин".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 220_000,
-        available: true,
-        cover: None,
-        batch: None, };
+        let t = Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: "1".into(),
+            album_id: None,
+            title: "Выхода нет".into(),
+            artists: "Сплин".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 220_000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
         app.play_list("Альбом", PlayContext::new("album", "9"), vec![t], 0);
         assert_eq!(app.window_title(), "Сплин — Выхода нет");
     }
@@ -3419,25 +4516,38 @@ mod tests {
     fn play_reports() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.to_string(),
-        album_id: Some("9".into()),
-        title: id.to_string(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 200_000,
-        available: true,
-        cover: None,
-        batch: None, };
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.to_string(),
+            album_id: Some("9".into()),
+            title: id.to_string(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 200_000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
         // The player reports the start of a track (`Duration`) before its positions.
         let pos = |app: &mut App, t: f64| {
             app.take_player();
             app.on_msg(Msg::Player(PlayerEvent::Duration(200.0)));
             app.on_msg(Msg::Player(PlayerEvent::TimePos(t)));
         };
-        app.play_list("Альбом", PlayContext::new("album", "9"), vec![t("a"), t("b"), t("c")], 0);
+        app.play_list(
+            "Альбом",
+            PlayContext::new("album", "9"),
+            vec![t("a"), t("b"), t("c")],
+            0,
+        );
         let start = app.plays_sent().last().unwrap().clone();
-        assert_eq!((start.track.id.as_str(), start.reason, start.played), ("a", None, 0.0));
+        assert_eq!(
+            (start.track.id.as_str(), start.reason, start.played),
+            ("a", None, 0.0)
+        );
         assert_eq!(start.context, PlayContext::new("album", "9"));
 
         // 30 seconds of listening are reported once, with the same play id.
@@ -3446,7 +4556,10 @@ mod tests {
         }
         assert_eq!(app.plays_sent().len(), 2);
         let partial = &app.plays_sent()[1];
-        assert_eq!((partial.play_id.as_str(), partial.reason), (start.play_id.as_str(), Some("in_progress")));
+        assert_eq!(
+            (partial.play_id.as_str(), partial.reason),
+            (start.play_id.as_str(), Some("in_progress"))
+        );
         assert!((30.1..31.0).contains(&partial.played), "{}", partial.played);
 
         // A seek does not count as listening; a pause is reported.
@@ -3455,13 +4568,19 @@ mod tests {
         pos(&mut app, 150.0);
         app.on_msg(Msg::Player(PlayerEvent::Pause(false)));
         let paused = app.plays_sent().last().unwrap().clone();
-        assert_eq!((paused.reason, paused.pause, paused.seek), (None, true, true));
+        assert_eq!(
+            (paused.reason, paused.pause, paused.seek),
+            (None, true, true)
+        );
         assert_eq!(app.plays_sent().len(), 3);
 
         // `n`: the end of «a» (skip) and the start of «b».
         app.on_key(KeyEvent::from(KeyCode::Char('n')));
         let end = &app.plays_sent()[3];
-        assert_eq!((end.track.id.as_str(), end.reason, end.end_position), ("a", Some("skip"), 150.0));
+        assert_eq!(
+            (end.track.id.as_str(), end.reason, end.end_position),
+            ("a", Some("skip"), 150.0)
+        );
         assert!((34.0..36.0).contains(&end.played), "{}", end.played);
         let b = app.plays_sent()[4].clone();
         assert_eq!((b.track.id.as_str(), b.reason), ("b", None));
@@ -3479,15 +4598,30 @@ mod tests {
         assert_eq!(app.plays_sent()[6].track.id, "c");
         pos(&mut app, 1.0);
         app.on_key(KeyEvent::from(KeyCode::Char('b')));
-        assert_eq!((app.plays_sent()[7].track.id.as_str(), app.plays_sent()[7].reason), ("c", Some("back_skip")));
+        assert_eq!(
+            (
+                app.plays_sent()[7].track.id.as_str(),
+                app.plays_sent()[7].reason
+            ),
+            ("c", Some("back_skip"))
+        );
 
         // Another list ends the track as `other_track`; quitting gives the last report to send.
         app.play_list("Мне нравится", app.liked_context(), vec![t("x")], 0);
         let other = &app.plays_sent()[9];
-        assert_eq!((other.track.id.as_str(), other.reason), ("b", Some("other_track")));
-        assert_eq!(app.plays_sent()[10].context, PlayContext::new("playlist", "1:3"));
+        assert_eq!(
+            (other.track.id.as_str(), other.reason),
+            ("b", Some("other_track"))
+        );
+        assert_eq!(
+            app.plays_sent()[10].context,
+            PlayContext::new("playlist", "1:3")
+        );
         let quit = app.quit_play().unwrap();
-        assert_eq!((quit.track.id.as_str(), quit.reason, quit.pause), ("x", None, true));
+        assert_eq!(
+            (quit.track.id.as_str(), quit.reason, quit.pause),
+            ("x", None, true)
+        );
         assert!(app.quit_play().is_none());
     }
 
@@ -3495,16 +4629,21 @@ mod tests {
     fn search_paging() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: usize| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.to_string(),
-        album_id: None,
-        title: id.to_string(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
+        let t = |id: usize| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.to_string(),
+            album_id: None,
+            title: id.to_string(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
         let page = |r: std::ops::Range<usize>| r.map(t).collect::<Vec<_>>();
         let search = |app: &mut App, q: &str| {
             app.search.input = q.into();
@@ -3513,8 +4652,20 @@ mod tests {
         app.tab = Tab::Search;
         search(&mut app, "q");
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 0, result: Ok((page(0..100), Some(250))) });
-        assert_eq!((app.search.results().len(), app.search.total(), app.search.loading()), (100, Some(250), false));
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "q".into(),
+            page: 0,
+            result: Ok((page(0..100), Some(250))),
+        });
+        assert_eq!(
+            (
+                app.search.results().len(),
+                app.search.total(),
+                app.search.loading()
+            ),
+            (100, Some(250), false)
+        );
 
         // Far from the end: nothing more is requested.
         app.move_sel(10);
@@ -3524,45 +4675,91 @@ mod tests {
         assert!(app.search.loading());
 
         // Replies to another query or page are ignored.
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "old".into(), page: 1, result: Ok((page(500..600), Some(900))) });
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 0, result: Ok((page(500..600), Some(900))) });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "old".into(),
+            page: 1,
+            result: Ok((page(500..600), Some(900))),
+        });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "q".into(),
+            page: 0,
+            result: Ok((page(500..600), Some(900))),
+        });
         assert_eq!(app.search.results().len(), 100);
 
         // Overlapping tracks are not duplicated; selection stays in place.
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 1, result: Ok((page(90..190), Some(250))) });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "q".into(),
+            page: 1,
+            result: Ok((page(90..190), Some(250))),
+        });
         assert_eq!(app.search.results().len(), 190);
         assert_eq!(app.search_state.selected(), Some(85));
 
         // Playing from the search: later pages go to the queue, playing near its end loads more.
         app.search_state.select(Some(0));
         app.activate();
-        assert_eq!((app.queue.len(), app.queue.pos(), app.search.loading()), (190, Some(0), false));
+        assert_eq!(
+            (app.queue.len(), app.queue.pos(), app.search.loading()),
+            (190, Some(0), false)
+        );
         app.begin_track(175, false);
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "q".into(), page: 2, result: Ok((page(180..290), Some(400))) });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "q".into(),
+            page: 2,
+            result: Ok((page(180..290), Some(400))),
+        });
         assert_eq!((app.search.results().len(), app.queue.len()), (290, 290));
         assert_eq!(app.queue.tracks()[289].id, "289");
         // A new search does not touch the playing queue.
         search(&mut app, "new");
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "new".into(), page: 0, result: Ok((page(1000..1100), Some(900))) });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "new".into(),
+            page: 0,
+            result: Ok((page(1000..1100), Some(900))),
+        });
         assert_eq!(app.queue.len(), 290);
 
         // A page without new tracks ends the paging.
         app.move_sel(1000);
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "new".into(), page: 1, result: Ok((page(1000..1100), Some(900))) });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "new".into(),
+            page: 1,
+            result: Ok((page(1000..1100), Some(900))),
+        });
         assert_eq!(app.search.total(), Some(100));
         app.move_sel(1000);
         assert!(!app.search.loading());
 
         // The website API does not count the results: pages are loaded until the last one.
         search(&mut app, "web");
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "web".into(), page: 0, result: Ok((page(0..100), None)) });
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "web".into(),
+            page: 0,
+            result: Ok((page(0..100), None)),
+        });
         assert_eq!(app.search.total(), None);
         app.move_sel(1000);
         assert!(app.search.loading());
-        app.on_msg(Msg::Search { generation: app.search.generation(), query: "web".into(), page: 1, result: Ok((page(100..130), Some(130))) });
-        assert_eq!((app.search.results().len(), app.search.total()), (130, Some(130)));
+        app.on_msg(Msg::Search {
+            generation: app.search.generation(),
+            query: "web".into(),
+            page: 1,
+            result: Ok((page(100..130), Some(130))),
+        });
+        assert_eq!(
+            (app.search.results().len(), app.search.total()),
+            (130, Some(130))
+        );
         app.move_sel(1000);
         assert!(!app.search.loading());
     }
@@ -3573,17 +4770,28 @@ mod tests {
     fn replies_during_reload() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
-        let ids = |app: &App| app.likes.tracks().iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
+        let ids = |app: &App| {
+            app.likes
+                .tracks()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>()
+        };
 
         // Liked before the first load finished: the server's list does not have it yet.
         app.start();
@@ -3599,7 +4807,11 @@ mod tests {
         app.load_liked();
         app.load_liked();
         app.toggle_like(t("1"));
-        app.on_msg(Msg::LikedIds(vec!["5:1".into(), "1:10".into(), "2:20".into()]));
+        app.on_msg(Msg::LikedIds(vec![
+            "5:1".into(),
+            "1:10".into(),
+            "2:20".into(),
+        ]));
         assert!(!app.likes.contains("1"));
         app.on_msg(Msg::Liked(Ok(vec![t("5"), t("1"), t("2")])));
         assert_eq!(ids(&app), ["5", "2"]);
@@ -3608,13 +4820,26 @@ mod tests {
         app.toggle_like(t("2"));
         assert_eq!(ids(&app), ["5"]);
 
-        let pl = |k: &str| Playlist { owner: "1".into(), kind: k.into(), title: k.into(), track_count: 0 };
+        let pl = |k: &str| Playlist {
+            owner: "1".into(),
+            kind: k.into(),
+            title: k.into(),
+            track_count: 0,
+        };
         app.take_tasks();
         app.load_playlists();
-        let [Task::Playlists { req }] = app.take_tasks()[..] else { panic!("no request") };
-        app.on_msg(Msg::Playlists { req: req - 1, result: Ok(vec![pl("old")]) });
+        let [Task::Playlists { req }] = app.take_tasks()[..] else {
+            panic!("no request")
+        };
+        app.on_msg(Msg::Playlists {
+            req: req - 1,
+            result: Ok(vec![pl("old")]),
+        });
         assert!(app.playlists.list().is_empty() && app.playlists.loading());
-        app.on_msg(Msg::Playlists { req, result: Ok(vec![pl("new")]) });
+        app.on_msg(Msg::Playlists {
+            req,
+            result: Ok(vec![pl("new")]),
+        });
         assert_eq!(app.playlists.list()[0].kind, "new");
     }
 
@@ -3628,9 +4853,18 @@ mod tests {
         app.set_status("Играет: Ошибка 404");
         assert!(!app.status_error);
         let url = "https://music.yandex.ru/track/1";
-        app.on_msg(Msg::Copied { url: url.into(), by_tool: false });
-        assert_eq!(app.status, format!("Ссылка передана терминалу (OSC 52): {url}"));
-        app.on_msg(Msg::Copied { url: url.into(), by_tool: true });
+        app.on_msg(Msg::Copied {
+            url: url.into(),
+            by_tool: false,
+        });
+        assert_eq!(
+            app.status,
+            format!("Ссылка передана терминалу (OSC 52): {url}")
+        );
+        app.on_msg(Msg::Copied {
+            url: url.into(),
+            by_tool: true,
+        });
         assert_eq!(app.status, format!("Ссылка скопирована: {url}"));
         assert!(!app.status_error);
     }
@@ -3648,7 +4882,9 @@ mod tests {
         assert_eq!(app.status, "Это не ссылка на Яндекс Музыку");
 
         app.on_paste(&format!(" {link}\n"));
-        let Some(Modal::OpenLink { input }) = &app.modal else { panic!("no link input") };
+        let Some(Modal::OpenLink { input }) = &app.modal else {
+            panic!("no link input")
+        };
         assert_eq!(input, link);
         app.modal = None;
 
@@ -3661,7 +4897,9 @@ mod tests {
         assert_eq!(input(&app), "");
         app.on_msg(Msg::ClipboardLink(link.into()));
         assert_eq!(input(&app), link);
-        app.modal = Some(Modal::OpenLink { input: "typed".into() });
+        app.modal = Some(Modal::OpenLink {
+            input: "typed".into(),
+        });
         app.on_msg(Msg::ClipboardLink(link.into()));
         assert_eq!(input(&app), "typed");
         app.modal = None;
@@ -3676,16 +4914,21 @@ mod tests {
     fn stale_play_replies() {
         use super::*;
         let mut app = App::for_test();
-        let t = |id: &str| Track { kind: crate::api::TrackKind::Music, progress: None, published: None, id: id.into(),
-        album_id: None,
-        title: id.into(),
-        artists: "A".into(),
-        main_artist: None,
-        album: String::new(),
-        duration_ms: 1000,
-        available: true,
-        cover: None,
-        batch: None, };
+        let t = |id: &str| Track {
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: None,
+            batch: None,
+        };
         let list = |intent, name: &str, tracks| Msg::ListLoaded {
             intent,
             name: name.into(),
@@ -3698,8 +4941,17 @@ mod tests {
         // `w`, then `A` before the wave replied: the late wave is dropped.
         let wave = app.new_intent();
         let album = app.new_intent();
-        let batch = WaveBatch { session_id: None, batch_id: "b".into(), tracks: vec![t("w")] };
-        app.on_msg(Msg::WaveStarted { intent: wave, station: MY_WAVE.into(), name: "Моя волна".into(), result: Ok(batch) });
+        let batch = WaveBatch {
+            session_id: None,
+            batch_id: "b".into(),
+            tracks: vec![t("w")],
+        };
+        app.on_msg(Msg::WaveStarted {
+            intent: wave,
+            station: MY_WAVE.into(),
+            name: "Моя волна".into(),
+            result: Ok(batch),
+        });
         assert!(app.wave.is_none());
         app.on_msg(list(album, "Альбом", vec![t("a")]));
         assert!(*app.queue.source() == Source::List("Альбом".into()));
@@ -3716,7 +4968,8 @@ mod tests {
 mod regression_tests {
     use super::*;
     fn track(id: &str) -> Track {
-        Track::from_json(&json!({"id": id, "title": id, "durationMs":100000,"available":true})).unwrap()
+        Track::from_json(&json!({"id": id, "title": id, "durationMs":100000,"available":true}))
+            .unwrap()
     }
     #[test]
     fn wave_replies_belong_to_their_start_even_for_the_same_station() {
@@ -3724,7 +4977,11 @@ mod regression_tests {
         let station = default_stations().remove(0);
         app.start_wave(station.clone());
         let old = app.intent;
-        let batch = || WaveBatch { session_id: Some("s".into()), batch_id: "b".into(), tracks: vec![track("a")] };
+        let batch = || WaveBatch {
+            session_id: Some("s".into()),
+            batch_id: "b".into(),
+            tracks: vec![track("a")],
+        };
         app.on_msg(Msg::WaveStarted {
             intent: old,
             station: station.id.clone(),
@@ -3733,7 +4990,12 @@ mod regression_tests {
         });
         app.start_wave(station.clone());
         let current = app.intent;
-        app.on_msg(Msg::WaveStarted { intent: current, station: station.id, name: station.name, result: Ok(batch()) });
+        app.on_msg(Msg::WaveStarted {
+            intent: current,
+            station: station.id,
+            name: station.name,
+            result: Ok(batch()),
+        });
         app.wave.as_mut().unwrap().fetching = true;
         app.on_msg(Msg::WaveMore {
             wave: old,
@@ -3763,7 +5025,14 @@ mod regression_tests {
         app.toggle_like(t.clone());
         app.toggle_like(t.clone());
         let tasks = app.take_tasks();
-        let [Task::SetLike { req, like: true, .. }] = tasks.as_slice() else { panic!("{tasks:?}") };
+        let [
+            Task::SetLike {
+                req, like: true, ..
+            },
+        ] = tasks.as_slice()
+        else {
+            panic!("{tasks:?}")
+        };
         let old = *req;
         app.on_msg(Msg::LikeSet {
             id: t.id.clone(),
@@ -3772,22 +5041,47 @@ mod regression_tests {
         });
         assert!(app.is_liked(&t));
         let tasks = app.take_tasks();
-        let [Task::SetLike { req, like: true, .. }] = tasks.as_slice() else { panic!("{tasks:?}") };
+        let [
+            Task::SetLike {
+                req, like: true, ..
+            },
+        ] = tasks.as_slice()
+        else {
+            panic!("{tasks:?}")
+        };
         let current = *req;
         assert_ne!(old, current);
-        app.on_msg(Msg::LikeSet { id: t.id.clone(), req: old, result: Ok(()) });
+        app.on_msg(Msg::LikeSet {
+            id: t.id.clone(),
+            req: old,
+            result: Ok(()),
+        });
         assert!(app.take_tasks().is_empty());
-        app.on_msg(Msg::LikeSet { id: t.id.clone(), req: current, result: Ok(()) });
+        app.on_msg(Msg::LikeSet {
+            id: t.id.clone(),
+            req: current,
+            result: Ok(()),
+        });
         assert!(app.is_liked(&t) && app.like_edits.is_empty());
         app.toggle_like(t.clone());
         let tasks = app.take_tasks();
-        let [Task::SetLike { req, like: false, .. }] = tasks.as_slice() else { panic!() };
+        let [
+            Task::SetLike {
+                req, like: false, ..
+            },
+        ] = tasks.as_slice()
+        else {
+            panic!()
+        };
         app.on_msg(Msg::LikeSet {
             id: t.id.clone(),
             req: *req,
             result: Err(ApiError::from_anyhow(&anyhow::anyhow!("failed"))),
         });
-        assert!(app.is_liked(&t), "failed latest operation restores the confirmed state");
+        assert!(
+            app.is_liked(&t),
+            "failed latest operation restores the confirmed state"
+        );
     }
     #[test]
     fn like_reload_preserves_in_flight_desired_value() {
@@ -3800,9 +5094,17 @@ mod regression_tests {
         assert!(app.is_liked(&t));
         app.toggle_like(t.clone());
         let req = app.like_edits[&t.id].req;
-        app.on_msg(Msg::LikeSet { id: t.id.clone(), req, result: Ok(()) });
+        app.on_msg(Msg::LikeSet {
+            id: t.id.clone(),
+            req,
+            result: Ok(()),
+        });
         assert!(!app.is_liked(&t));
-        assert!(app.take_tasks().iter().any(|task| matches!(task, Task::SetLike { like: false, .. })));
+        assert!(
+            app.take_tasks()
+                .iter()
+                .any(|task| matches!(task, Task::SetLike { like: false, .. }))
+        );
     }
     #[test]
     fn like_acknowledgement_during_reload_survives_its_old_snapshot() {
@@ -3811,7 +5113,11 @@ mod regression_tests {
         app.toggle_like(t.clone());
         let req = app.like_edits[&t.id].req;
         app.load_liked();
-        app.on_msg(Msg::LikeSet { id: t.id.clone(), req, result: Ok(()) });
+        app.on_msg(Msg::LikeSet {
+            id: t.id.clone(),
+            req,
+            result: Ok(()),
+        });
         assert!(app.like_edits.is_empty());
         app.on_msg(Msg::LikedIds(vec![]));
         app.on_msg(Msg::Liked(Ok(vec![])));
@@ -3826,10 +5132,16 @@ mod regression_tests {
         app.lastfm = Lastfm::Off;
         app.connect_lastfm();
         app.take_tasks();
-        app.on_msg(Msg::LastfmToken { req: old, result: Ok("old".into()) });
+        app.on_msg(Msg::LastfmToken {
+            req: old,
+            result: Ok("old".into()),
+        });
         assert!(matches!(app.lastfm, Lastfm::Connecting { token: None, .. }));
         assert!(app.take_tasks().is_empty());
-        app.on_msg(Msg::LastfmToken { req: app.lastfm_auth, result: Ok("new".into()) });
+        app.on_msg(Msg::LastfmToken {
+            req: app.lastfm_auth,
+            result: Ok("new".into()),
+        });
         assert!(matches!(app.lastfm,Lastfm::Connecting { token:Some(ref t),.. } if t=="new"));
     }
 }

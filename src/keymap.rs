@@ -69,7 +69,12 @@ pub enum Section {
 
 impl Section {
     pub const ALL: [Section; 6] = [
-        Section::Playback, Section::Ratings, Section::Waves, Section::Navigation, Section::Playlists, Section::Podcasts,
+        Section::Playback,
+        Section::Ratings,
+        Section::Waves,
+        Section::Navigation,
+        Section::Playlists,
+        Section::Podcasts,
     ];
 
     pub fn title(self) -> &'static str {
@@ -98,33 +103,93 @@ use Action as A;
 use KeyCode::Char as C;
 
 const fn row(section: Section, help: &'static str, keys: &'static [(KeyCode, Action)]) -> Row {
-    Row { section, label: None, help: Some(help), keys }
+    Row {
+        section,
+        label: None,
+        help: Some(help),
+        keys,
+    }
 }
 
-const fn labeled(section: Section, label: &'static str, help: &'static str, keys: &'static [(KeyCode, Action)]) -> Row {
-    Row { section, label: Some(label), help: Some(help), keys }
+const fn labeled(
+    section: Section,
+    label: &'static str,
+    help: &'static str,
+    keys: &'static [(KeyCode, Action)],
+) -> Row {
+    Row {
+        section,
+        label: Some(label),
+        help: Some(help),
+        keys,
+    }
 }
 
 pub const ROWS: &[Row] = &[
-    row(Section::Playback, "пауза / продолжить", &[(C(' '), A::PlayPause), (C('p'), A::PlayPause)]),
-    row(Section::Playback, "следующий / предыдущий", &[(C('n'), A::Next), (C('b'), A::Prev)]),
-    row(Section::Playback, "перемотка ±10 с", &[(KeyCode::Left, A::SeekBack), (KeyCode::Right, A::SeekForward)]),
+    row(
+        Section::Playback,
+        "пауза / продолжить",
+        &[(C(' '), A::PlayPause), (C('p'), A::PlayPause)],
+    ),
+    row(
+        Section::Playback,
+        "следующий / предыдущий",
+        &[(C('n'), A::Next), (C('b'), A::Prev)],
+    ),
+    row(
+        Section::Playback,
+        "перемотка ±10 с",
+        &[
+            (KeyCode::Left, A::SeekBack),
+            (KeyCode::Right, A::SeekForward),
+        ],
+    ),
     labeled(
         Section::Playback,
         "+  -",
         "громкость",
-        &[(C('+'), A::VolumeUp), (C('-'), A::VolumeDown), (C('='), A::VolumeUp), (C('_'), A::VolumeDown)],
+        &[
+            (C('+'), A::VolumeUp),
+            (C('-'), A::VolumeDown),
+            (C('='), A::VolumeUp),
+            (C('_'), A::VolumeDown),
+        ],
     ),
     row(Section::Playback, "без звука", &[(C('m'), A::Mute)]),
-    row(Section::Playback, "повтор: очередь / трек / выкл", &[(C('T'), A::Repeat)]),
-    row(Section::Ratings, "лайк текущего трека / выпуска", &[(C('l'), A::LikeCurrent)]),
-    row(Section::Ratings, "лайк выбранного трека / выпуска", &[(C('L'), A::LikeSelected)]),
-    row(Section::Ratings, "дизлайк и пропуск", &[(C('d'), A::Dislike)]),
+    row(
+        Section::Playback,
+        "повтор: очередь / трек / выкл",
+        &[(C('T'), A::Repeat)],
+    ),
+    row(
+        Section::Ratings,
+        "лайк текущего трека / выпуска",
+        &[(C('l'), A::LikeCurrent)],
+    ),
+    row(
+        Section::Ratings,
+        "лайк выбранного трека / выпуска",
+        &[(C('L'), A::LikeSelected)],
+    ),
+    row(
+        Section::Ratings,
+        "дизлайк и пропуск",
+        &[(C('d'), A::Dislike)],
+    ),
     row(Section::Waves, "Моя волна", &[(C('w'), A::MyWave)]),
     // The stations tab and Enter, both bound below.
-    labeled(Section::Waves, "2  Enter", "станция: жанр, настроение…", &[]),
+    labeled(
+        Section::Waves,
+        "2  Enter",
+        "станция: жанр, настроение…",
+        &[],
+    ),
     row(Section::Waves, "волна по треку", &[(C('r'), A::TrackWave)]),
-    row(Section::Waves, "все треки исполнителя", &[(C('A'), A::Artist)]),
+    row(
+        Section::Waves,
+        "все треки исполнителя",
+        &[(C('A'), A::Artist)],
+    ),
     row(Section::Waves, "альбом трека", &[(C('e'), A::Album)]),
     labeled(
         Section::Navigation,
@@ -158,44 +223,128 @@ pub const ROWS: &[Row] = &[
         Section::Navigation,
         "g  G",
         "в начало / в конец",
-        &[(C('g'), A::Top), (C('G'), A::Bottom), (KeyCode::Home, A::Top), (KeyCode::End, A::Bottom)],
+        &[
+            (C('g'), A::Top),
+            (C('G'), A::Bottom),
+            (KeyCode::Home, A::Top),
+            (KeyCode::End, A::Bottom),
+        ],
     ),
-    row(Section::Navigation, "играть", &[(KeyCode::Enter, A::Activate)]),
-    row(Section::Navigation, "список в случайном порядке", &[(C('s'), A::Shuffle)]),
-    row(Section::Navigation, "копировать ссылку на трек", &[(C('y'), A::CopyLink)]),
-    row(Section::Navigation, "играть по ссылке", &[(C('Y'), A::OpenLink)]),
-    labeled(Section::Navigation, "/", "поиск", &[(C('/'), A::Search), (C('i'), A::EditSearch)]),
+    row(
+        Section::Navigation,
+        "играть",
+        &[(KeyCode::Enter, A::Activate)],
+    ),
+    row(
+        Section::Navigation,
+        "список в случайном порядке",
+        &[(C('s'), A::Shuffle)],
+    ),
+    row(
+        Section::Navigation,
+        "копировать ссылку на трек",
+        &[(C('y'), A::CopyLink)],
+    ),
+    row(
+        Section::Navigation,
+        "играть по ссылке",
+        &[(C('Y'), A::OpenLink)],
+    ),
+    labeled(
+        Section::Navigation,
+        "/",
+        "поиск",
+        &[(C('/'), A::Search), (C('i'), A::EditSearch)],
+    ),
     row(Section::Navigation, "обновить", &[(C('R'), A::Reload)]),
-    row(Section::Navigation, "настройки, о программе", &[(C('o'), A::Settings)]),
+    row(
+        Section::Navigation,
+        "настройки, о программе",
+        &[(C('o'), A::Settings)],
+    ),
     row(Section::Navigation, "выход", &[(C('q'), A::Quit)]),
     // The help itself says how it is opened.
-    Row { section: Section::Navigation, label: None, help: None, keys: &[(C('?'), A::Help), (KeyCode::F(1), A::Help)] },
-    row(Section::Playlists, "добавить трек в плейлист", &[(C('a'), A::AddToPlaylist)]),
+    Row {
+        section: Section::Navigation,
+        label: None,
+        help: None,
+        keys: &[(C('?'), A::Help), (KeyCode::F(1), A::Help)],
+    },
+    row(
+        Section::Playlists,
+        "добавить трек в плейлист",
+        &[(C('a'), A::AddToPlaylist)],
+    ),
     labeled(
         Section::Playlists,
         "Enter  Esc",
         "открыть / закрыть плейлист",
         &[(KeyCode::Esc, A::Back), (KeyCode::Backspace, A::Back)],
     ),
-    row(Section::Playlists, "удалить трек / плейлист", &[(C('x'), A::Remove)]),
-    row(Section::Playlists, "переименовать плейлист", &[(C('E'), A::Rename)]),
-    row(Section::Playlists, "новый плейлист", &[(C('N'), A::NewPlaylist)]),
+    row(
+        Section::Playlists,
+        "удалить трек / плейлист",
+        &[(C('x'), A::Remove)],
+    ),
+    row(
+        Section::Playlists,
+        "переименовать плейлист",
+        &[(C('E'), A::Rename)],
+    ),
+    row(
+        Section::Playlists,
+        "новый плейлист",
+        &[(C('N'), A::NewPlaylist)],
+    ),
     row(
         Section::Podcasts,
         "предыдущий / следующий раздел",
-        &[(C('['), A::PodcastPreviousSection), (C(']'), A::PodcastNextSection)],
+        &[
+            (C('['), A::PodcastPreviousSection),
+            (C(']'), A::PodcastNextSection),
+        ],
     ),
-    labeled(Section::Podcasts, "Enter  Esc", "открыть / играть / назад", &[]),
-    row(Section::Podcasts, "эпизод с начала", &[(C('z'), A::PodcastFromStart)]),
-    row(Section::Podcasts, "описание / закрыть описание", &[(C('I'), A::PodcastDescription)]),
-    row(Section::Podcasts, "добавить / убрать подкаст из Моих", &[(C('f'), A::PodcastFavorite)]),
-    labeled(Section::Podcasts, "↑ ↓  PgUp PgDn", "прокрутка описания", &[]),
-    labeled(Section::Podcasts, "Home  End", "начало / конец описания", &[]),
+    labeled(
+        Section::Podcasts,
+        "Enter  Esc",
+        "открыть / играть / назад",
+        &[],
+    ),
+    row(
+        Section::Podcasts,
+        "эпизод с начала",
+        &[(C('z'), A::PodcastFromStart)],
+    ),
+    row(
+        Section::Podcasts,
+        "описание / закрыть описание",
+        &[(C('I'), A::PodcastDescription)],
+    ),
+    row(
+        Section::Podcasts,
+        "добавить / убрать подкаст из Моих",
+        &[(C('f'), A::PodcastFavorite)],
+    ),
+    labeled(
+        Section::Podcasts,
+        "↑ ↓  PgUp PgDn",
+        "прокрутка описания",
+        &[],
+    ),
+    labeled(
+        Section::Podcasts,
+        "Home  End",
+        "начало / конец описания",
+        &[],
+    ),
 ];
 
 /// What `code` does on the main screen.
 pub fn action(code: KeyCode) -> Option<Action> {
-    ROWS.iter().flat_map(|r| r.keys).find(|(k, _)| *k == code).map(|&(_, a)| a)
+    ROWS.iter()
+        .flat_map(|r| r.keys)
+        .find(|(k, _)| *k == code)
+        .map(|&(_, a)| a)
 }
 
 /// A key as the help writes it (`short`: as the hints at the bottom do).
@@ -217,7 +366,12 @@ fn key_name(code: KeyCode, short: bool) -> String {
 pub fn row_keys(row: &Row) -> String {
     match row.label {
         Some(label) => label.to_string(),
-        None => row.keys.iter().map(|&(k, _)| key_name(k, false)).collect::<Vec<_>>().join("  "),
+        None => row
+            .keys
+            .iter()
+            .map(|&(k, _)| key_name(k, false))
+            .collect::<Vec<_>>()
+            .join("  "),
     }
 }
 
@@ -259,7 +413,10 @@ mod tests {
         assert_eq!(action(C('z')), Some(A::PodcastFromStart));
         assert_eq!(action(C('I')), Some(A::PodcastDescription));
         assert_eq!(action(C('f')), Some(A::PodcastFavorite));
-        assert_eq!(hint_keys(&[A::PodcastPreviousSection, A::PodcastNextSection]), "[]");
+        assert_eq!(
+            hint_keys(&[A::PodcastPreviousSection, A::PodcastNextSection]),
+            "[]"
+        );
         // Every row the help shows has keys behind it (or names keys bound elsewhere).
         for r in ROWS {
             assert!(!r.keys.is_empty() || r.label.is_some(), "{:?}", r.help);

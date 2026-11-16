@@ -27,7 +27,10 @@ impl Title {
         if konsole_format.is_some() {
             send("\x1b]30;%w\x07");
         }
-        Title { shown: String::new(), konsole_format }
+        Title {
+            shown: String::new(),
+            konsole_format,
+        }
     }
 
     pub fn set(&mut self, title: &str) {
@@ -61,14 +64,22 @@ fn konsole_format() -> Option<String> {
             let format = zbus::block_on(async {
                 let conn = zbus::Connection::session().await?;
                 let reply = conn
-                    .call_method(Some(service.as_str()), session.as_str(), Some("org.kde.konsole.Session"), "tabTitleFormat", &(0i32,))
+                    .call_method(
+                        Some(service.as_str()),
+                        session.as_str(),
+                        Some("org.kde.konsole.Session"),
+                        "tabTitleFormat",
+                        &(0i32,),
+                    )
                     .await?;
                 reply.body().deserialize::<String>()
             });
             let _ = tx.send(format.ok());
         })
         .ok()?;
-    rx.recv_timeout(std::time::Duration::from_millis(500)).ok().flatten()
+    rx.recv_timeout(std::time::Duration::from_millis(500))
+        .ok()
+        .flatten()
 }
 
 #[cfg(not(target_os = "linux"))]

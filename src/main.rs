@@ -8,6 +8,7 @@ mod keymap;
 mod media;
 mod title;
 mod ui;
+mod ynison;
 
 use ymusic_api as api;
 use ymusic_core::{library, queue};
@@ -23,7 +24,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[derive(Parser)]
-#[command(name = "ymusic", version, about = "Яндекс Музыка в терминале: Моя волна, лайки, станции")]
+#[command(
+    name = "ymusic",
+    version,
+    about = "Яндекс Музыка в терминале: Моя волна, лайки, станции"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,
@@ -64,7 +69,8 @@ trait Lock<T> {
 
 impl<T> Lock<T> for std::sync::Mutex<T> {
     fn locked(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -85,7 +91,13 @@ fn main() -> Result<()> {
             let mut api = api::Api::new(&token(&mut cfg)?);
             api.web = cfg.settings.web_api;
             let a = api.account_status()?;
-            println!("{} ({}) uid={} Плюс: {}", a.name, a.login, a.uid, if a.has_plus { "да" } else { "нет" });
+            println!(
+                "{} ({}) uid={} Плюс: {}",
+                a.name,
+                a.login,
+                a.uid,
+                if a.has_plus { "да" } else { "нет" }
+            );
             return Ok(());
         }
         None => {}
@@ -94,7 +106,9 @@ fn main() -> Result<()> {
     let token = token(&mut cfg)?;
     let mut api = api::Api::new(&token);
     api.web = cfg.settings.web_api;
-    let account = api.account_status().context("не удалось войти (попробуйте `ymusic login`)")?;
+    let account = api
+        .account_status()
+        .context("не удалось войти (попробуйте `ymusic login`)")?;
 
     let (tx, rx) = mpsc::channel();
     // `YMUSIC_OUTPUT` applies to this run only, as `--no-icons` below.
@@ -106,6 +120,16 @@ fn main() -> Result<()> {
         tls: api::tls_config(),
     };
     let player = player::Player::spawn(tx.clone(), cfg.settings.volume, options)?;
+    if cfg.settings.ynison_device_id.is_empty() {
+        cfg.settings.ynison_device_id = api::random_uuid();
+    }
+    let mut ynison = ynison::Client::new(
+        token.clone(),
+        account.uid.clone(),
+        cfg.settings.ynison_device_id.clone(),
+        api.clone(),
+        tx.clone(),
+    )?;
     let (remote, input_tx, signal_tx) = (tx.clone(), tx.clone(), tx.clone());
     let mut runtime = effect::Runtime::new(player, tx);
     let s = &cfg.settings;
@@ -113,13 +137,19 @@ fn main() -> Result<()> {
     app.start();
     app.set_eq(eq::index(s.eq.id));
     app.set_crossfade(s.crossfade);
-    app.set_art(s.art.unwrap_or(if cfg.covers { app::Art::Cover } else { app::Art::None }));
+    app.set_art(s.art.unwrap_or(if cfg.covers {
+        app::Art::Cover
+    } else {
+        app::Art::None
+    }));
     app.finish_track = s.finish_track;
     app.podcast_all = s.podcast_all;
     app.output = output;
     app.hide_account = s.hide_account;
     app.remaining_time = s.remaining_time;
     app.show_audio_info = s.show_audio_info;
+    app.ynison.autoplay = s.autoplay;
+    app.set_ynison(s.ynison);
     if let Some(session) = &s.lastfm {
         app.lastfm = app::Lastfm::On(session.clone());
     }
@@ -130,7 +160,10 @@ fn main() -> Result<()> {
     // unless icons are switched in the settings window.
     let no_icons = cli.no_icons || config::env("NO_ICONS").is_some();
     app.set_icons(s.icons && !no_icons);
-    let run = RunOnly { icons: no_icons.then_some(false), output: output_env };
+    let run = RunOnly {
+        icons: no_icons.then_some(false),
+        output: output_env,
+    };
     app.quality = api::quality_index(s.quality.id);
     if let Some(id) = cli.station {
         app.start_station_id(&id);
@@ -145,11 +178,17 @@ fn main() -> Result<()> {
     {
         use signal_hook::consts::{SIGTERM, SIGWINCH};
         let mut signals = signal_hook::iterator::Signals::new([SIGWINCH, SIGTERM])?;
-        std::thread::Builder::new().name("signals".into()).spawn(move || {
-            for signal in signals.forever() {
-                let _ = signal_tx.send(if signal == SIGTERM { app::Msg::Terminate } else { app::Msg::Resized });
-            }
-        })?;
+        std::thread::Builder::new()
+            .name("signals".into())
+            .spawn(move || {
+                for signal in signals.forever() {
+                    let _ = signal_tx.send(if signal == SIGTERM {
+                        app::Msg::Terminate
+                    } else {
+                        app::Msg::Resized
+                    });
+                }
+            })?;
     }
 
     let mut terminal = ratatui::init();
@@ -245,13 +284,24 @@ fn main() -> Result<()> {
                 }
             }
             app.tick();
+            if ynison.due(app.ynison.enabled, app.ynison.epoch) {
+                ynison.update(app.ynison_desired());
+            }
             let now = Instant::now();
             saving.observe(
                 settings_of(&app, &cfg.settings, run),
-                app.scrobbles_revision().wrapping_add(app.podcast_progress_revision()), now,
+                app.scrobbles_revision()
+                    .wrapping_add(app.podcast_progress_revision()),
+                now,
             );
             if saving.ready(now) {
-                match saving.flush(&mut cfg, app.pending_scrobbles(), app.pending_podcast_progress(), now, Config::save) {
+                match saving.flush(
+                    &mut cfg,
+                    app.pending_scrobbles(),
+                    app.pending_podcast_progress(),
+                    now,
+                    Config::save,
+                ) {
                     Ok(()) => save_error = None,
                     Err(e) => {
                         let message = format!("Не удалось сохранить настройки: {e:#}");
@@ -277,6 +327,8 @@ fn main() -> Result<()> {
     title.restore();
     ratatui::restore();
 
+    ynison.finish(app.ynison_desired());
+
     // Keep the last checkpoint before stopping output. Unsent progress remains durable below.
     app.capture_podcast_progress();
     runtime.player.apply(player::PlayerCmd::Stop);
@@ -297,15 +349,22 @@ fn main() -> Result<()> {
             let done_tx = done_tx.clone();
             std::thread::spawn(move || {
                 for report in pending.items {
-                    let result = api.podcast_save_progress(&report).map_err(|e| api::ApiError::from_anyhow(&e));
-                    if done_tx.send(Some((report, result))).is_err() { break; }
+                    let result = api
+                        .podcast_save_progress(&report)
+                        .map_err(|e| api::ApiError::from_anyhow(&e));
+                    if done_tx.send(Some((report, result))).is_err() {
+                        break;
+                    }
                 }
             });
         }
         drop(done_tx);
         let until = Instant::now() + Duration::from_secs(2);
-        while let Ok(result) = done_rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-            if let Some((report, result)) = result { app.podcast_progress_saved(&report, result); }
+        while let Ok(result) = done_rx.recv_timeout(until.saturating_duration_since(Instant::now()))
+        {
+            if let Some((report, result)) = result {
+                app.podcast_progress_saved(&report, result);
+            }
         }
     }
 
@@ -315,13 +374,17 @@ fn main() -> Result<()> {
     if app.logout {
         cfg.token = None;
     }
-    let saved = cfg.save().context("не удалось сохранить настройки при выходе");
+    let saved = cfg
+        .save()
+        .context("не удалось сохранить настройки при выходе");
     if app.logout && res.is_ok() && saved.is_ok() {
         println!("Вы вышли из аккаунта. Войти снова: ymusic login");
         warn_env_token();
     }
     if let Err(e) = saved {
-        if res.is_ok() { return Err(e); }
+        if res.is_ok() {
+            return Err(e);
+        }
         eprintln!("{e:#}");
     }
     match app.exit_error.take() {
@@ -380,7 +443,11 @@ struct RunOnly {
 
 /// The value to save: the program's, unless it is still the one set for this run only.
 fn own<T: PartialEq>(now: T, run_only: Option<T>, saved: T) -> T {
-    if run_only.is_some_and(|r| r == now) { saved } else { now }
+    if run_only.is_some_and(|r| r == now) {
+        saved
+    } else {
+        now
+    }
 }
 
 /// The settings as they are in the program now.
@@ -400,6 +467,9 @@ fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config
         hide_account: app.hide_account,
         remaining_time: app.remaining_time,
         show_audio_info: app.show_audio_info,
+        ynison: app.ynison.enabled,
+        autoplay: app.ynison.autoplay,
+        ynison_device_id: saved.ynison_device_id.clone(),
         lastfm: app.lastfm_session().cloned(),
     }
 }
@@ -437,7 +507,11 @@ fn login(cfg: &mut Config, token: Option<String>, browser: bool) -> Result<()> {
         "\n  ✓ Вход выполнен: {} ({}){}\n  Токен сохранён в {}",
         acc.name,
         acc.login,
-        if acc.has_plus { " · Плюс" } else { " · без Плюса (только 30-секундные превью)" },
+        if acc.has_plus {
+            " · Плюс"
+        } else {
+            " · без Плюса (только 30-секундные превью)"
+        },
         config::path().display()
     );
     Ok(())

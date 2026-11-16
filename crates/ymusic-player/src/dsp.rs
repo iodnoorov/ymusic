@@ -21,13 +21,20 @@ fn alpha_octaves(w0: f64, bw: f64) -> f64 {
 
 impl Biquad {
     fn new(b: [f64; 3], a: [f64; 3]) -> Biquad {
-        Biquad { b: [b[0] / a[0], b[1] / a[0], b[2] / a[0]], a: [a[1] / a[0], a[2] / a[0]], z: [[0.0; 2]; 2] }
+        Biquad {
+            b: [b[0] / a[0], b[1] / a[0], b[2] / a[0]],
+            a: [a[1] / a[0], a[2] / a[0]],
+            z: [[0.0; 2]; 2],
+        }
     }
 
     fn peaking(w0: f64, alpha: f64, gain_db: f64) -> Biquad {
         let a = 10f64.powf(gain_db / 40.0);
         let c = w0.cos();
-        Biquad::new([1.0 + alpha * a, -2.0 * c, 1.0 - alpha * a], [1.0 + alpha / a, -2.0 * c, 1.0 - alpha / a])
+        Biquad::new(
+            [1.0 + alpha * a, -2.0 * c, 1.0 - alpha * a],
+            [1.0 + alpha / a, -2.0 * c, 1.0 - alpha / a],
+        )
     }
 
     /// Peaking band `bw` octaves wide (`equalizer=t=o`).
@@ -55,7 +62,11 @@ impl Biquad {
                     -2.0 * a * ((a - 1.0) + (a + 1.0) * c),
                     a * ((a + 1.0) + (a - 1.0) * c - 2.0 * sa * alpha),
                 ],
-                [(a + 1.0) - (a - 1.0) * c + 2.0 * sa * alpha, 2.0 * ((a - 1.0) - (a + 1.0) * c), (a + 1.0) - (a - 1.0) * c - 2.0 * sa * alpha],
+                [
+                    (a + 1.0) - (a - 1.0) * c + 2.0 * sa * alpha,
+                    2.0 * ((a - 1.0) - (a + 1.0) * c),
+                    (a + 1.0) - (a - 1.0) * c - 2.0 * sa * alpha,
+                ],
             )
         } else {
             Biquad::new(
@@ -64,7 +75,11 @@ impl Biquad {
                     2.0 * a * ((a - 1.0) - (a + 1.0) * c),
                     a * ((a + 1.0) - (a - 1.0) * c - 2.0 * sa * alpha),
                 ],
-                [(a + 1.0) + (a - 1.0) * c + 2.0 * sa * alpha, -2.0 * ((a - 1.0) + (a + 1.0) * c), (a + 1.0) + (a - 1.0) * c - 2.0 * sa * alpha],
+                [
+                    (a + 1.0) + (a - 1.0) * c + 2.0 * sa * alpha,
+                    -2.0 * ((a - 1.0) + (a + 1.0) * c),
+                    (a + 1.0) + (a - 1.0) * c - 2.0 * sa * alpha,
+                ],
             )
         }
     }
@@ -73,7 +88,10 @@ impl Biquad {
     pub fn bandpass_octaves(f: f64, bw: f64, rate: f64) -> Biquad {
         let w0 = 2.0 * PI * f / rate;
         let alpha = alpha_octaves(w0, bw);
-        Biquad::new([alpha, 0.0, -alpha], [1.0 + alpha, -2.0 * w0.cos(), 1.0 - alpha])
+        Biquad::new(
+            [alpha, 0.0, -alpha],
+            [1.0 + alpha, -2.0 * w0.cos(), 1.0 - alpha],
+        )
     }
 
     /// Gain at frequency `f`, as a factor.
@@ -160,7 +178,8 @@ impl Limiter {
         self.sum = self.hold as f64;
         // A peak's gain is fully down `hold - 1` frames after it enters: the sound waits as long.
         self.delay.clear();
-        self.delay.extend(std::iter::repeat_n([0.0; 2], self.hold - 1));
+        self.delay
+            .extend(std::iter::repeat_n([0.0; 2], self.hold - 1));
         self.n = 0;
     }
 
@@ -173,14 +192,26 @@ impl Limiter {
 
     fn process_frame(&mut self, frame: &mut [f32]) {
         let peak = frame[0].abs().max(frame[1].abs());
-        let target = if peak > self.limit { self.limit / peak } else { 1.0 };
+        let target = if peak > self.limit {
+            self.limit / peak
+        } else {
+            1.0
+        };
         // Down at once, back up slowly.
-        self.gain = if target < self.gain { target } else { target + (self.gain - target) * self.release };
+        self.gain = if target < self.gain {
+            target
+        } else {
+            target + (self.gain - target) * self.release
+        };
         while self.minimum.back().is_some_and(|&(_, g)| g >= self.gain) {
             self.minimum.pop_back();
         }
         self.minimum.push_back((self.n, self.gain));
-        while self.minimum.front().is_some_and(|&(i, _)| i + self.hold as u64 <= self.n) {
+        while self
+            .minimum
+            .front()
+            .is_some_and(|&(i, _)| i + self.hold as u64 <= self.n)
+        {
             self.minimum.pop_front();
         }
         let held = self.minimum.front().map_or(1.0, |&(_, g)| g);
@@ -203,7 +234,10 @@ pub struct Equalizer {
 
 impl Equalizer {
     pub fn new(bands: Vec<Biquad>, rate: f64) -> Equalizer {
-        Equalizer { bands, limiter: Limiter::new(0.9, rate) }
+        Equalizer {
+            bands,
+            limiter: Limiter::new(0.9, rate),
+        }
     }
 
     pub fn process(&mut self, samples: &mut [f32]) {
@@ -242,7 +276,11 @@ pub struct Resampler {
 
 impl Resampler {
     pub fn to(from: u32, to: u32) -> Resampler {
-        Resampler { step: f64::from(from) / f64::from(to), pos: 0.0, prev: [0.0; 2] }
+        Resampler {
+            step: f64::from(from) / f64::from(to),
+            pos: 0.0,
+            prev: [0.0; 2],
+        }
     }
 
     pub fn reset(&mut self) {
@@ -259,7 +297,13 @@ impl Resampler {
         if frames == 0 {
             return;
         }
-        let at = |i: isize| if i < 0 { self.prev } else { [input[i as usize * 2], input[i as usize * 2 + 1]] };
+        let at = |i: isize| {
+            if i < 0 {
+                self.prev
+            } else {
+                [input[i as usize * 2], input[i as usize * 2 + 1]]
+            }
+        };
         while self.pos < frames as f64 - 1.0 {
             let i = self.pos.floor();
             let f = (self.pos - i) as f32;
@@ -286,7 +330,9 @@ impl Fft {
         Fft {
             cos: (0..n / 2).map(|k| angle(k).cos()).collect(),
             sin: (0..n / 2).map(|k| angle(k).sin()).collect(),
-            reversed: (0..n).map(|i| i.reverse_bits() >> (usize::BITS - bits)).collect(),
+            reversed: (0..n)
+                .map(|i| i.reverse_bits() >> (usize::BITS - bits))
+                .collect(),
         }
     }
 
@@ -345,17 +391,37 @@ impl Spectrum {
         let bins = WINDOW / 2 + 1;
         let bin_width = rate / WINDOW as f64;
         let width = |f: f64| f * (2f64.powf(bw / 2.0) - 2f64.powf(-bw / 2.0));
-        let (narrow, wide): (Vec<f64>, Vec<f64>) = freqs.iter().partition(|&&f| width(f) < NARROW_BINS * bin_width);
+        let (narrow, wide): (Vec<f64>, Vec<f64>) = freqs
+            .iter()
+            .partition(|&&f| width(f) < NARROW_BINS * bin_width);
         let weights = wide
             .iter()
             .map(|&f| {
                 let b = Biquad::bandpass_octaves(f, bw, rate);
-                (0..bins).map(|k| b.response(k as f64 * bin_width, rate)).collect()
+                (0..bins)
+                    .map(|k| b.response(k as f64 * bin_width, rate))
+                    .collect()
             })
             .collect();
-        let narrow = narrow.iter().map(|&f| (Biquad::bandpass_octaves(f, bw, rate), Vec::with_capacity(WINDOW))).collect();
-        let window = (0..WINDOW).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / WINDOW as f64).cos()).collect();
-        Spectrum { weights, narrow, window, buf: Vec::with_capacity(WINDOW), fft: Fft::new(WINDOW) }
+        let narrow = narrow
+            .iter()
+            .map(|&f| {
+                (
+                    Biquad::bandpass_octaves(f, bw, rate),
+                    Vec::with_capacity(WINDOW),
+                )
+            })
+            .collect();
+        let window = (0..WINDOW)
+            .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / WINDOW as f64).cos())
+            .collect();
+        Spectrum {
+            weights,
+            narrow,
+            window,
+            buf: Vec::with_capacity(WINDOW),
+            fft: Fft::new(WINDOW),
+        }
     }
 
     /// Feeds stereo samples; for every window that fills up, calls `out` with the number of
@@ -396,7 +462,10 @@ impl Spectrum {
         self.fft.run(&mut re, &mut im);
         // Z = A + iB: A[k] = (Z[k] + conj Z[N-k]) / 2, B[k] = (Z[k] - conj Z[N-k]) / 2i.
         let scale = 2.0 * WINDOW as f64;
-        let mut out = [Vec::with_capacity(WINDOW / 2 + 1), Vec::with_capacity(WINDOW / 2 + 1)];
+        let mut out = [
+            Vec::with_capacity(WINDOW / 2 + 1),
+            Vec::with_capacity(WINDOW / 2 + 1),
+        ];
         for k in 0..=WINDOW / 2 {
             let m = (WINDOW - k) % WINDOW;
             out[0].push((re[k] + re[m]).hypot(im[k] - im[m]) / scale);
@@ -406,10 +475,18 @@ impl Spectrum {
     }
 
     fn measure(&self) -> Vec<f32> {
-        let db = |mean: f64| if mean > 0.0 { (20.0 * mean.log10()).max(-150.0) as f32 } else { -150.0 };
+        let db = |mean: f64| {
+            if mean > 0.0 {
+                (20.0 * mean.log10()).max(-150.0) as f32
+            } else {
+                -150.0
+            }
+        };
         let mean = |m: &[f64]| m.iter().sum::<f64>() / m.len() as f64;
         // The whole signal and the narrow bands' filtered ones, two per FFT.
-        let signals: Vec<&[f64]> = std::iter::once(self.buf.as_slice()).chain(self.narrow.iter().map(|(_, b)| b.as_slice())).collect();
+        let signals: Vec<&[f64]> = std::iter::once(self.buf.as_slice())
+            .chain(self.narrow.iter().map(|(_, b)| b.as_slice()))
+            .collect();
         let mut mags = Vec::with_capacity(signals.len());
         for pair in signals.chunks(2) {
             let [a, b] = self.magnitudes(pair[0], pair.get(1).copied());
@@ -420,7 +497,10 @@ impl Spectrum {
         }
         let narrow = mags[1..].iter().map(|m| db(mean(m)));
         let all = &mags[0];
-        let wide = self.weights.iter().map(|w| db(all.iter().zip(w).map(|(m, w)| m * w).sum::<f64>() / all.len() as f64));
+        let wide = self
+            .weights
+            .iter()
+            .map(|w| db(all.iter().zip(w).map(|(m, w)| m * w).sum::<f64>() / all.len() as f64));
         narrow.chain(wide).collect()
     }
 }
@@ -451,7 +531,12 @@ mod tests {
         let mut out = Vec::new();
         r.process(&[0.0, 0.0, 1.0, -1.0], &mut out);
         r.process(&[2.0, -2.0, 3.0, -3.0], &mut out);
-        assert_eq!(out, [0.0, 0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5]);
+        assert_eq!(
+            out,
+            [
+                0.0, 0.0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.0, -2.0, 2.5, -2.5
+            ]
+        );
         let mut same = Resampler::to(44100, 44100);
         let mut out = Vec::new();
         same.process(&[0.1, 0.2], &mut out);
@@ -475,7 +560,10 @@ mod tests {
         assert!((db(&q, 3000.0) + 4.0).abs() < 0.01);
         let low = Biquad::shelf(false, 100.0, 1.0, 5.0, RATE);
         assert!((db(&low, 10.0) - 5.0).abs() < 0.1 && db(&low, 5000.0).abs() < 0.1);
-        assert!((db(&low, 100.0) - 2.5).abs() < 0.1, "half the gain at the corner");
+        assert!(
+            (db(&low, 100.0) - 2.5).abs() < 0.1,
+            "half the gain at the corner"
+        );
         let high = Biquad::shelf(true, 10000.0, 1.0, 7.0, RATE);
         assert!((db(&high, 20000.0) - 7.0).abs() < 0.3 && db(&high, 200.0).abs() < 0.1);
         let bp = Biquad::bandpass_octaves(2000.0, 0.5, RATE);
@@ -488,7 +576,10 @@ mod tests {
             b.process(f);
         }
         let tail = peak(&s[s.len() / 2..]);
-        assert!((tail / 0.25 - 10f32.powf(6.0 / 20.0)).abs() < 0.01, "{tail}");
+        assert!(
+            (tail / 0.25 - 10f32.powf(6.0 / 20.0)).abs() < 0.01,
+            "{tail}"
+        );
     }
 
     #[test]
@@ -516,7 +607,10 @@ mod tests {
         assert!(out.abs() < 1e-6 && inc == 1.0);
         for t in [0.1, 0.5, 0.9] {
             let (out, inc) = crossfade_gains(t);
-            assert!((out * out + inc * inc - 1.0).abs() < 1e-6, "equal power at {t}");
+            assert!(
+                (out * out + inc * inc - 1.0).abs() < 1e-6,
+                "equal power at {t}"
+            );
         }
         assert_eq!(crossfade_gains(-1.0), (1.0, 0.0));
         assert_eq!(crossfade_gains(2.0), crossfade_gains(1.0));
@@ -524,11 +618,15 @@ mod tests {
 
     #[test]
     fn spectrum_bands() {
-        let freqs: Vec<f64> = (0..16).map(|i| 40.0 * 2f64.powf(i as f64 * 0.576)).collect();
+        let freqs: Vec<f64> = (0..16)
+            .map(|i| 40.0 * 2f64.powf(i as f64 * 0.576))
+            .collect();
         let mut s = Spectrum::new(&freqs, 0.576, RATE);
         let mut levels = Vec::new();
         s.feed(&sine(freqs[9], 0.5, 0.1), |_, l| levels = l);
-        let loudest = (0..16).max_by(|&a, &b| levels[a].total_cmp(&levels[b])).unwrap();
+        let loudest = (0..16)
+            .max_by(|&a, &b| levels[a].total_cmp(&levels[b]))
+            .unwrap();
         assert_eq!(loudest, 9, "{levels:?}");
         assert!(levels[2] < levels[9] - 30.0);
         // Silence brings the bars down (the narrow filters ring out for a while).

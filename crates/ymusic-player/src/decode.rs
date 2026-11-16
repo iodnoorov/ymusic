@@ -2,7 +2,7 @@
 //! AAC with SBR (HE-AAC: the server sends it for «Экономия трафика») goes through fdk-aac, since
 //! symphonia's decoder would silently play only its 22 kHz core.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::sync::OnceLock;
 use symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
@@ -15,7 +15,9 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::Time;
 
 /// Sampling frequencies by the 4-bit index of an AudioSpecificConfig.
-const AAC_RATES: [u32; 13] = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+const AAC_RATES: [u32; 13] = [
+    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
 
 /// So many undecodable packets in a row mean the stream is broken, not just a glitch.
 const MAX_BAD_PACKETS: u32 = 50;
@@ -107,7 +109,11 @@ fn fdk_delay(asc: &[u8], packet: &[u8]) -> u64 {
 }
 
 fn make_decoder(params: &AudioCodecParameters, fdk: bool) -> Result<Box<dyn AudioDecoder>> {
-    let codecs = if fdk { fdk_codecs() } else { symphonia::default::get_codecs() };
+    let codecs = if fdk {
+        fdk_codecs()
+    } else {
+        symphonia::default::get_codecs()
+    };
     Ok(codecs.make_audio_decoder(params, &AudioDecoderOptions::default())?)
 }
 
@@ -134,21 +140,43 @@ impl Decoder {
     pub fn open(source: Box<dyn MediaSource>) -> Result<Decoder> {
         let mss = MediaSourceStream::new(source, Default::default());
         let format = symphonia::default::get_probe()
-            .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
+            .probe(
+                &Hint::new(),
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
             .context("неизвестный формат файла")?;
-        let track = format.default_track(TrackType::Audio).ok_or_else(|| anyhow!("в файле нет звука"))?;
+        let track = format
+            .default_track(TrackType::Audio)
+            .ok_or_else(|| anyhow!("в файле нет звука"))?;
         let params = track
             .codec_params
             .as_ref()
             .and_then(|p| p.audio())
             .ok_or_else(|| anyhow!("в файле нет звука"))?
             .clone();
-        let rate = params.sample_rate.ok_or_else(|| anyhow!("неизвестная частота дискретизации"))?;
+        let rate = params
+            .sample_rate
+            .ok_or_else(|| anyhow!("неизвестная частота дискретизации"))?;
         let duration = track.num_frames.map(|n| n as f64 / f64::from(rate));
         let id = track.id;
-        let fdk = params.codec == CODEC_ID_AAC && needs_fdk(params.extra_data.as_deref().unwrap_or(&[]));
+        let fdk =
+            params.codec == CODEC_ID_AAC && needs_fdk(params.extra_data.as_deref().unwrap_or(&[]));
         let decoder = make_decoder(&params, fdk)?;
-        Ok(Decoder { format, decoder, params, track: id, fdk, rate, duration, skip: 0, delay: None, samples: Vec::new(), out: Vec::new() })
+        Ok(Decoder {
+            format,
+            decoder,
+            params,
+            track: id,
+            fdk,
+            rate,
+            duration,
+            skip: 0,
+            delay: None,
+            samples: Vec::new(),
+            out: Vec::new(),
+        })
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -171,7 +199,9 @@ impl Decoder {
             let packet = match self.format.next_packet() {
                 Ok(Some(p)) => p,
                 Ok(None) => return Ok(None),
-                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                }
                 Err(Error::ResetRequired) => {
                     self.decoder = make_decoder(&self.params, self.fdk)?;
                     continue;
@@ -201,7 +231,10 @@ impl Decoder {
                 }
             }
             if self.fdk && self.delay.is_none() {
-                let delay = fdk_delay(self.params.extra_data.as_deref().unwrap_or(&[]), &packet.data);
+                let delay = fdk_delay(
+                    self.params.extra_data.as_deref().unwrap_or(&[]),
+                    &packet.data,
+                );
                 self.delay = Some(delay);
                 self.skip += delay;
             }
@@ -214,7 +247,11 @@ impl Decoder {
             self.skip -= skip as u64;
             self.out.clear();
             for frame in self.samples.chunks_exact(channels).skip(skip) {
-                let (l, r) = if channels == 1 { (frame[0], frame[0]) } else { (frame[0], frame[1]) };
+                let (l, r) = if channels == 1 {
+                    (frame[0], frame[0])
+                } else {
+                    (frame[0], frame[1])
+                };
                 self.out.extend([l, r]);
             }
             if !self.out.is_empty() {
@@ -225,18 +262,29 @@ impl Decoder {
 
     /// Moves to `secs` from the start; returns the position actually reached, seconds.
     pub fn seek(&mut self, secs: f64) -> Result<f64> {
-        let time = Time::try_from_secs_f64(secs.max(0.0)).ok_or_else(|| anyhow!("неверная позиция"))?;
-        let to = self.format.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(self.track) })?;
+        let time =
+            Time::try_from_secs_f64(secs.max(0.0)).ok_or_else(|| anyhow!("неверная позиция"))?;
+        let to = self.format.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time,
+                track_id: Some(self.track),
+            },
+        )?;
         self.decoder.reset();
-        let (required, actual) = (to.required_ts.get().max(0) as u64, to.actual_ts.get().max(0) as u64);
-        self.skip = required.saturating_sub(actual) + if self.fdk { self.delay.unwrap_or(0) } else { 0 };
+        let (required, actual) = (
+            to.required_ts.get().max(0) as u64,
+            to.actual_ts.get().max(0) as u64,
+        );
+        self.skip =
+            required.saturating_sub(actual) + if self.fdk { self.delay.unwrap_or(0) } else { 0 };
         Ok(required as f64 / f64::from(self.rate))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{needs_fdk, Decoder};
+    use super::{Decoder, needs_fdk};
     use std::io::Cursor;
 
     fn open(data: &'static [u8]) -> Decoder {
@@ -269,9 +317,18 @@ mod tests {
         let w = 2.0 * std::f64::consts::PI * 8000.0 / f64::from(rate);
         let alpha = w.sin() / 2.0f64.sqrt();
         let a0 = 1.0 + alpha;
-        let (b0, b1, b2) = ((1.0 + w.cos()) / 2.0 / a0, -(1.0 + w.cos()) / a0, (1.0 + w.cos()) / 2.0 / a0);
+        let (b0, b1, b2) = (
+            (1.0 + w.cos()) / 2.0 / a0,
+            -(1.0 + w.cos()) / a0,
+            (1.0 + w.cos()) / 2.0 / a0,
+        );
         let (a1, a2) = (-2.0 * w.cos() / a0, (1.0 - alpha) / a0);
-        let mut x: Vec<f64> = pcm.as_chunks::<2>().0.iter().map(|f| f64::from(f[0])).collect();
+        let mut x: Vec<f64> = pcm
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|f| f64::from(f[0]))
+            .collect();
         for _ in 0..2 {
             let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
             for v in &mut x {
@@ -305,8 +362,16 @@ mod tests {
     #[test]
     fn decodes_all_formats() {
         for (name, data, fdk) in [
-            ("aac-lc", &include_bytes!("../tests/data/aac-lc.m4a")[..], false),
-            ("he-aac", &include_bytes!("../tests/data/he-aac.m4a")[..], true),
+            (
+                "aac-lc",
+                &include_bytes!("../tests/data/aac-lc.m4a")[..],
+                false,
+            ),
+            (
+                "he-aac",
+                &include_bytes!("../tests/data/he-aac.m4a")[..],
+                true,
+            ),
             ("mp3", &include_bytes!("../tests/data/mp3.mp3")[..], false),
         ] {
             let mut d = open(data);
@@ -316,10 +381,16 @@ mod tests {
             let secs = pcm.len() as f64 / 2.0 / 44100.0;
             assert!((2.0..2.3).contains(&secs), "{name}: {secs} s");
             let duration = d.duration().unwrap();
-            assert!((duration - secs).abs() < 0.1, "{name}: {duration} s, decoded {secs} s");
+            assert!(
+                (duration - secs).abs() < 0.1,
+                "{name}: {duration} s, decoded {secs} s"
+            );
             let mid = &pcm[pcm.len() / 4..pcm.len() / 4 * 3];
             let (a, b) = (tone(mid, 44100, 440.0), tone(mid, 44100, 3000.0));
-            assert!((a - 0.3).abs() < 0.03 && (b - 0.2).abs() < 0.03, "{name}: {a} {b}");
+            assert!(
+                (a - 0.3).abs() < 0.03 && (b - 0.2).abs() < 0.03,
+                "{name}: {a} {b}"
+            );
             // SBR recreates the high band only roughly (−5 dB here), but it must be there.
             let high = high_band(mid, 44100);
             assert!(high > 0.04, "{name}: {high}");
@@ -329,8 +400,18 @@ mod tests {
     #[test]
     fn flac_preserves_samples_and_seeks_in_both_containers() {
         for (data, scale, modulus, offset) in [
-            (&include_bytes!("../tests/data/pcm16.flac")[..], 32768.0f32, 60001, 30000),
-            (&include_bytes!("../tests/data/pcm24.m4a")[..], 8388608.0f32, 6000001, 3000000),
+            (
+                &include_bytes!("../tests/data/pcm16.flac")[..],
+                32768.0f32,
+                60001,
+                30000,
+            ),
+            (
+                &include_bytes!("../tests/data/pcm24.m4a")[..],
+                8388608.0f32,
+                6000001,
+                3000000,
+            ),
         ] {
             let mut d = open(data);
             assert!(!d.uses_fdk());
@@ -357,7 +438,9 @@ mod tests {
         let mut d = open(data);
         let at = d.seek(1.0).unwrap();
         assert!((at - 1.0).abs() < 0.001, "{at}");
-        let after: Vec<f32> = std::iter::from_fn(|| d.next_chunk().unwrap().map(<[f32]>::to_vec)).flatten().collect();
+        let after: Vec<f32> = std::iter::from_fn(|| d.next_chunk().unwrap().map(<[f32]>::to_vec))
+            .flatten()
+            .collect();
         let start = (at * 44100.0).round() as usize * 2;
         assert_eq!(after.len(), full.len() - start);
         // A decoder restarted mid-stream needs a frame to settle. After that it matches, up to the
@@ -365,7 +448,11 @@ mod tests {
         let settled = 4096;
         let diff = |lag: usize| {
             let full = &full[start + settled + lag * 2..];
-            after[settled..].iter().zip(full).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max)
+            after[settled..]
+                .iter()
+                .zip(full)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max)
         };
         assert!(diff(0) < 0.005, "{}", diff(0));
         // One frame off is already far worse: the position is exact.
@@ -384,15 +471,21 @@ mod tests {
             d.next_chunk().unwrap();
         }
         let at = d.seek(1.0).unwrap();
-        let after: Vec<f32> = std::iter::from_fn(|| d.next_chunk().unwrap().map(<[f32]>::to_vec)).flatten().collect();
+        let after: Vec<f32> = std::iter::from_fn(|| d.next_chunk().unwrap().map(<[f32]>::to_vec))
+            .flatten()
+            .collect();
         let start = (at * 44100.0).round() as i64;
         // Correlate 0.25 s from a settled point against the full decode around the same position.
         let (from, n) = (8192usize, 11025usize);
         let corr = |lag: i64| -> f64 {
             let base = ((start + from as i64 + lag) * 2) as usize;
-            (0..n).map(|i| f64::from(after[(from + i) * 2]) * f64::from(full[base + i * 2])).sum()
+            (0..n)
+                .map(|i| f64::from(after[(from + i) * 2]) * f64::from(full[base + i * 2]))
+                .sum()
         };
-        let best = (-400i64..=400).max_by(|a, b| corr(*a).total_cmp(&corr(*b))).unwrap();
+        let best = (-400i64..=400)
+            .max_by(|a, b| corr(*a).total_cmp(&corr(*b)))
+            .unwrap();
         assert_eq!(best, 0);
     }
 }

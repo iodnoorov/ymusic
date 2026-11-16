@@ -52,7 +52,9 @@ pub enum Input {
 /// Turns the kitty keyboard protocol on (see `Input::KittyProtocol`).
 pub fn kitty_on() {
     let mut out = io::stdout();
-    let _ = out.write_all(format!("\x1b[>{KITTY_FLAGS}u").as_bytes()).and_then(|()| out.flush());
+    let _ = out
+        .write_all(format!("\x1b[>{KITTY_FLAGS}u").as_bytes())
+        .and_then(|()| out.flush());
 }
 
 /// Turns it off again.
@@ -65,7 +67,10 @@ pub fn kitty_off() {
 pub fn ru_to_en(c: char) -> char {
     const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбю.ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,ё";
     const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,./QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?`";
-    RU.chars().position(|r| r == c).and_then(|i| EN.chars().nth(i)).unwrap_or(c)
+    RU.chars()
+        .position(|r| r == c)
+        .and_then(|i| EN.chars().nth(i))
+        .unwrap_or(c)
 }
 
 /// The character Shift gives on a key of the US layout.
@@ -90,7 +95,10 @@ fn modifiers(param: u32) -> KeyModifiers {
 
 fn key(code: KeyCode, mods: KeyModifiers) -> Input {
     let k = KeyEvent::new(code, mods);
-    Input::Key(Press { typed: k, hotkey: k })
+    Input::Key(Press {
+        typed: k,
+        hotkey: k,
+    })
 }
 
 /// What the start of a buffer holds.
@@ -117,11 +125,21 @@ fn kitty_key(params: &str) -> Option<Input> {
     if mod_parts.next().is_some_and(|e| e == "3") {
         return None;
     }
-    let text: String = fields.next().unwrap_or("").split(':').filter_map(|c| c.parse().ok()).filter_map(char::from_u32).collect();
+    let text: String = fields
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .filter_map(|c| c.parse().ok())
+        .filter_map(char::from_u32)
+        .collect();
     let code = keys.first().copied().flatten()?;
     let special = match code {
         13 | 57414 => Some(KeyCode::Enter),
-        9 => Some(if mods.contains(KeyModifiers::SHIFT) { KeyCode::BackTab } else { KeyCode::Tab }),
+        9 => Some(if mods.contains(KeyModifiers::SHIFT) {
+            KeyCode::BackTab
+        } else {
+            KeyCode::Tab
+        }),
         27 => Some(KeyCode::Esc),
         8 | 127 => Some(KeyCode::Backspace),
         57399..=57408 => char::from_digit(code - 57399, 10).map(KeyCode::Char),
@@ -130,7 +148,11 @@ fn kitty_key(params: &str) -> Option<Input> {
         _ => None,
     };
     if let Some(code) = special {
-        let mods = if code == KeyCode::BackTab { mods - KeyModifiers::SHIFT } else { mods };
+        let mods = if code == KeyCode::BackTab {
+            mods - KeyModifiers::SHIFT
+        } else {
+            mods
+        };
         return Some(key(code, mods));
     }
     let c = char::from_u32(code)?;
@@ -138,12 +160,28 @@ fn kitty_key(params: &str) -> Option<Input> {
     let base = keys.get(2).copied().flatten().and_then(char::from_u32);
     let plain = mods - KeyModifiers::SHIFT;
     // As typed: the text the terminal reports, else the shifted or the plain character.
-    let typed_char = text.chars().next().filter(|t| !t.is_control()).or(shifted).unwrap_or(c);
-    let typed = KeyEvent::new(KeyCode::Char(typed_char), if text.is_empty() && shifted.is_none() { mods } else { plain });
+    let typed_char = text
+        .chars()
+        .next()
+        .filter(|t| !t.is_control())
+        .or(shifted)
+        .unwrap_or(c);
+    let typed = KeyEvent::new(
+        KeyCode::Char(typed_char),
+        if text.is_empty() && shifted.is_none() {
+            mods
+        } else {
+            plain
+        },
+    );
     // The physical key: the base layout one, or the key itself in a Latin layout. Some terminals
     // (Konsole) apply Caps Lock or Shift to the key code of a non-Latin layout: lower it.
     let physical = base.unwrap_or(c).to_lowercase().next().unwrap_or(c);
-    let physical = if base.is_none() { ru_to_en(physical) } else { physical };
+    let physical = if base.is_none() {
+        ru_to_en(physical)
+    } else {
+        physical
+    };
     let hotkey = if mods.contains(KeyModifiers::SHIFT) {
         KeyEvent::new(KeyCode::Char(us_shift(physical)), plain)
     } else {
@@ -154,7 +192,10 @@ fn kitty_key(params: &str) -> Option<Input> {
 
 /// A `CSI params final` sequence other than kitty keys.
 fn csi(params: &str, last: u8) -> Parsed {
-    let nums: Vec<u32> = params.split(';').map(|p| p.split(':').next().unwrap_or("").parse().unwrap_or(1)).collect();
+    let nums: Vec<u32> = params
+        .split(';')
+        .map(|p| p.split(':').next().unwrap_or("").parse().unwrap_or(1))
+        .collect();
     let mods = modifiers(nums.get(1).copied().unwrap_or(1));
     let code = match last {
         b'A' => KeyCode::Up,
@@ -188,14 +229,25 @@ fn csi(params: &str, last: u8) -> Parsed {
 
 /// Parses the event at the start of `buf`.
 fn parse(buf: &[u8]) -> Parsed {
-    let Some(&first) = buf.first() else { return Parsed::Incomplete };
+    let Some(&first) = buf.first() else {
+        return Parsed::Incomplete;
+    };
     if first != 0x1b {
         return match first {
             b'\r' | b'\n' => Parsed::Done(Some(key(KeyCode::Enter, KeyModifiers::NONE)), 1),
             b'\t' => Parsed::Done(Some(key(KeyCode::Tab, KeyModifiers::NONE)), 1),
             0x7f | 0x08 => Parsed::Done(Some(key(KeyCode::Backspace, KeyModifiers::NONE)), 1),
             0 => Parsed::Done(Some(key(KeyCode::Char(' '), KeyModifiers::CONTROL)), 1),
-            c @ 1..=26 => Parsed::Done(Some(Press::from(KeyEvent::new(KeyCode::Char((b'a' + c - 1) as char), KeyModifiers::CONTROL)).into()), 1),
+            c @ 1..=26 => Parsed::Done(
+                Some(
+                    Press::from(KeyEvent::new(
+                        KeyCode::Char((b'a' + c - 1) as char),
+                        KeyModifiers::CONTROL,
+                    ))
+                    .into(),
+                ),
+                1,
+            ),
             0x1c..=0x1f => Parsed::Done(None, 1),
             _ => {
                 let len = match first {
@@ -208,14 +260,22 @@ fn parse(buf: &[u8]) -> Parsed {
                 if buf.len() < len {
                     return Parsed::Incomplete;
                 }
-                match std::str::from_utf8(&buf[..len]).ok().and_then(|s| s.chars().next()) {
-                    Some(c) => Parsed::Done(Some(Press::from(KeyEvent::from(KeyCode::Char(c))).into()), len),
+                match std::str::from_utf8(&buf[..len])
+                    .ok()
+                    .and_then(|s| s.chars().next())
+                {
+                    Some(c) => Parsed::Done(
+                        Some(Press::from(KeyEvent::from(KeyCode::Char(c))).into()),
+                        len,
+                    ),
                     None => Parsed::Done(None, 1),
                 }
             }
         };
     }
-    let Some(&second) = buf.get(1) else { return Parsed::Incomplete };
+    let Some(&second) = buf.get(1) else {
+        return Parsed::Incomplete;
+    };
     match second {
         b'[' => {
             // Parameters, intermediates, then the final byte (0x40..=0x7e).
@@ -227,7 +287,11 @@ fn parse(buf: &[u8]) -> Parsed {
             let last = buf[len - 1];
             if let Some(p) = params.strip_prefix('?') {
                 // `CSI ? flags u`: the kitty protocol query was answered; `CSI ? … c`: device attributes.
-                return if last == b'u' && p.chars().all(|c| c.is_ascii_digit()) { Parsed::KittySupported(len) } else { Parsed::Done(None, len) };
+                return if last == b'u' && p.chars().all(|c| c.is_ascii_digit()) {
+                    Parsed::KittySupported(len)
+                } else {
+                    Parsed::Done(None, len)
+                };
             }
             if last == b'u' {
                 return Parsed::Done(kitty_key(&params), len);
@@ -239,7 +303,9 @@ fn parse(buf: &[u8]) -> Parsed {
             }
         }
         b'O' => {
-            let Some(&c) = buf.get(2) else { return Parsed::Incomplete };
+            let Some(&c) = buf.get(2) else {
+                return Parsed::Incomplete;
+            };
             let code = match c {
                 b'A' => KeyCode::Up,
                 b'B' => KeyCode::Down,
@@ -300,17 +366,22 @@ impl Reader {
     pub fn new() -> Reader {
         let mut out = io::stdout();
         let _ = out.write_all(b"\x1b[?u").and_then(|()| out.flush());
-        Reader { buf: Vec::new(), paste: None }
+        Reader {
+            buf: Vec::new(),
+            paste: None,
+        }
     }
 
     /// Reads in a thread of its own, handing every input to `send`, until the terminal is gone.
     /// It never writes to the terminal: the program draws there meanwhile.
     pub fn spawn(mut self, send: impl Fn(Input) + Send + 'static) {
-        let _ = std::thread::Builder::new().name("input".into()).spawn(move || {
-            while let Ok(inputs) = self.read(Duration::from_secs(60)) {
-                inputs.into_iter().for_each(&send);
-            }
-        });
+        let _ = std::thread::Builder::new()
+            .name("input".into())
+            .spawn(move || {
+                while let Ok(inputs) = self.read(Duration::from_secs(60)) {
+                    inputs.into_iter().for_each(&send);
+                }
+            });
     }
 
     /// Waits up to `timeout` for input; returns what came.
@@ -328,7 +399,8 @@ impl Reader {
                 };
                 paste.extend(self.buf.drain(..end));
                 self.buf.drain(..6);
-                let text = String::from_utf8_lossy(&self.paste.take().unwrap_or_default()).into_owned();
+                let text =
+                    String::from_utf8_lossy(&self.paste.take().unwrap_or_default()).into_owned();
                 events.push(Input::Paste(text));
                 continue;
             }
@@ -375,7 +447,11 @@ impl Reader {
 /// Whether stdin has data within `timeout`.
 #[cfg(target_os = "linux")]
 fn wait(timeout: Duration) -> io::Result<bool> {
-    let mut fd = libc::pollfd { fd: io::stdin().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let mut fd = libc::pollfd {
+        fd: io::stdin().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     // SAFETY: one valid pollfd.
     let r = unsafe { libc::poll(&mut fd, 1, timeout.as_millis().min(i32::MAX as u128) as i32) };
     waited(r)
@@ -386,12 +462,21 @@ fn wait(timeout: Duration) -> io::Result<bool> {
 #[cfg(target_os = "macos")]
 fn wait(timeout: Duration) -> io::Result<bool> {
     let fd = io::stdin().as_raw_fd();
-    let mut tv = libc::timeval { tv_sec: timeout.as_secs() as libc::time_t, tv_usec: timeout.subsec_micros() as libc::suseconds_t };
+    let mut tv = libc::timeval {
+        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+    };
     // SAFETY: a zeroed fd_set is empty; stdin is below FD_SETSIZE.
     let r = unsafe {
         let mut set: libc::fd_set = std::mem::zeroed();
         libc::FD_SET(fd, &mut set);
-        libc::select(fd + 1, &mut set, std::ptr::null_mut(), std::ptr::null_mut(), &mut tv)
+        libc::select(
+            fd + 1,
+            &mut set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut tv,
+        )
     };
     waited(r)
 }
@@ -403,7 +488,11 @@ fn waited(r: i32) -> io::Result<bool> {
         0 => Ok(false),
         _ => {
             let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted { Ok(false) } else { Err(e) }
+            if e.kind() == io::ErrorKind::Interrupted {
+                Ok(false)
+            } else {
+                Err(e)
+            }
         }
     }
 }
@@ -454,7 +543,10 @@ mod tests {
         // Shift on a non-letter key gives the US shifted character: `?` for help on any layout.
         assert_eq!(press(b"\x1b[46::47;2;44u"), (ch(','), ch('?'), NONE));
         // Ctrl+C in the Russian layout.
-        assert_eq!(press(b"\x1b[1089::99;5u"), (ch('с'), ch('c'), KeyModifiers::CONTROL));
+        assert_eq!(
+            press(b"\x1b[1089::99;5u"),
+            (ch('с'), ch('c'), KeyModifiers::CONTROL)
+        );
         assert_eq!(press(b"\x1b[32;1;32u"), (ch(' '), ch(' '), NONE));
         assert_eq!(press(b"\x1b[13;1;13u").1, KeyCode::Enter);
         assert_eq!(press(b"\x1b[27u").1, KeyCode::Esc);
@@ -474,7 +566,10 @@ mod tests {
         assert_eq!(press(b"\x03"), (ch('c'), ch('c'), KeyModifiers::CONTROL));
         assert_eq!(press(b"\x1b[D").1, KeyCode::Left);
         assert_eq!(press(b"\x1bOA").1, KeyCode::Up);
-        assert_eq!(press(b"\x1b[1;5C"), (KeyCode::Right, KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(
+            press(b"\x1b[1;5C"),
+            (KeyCode::Right, KeyCode::Right, KeyModifiers::CONTROL)
+        );
         assert_eq!(press(b"\x1b[5~").1, KeyCode::PageUp);
         assert_eq!(press(b"\x1b[15~").1, KeyCode::F(5));
         assert_eq!(press(b"\x1bOP").1, KeyCode::F(1));
@@ -483,7 +578,10 @@ mod tests {
         assert_eq!(press(b"\x7f").1, KeyCode::Backspace);
         assert_eq!(press(b"\x1bx"), (ch('x'), ch('x'), KeyModifiers::ALT));
         // Replies of the terminal are skipped: device attributes, cursor position, kitty graphics.
-        assert!(parse_all(b"\x1b[?62;1;4c\x1b[12;40R\x1b_Gi=1;OK\x1b\\\x1b]11;rgb:0/0/0\x07").is_empty());
+        assert!(
+            parse_all(b"\x1b[?62;1;4c\x1b[12;40R\x1b_Gi=1;OK\x1b\\\x1b]11;rgb:0/0/0\x07")
+                .is_empty()
+        );
         assert_eq!(parse(b"\x1b[?0u"), Parsed::KittySupported(5));
         // A sequence cut in the middle waits for the rest.
         assert_eq!(parse(b"\x1b[1;5"), Parsed::Incomplete);

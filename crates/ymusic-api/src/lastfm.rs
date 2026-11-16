@@ -45,7 +45,11 @@ const BLOCKED: &str = "Last.fm недоступен из этой сети (HTTP
 
 impl Error {
     fn new(code: u32, message: impl Into<String>) -> Error {
-        Error { code, message: message.into(), blocked: false }
+        Error {
+            code,
+            message: message.into(),
+            blocked: false,
+        }
     }
 
     /// The session is no longer valid (access revoked): Last.fm must be connected again.
@@ -82,7 +86,10 @@ fn signature(params: &[(String, String)], secret: &str) -> String {
         s.push_str(v);
     }
     s.push_str(secret);
-    Md5::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    Md5::digest(s.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A signed call of `method` (POST, the answer in JSON).
@@ -99,18 +106,32 @@ fn call(method: &str, params: Vec<(String, String)>) -> Result<Value> {
         .user_agent(concat!("ymusic/", env!("CARGO_PKG_VERSION")))
         .tls_config(crate::tls_config())
         .build();
-    let form: Vec<(&str, &str)> = params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let form: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let answer = match agent.post(API).send_form(&form) {
-        Ok(r) => r.into_json::<Value>().map_err(|e| Error::new(0, format!("Last.fm: {e}")))?,
+        Ok(r) => r
+            .into_json::<Value>()
+            .map_err(|e| Error::new(0, format!("Last.fm: {e}")))?,
         // Errors come with an error status and the same JSON.
         Err(ureq::Error::Status(status, r)) => {
             let body = r.into_string().unwrap_or_default();
             match serde_json::from_str::<Value>(&body) {
                 Ok(v) => v,
                 Err(_) if status == 403 && xml_code(&body) == Some(11) => {
-                    return Err(Error { code: 11, message: BLOCKED.into(), blocked: true });
+                    return Err(Error {
+                        code: 11,
+                        message: BLOCKED.into(),
+                        blocked: true,
+                    });
                 }
-                Err(_) => return Err(Error::new(xml_code(&body).unwrap_or(0), format!("Last.fm: HTTP {status}"))),
+                Err(_) => {
+                    return Err(Error::new(
+                        xml_code(&body).unwrap_or(0),
+                        format!("Last.fm: HTTP {status}"),
+                    ));
+                }
             }
         }
         Err(e) => return Err(Error::new(0, format!("Last.fm: {e}"))),
@@ -137,7 +158,10 @@ fn param(k: &str, v: impl Into<String>) -> (String, String) {
 /// A token for connecting: confirmed by the user at `auth_url`, then traded for a session.
 pub fn token() -> Result<String> {
     let v = call("auth.getToken", Vec::new())?;
-    v["token"].as_str().map(String::from).ok_or_else(|| Error::new(0, "Last.fm: нет токена в ответе"))
+    v["token"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| Error::new(0, "Last.fm: нет токена в ответе"))
 }
 
 /// The page where the user lets the program scrobble.
@@ -177,13 +201,19 @@ pub fn now_playing(session: &str, t: &Scrobble) -> Result<()> {
 /// Adds listened tracks to the user's history (at most `MAX_BATCH`).
 pub fn scrobble(session: &str, tracks: &[Scrobble]) -> Result<usize> {
     if tracks.is_empty() || tracks.len() > MAX_BATCH {
-        return Err(Error::new(6, "Last.fm: пакет должен содержать от 1 до 50 скробблов"));
+        return Err(Error::new(
+            6,
+            "Last.fm: пакет должен содержать от 1 до 50 скробблов",
+        ));
     }
     let mut params = vec![param("sk", session)];
     for (i, t) in tracks.iter().enumerate() {
         let suffix = format!("[{i}]");
         track_params(t, &suffix, &mut params);
-        params.push(param(&format!("timestamp{suffix}"), t.timestamp.to_string()));
+        params.push(param(
+            &format!("timestamp{suffix}"),
+            t.timestamp.to_string(),
+        ));
     }
     let v = call("track.scrobble", params)?;
     scrobble_result(&v, tracks.len())
@@ -195,7 +225,10 @@ fn scrobble_result(v: &Value, sent: usize) -> Result<usize> {
     let number = |v: &Value| v.as_u64().or_else(|| v.as_str()?.parse().ok());
     match (number(&counts["accepted"]), number(&counts["ignored"])) {
         (Some(a), Some(i)) if a.checked_add(i) == Some(sent as u64) => Ok(i as usize),
-        _ => Err(Error::new(0, "Last.fm: неполное подтверждение пакета скробблов")),
+        _ => Err(Error::new(
+            0,
+            "Last.fm: неполное подтверждение пакета скробблов",
+        )),
     }
 }
 
@@ -211,20 +244,39 @@ mod tests {
 
     #[test]
     fn signed_by_sorted_params() {
-        let params = vec![param("token", "t"), param("method", "auth.getSession"), param("api_key", "k")];
+        let params = vec![
+            param("token", "t"),
+            param("method", "auth.getSession"),
+            param("api_key", "k"),
+        ];
         // md5("api_keykmethodauth.getSessiontokentsecret")
-        let expected: String =
-            Md5::digest(b"api_keykmethodauth.getSessiontokentsecret").iter().map(|b| format!("{b:02x}")).collect();
+        let expected: String = Md5::digest(b"api_keykmethodauth.getSessiontokentsecret")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(signature(&params, "secret"), expected);
         assert_eq!(expected.len(), 32);
     }
 
     #[test]
     fn batch_params() {
-        let t = Scrobble { artist: "A".into(), track: "T".into(), album: String::new(), duration: 200, timestamp: 1 };
+        let t = Scrobble {
+            artist: "A".into(),
+            track: "T".into(),
+            album: String::new(),
+            duration: 200,
+            timestamp: 1,
+        };
         let mut p = Vec::new();
         track_params(&t, "[0]", &mut p);
-        assert_eq!(p, [param("artist[0]", "A"), param("track[0]", "T"), param("duration[0]", "200")]);
+        assert_eq!(
+            p,
+            [
+                param("artist[0]", "A"),
+                param("track[0]", "T"),
+                param("duration[0]", "200")
+            ]
+        );
     }
 
     /// The key and the signature are accepted: a token comes, and it is not confirmed yet.
@@ -246,12 +298,18 @@ mod tests {
 
     #[test]
     fn acknowledgements_and_batch_limits() {
-        let ok=serde_json::json!({"scrobbles":{"@attr":{"accepted":"49","ignored":"1"}}});
-        assert_eq!(scrobble_result(&ok,50).unwrap(),1);
-        assert!(scrobble_result(&ok,51).is_err());
-        assert!(scrobble_result(&serde_json::json!({}),1).is_err());
-        let t=Scrobble{artist:"a".into(),track:"t".into(),album:String::new(),duration:100,timestamp:1};
-        assert_eq!(scrobble("unused",&vec![t;51]).unwrap_err().code,6);
+        let ok = serde_json::json!({"scrobbles":{"@attr":{"accepted":"49","ignored":"1"}}});
+        assert_eq!(scrobble_result(&ok, 50).unwrap(), 1);
+        assert!(scrobble_result(&ok, 51).is_err());
+        assert!(scrobble_result(&serde_json::json!({}), 1).is_err());
+        let t = Scrobble {
+            artist: "a".into(),
+            track: "t".into(),
+            album: String::new(),
+            duration: 100,
+            timestamp: 1,
+        };
+        assert_eq!(scrobble("unused", &vec![t; 51]).unwrap_err().code, 6);
     }
 
     #[test]

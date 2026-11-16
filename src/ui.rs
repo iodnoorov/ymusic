@@ -1,17 +1,19 @@
 //! Rendering.
 
 use crate::api::Track;
-use crate::app::{App, Art, Lastfm, Modal, PodcastSection, Repeat, Setting, Source, StationRow, Tab};
+use crate::app::{
+    App, Art, Lastfm, Modal, PodcastSection, Repeat, Setting, Source, StationRow, Tab,
+};
 use crate::keymap::{self, Action, Action as A, Section};
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Row, Table, TableState,
-    Wrap,
+    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph,
+    Row, Table, TableState, Wrap,
 };
-use ratatui::Frame;
 use ratatui_image::{FilterType, Resize, StatefulImage};
 
 // ---------------------------------------------------------------- theme
@@ -136,11 +138,7 @@ const PLAIN: Icons = Icons {
 
 /// Nerd Font icons or plain Unicode symbols, as the app is set (switched in the settings window).
 fn ic(app: &App) -> &'static Icons {
-    if app.icons {
-        &NERD
-    } else {
-        &PLAIN
-    }
+    if app.icons { &NERD } else { &PLAIN }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -167,7 +165,10 @@ fn panel<'a>(icon: &'a str, title: impl Into<String>) -> Block<'a> {
         .title(Line::from(vec![
             Span::raw(" "),
             Span::styled(icon, Style::new().fg(ACCENT)),
-            Span::styled(format!(" {} ", title.into()), Style::new().fg(Color::Reset).bold()),
+            Span::styled(
+                format!(" {} ", title.into()),
+                Style::new().fg(Color::Reset).bold(),
+            ),
         ]))
         .padding(Padding::horizontal(1))
 }
@@ -195,7 +196,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_header(f, app, top);
 
     let content = if body.width >= 100 {
-        let [side, main] = Layout::horizontal([Constraint::Length(34), Constraint::Min(40)]).spacing(1).areas(body);
+        let [side, main] = Layout::horizontal([Constraint::Length(34), Constraint::Min(40)])
+            .spacing(1)
+            .areas(body);
         draw_now_playing(f, app, side);
         main
     } else {
@@ -231,14 +234,20 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         (i.queue, "Плейлисты"),
         (i.info, "Подкасты"),
     ];
-    let mut spans = vec![Span::styled(format!(" {} ", i.logo), Style::new().fg(ON_ACCENT).bg(ACCENT).bold())];
+    let mut spans = vec![Span::styled(
+        format!(" {} ", i.logo),
+        Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+    )];
     if area.width >= 76 {
         spans.push(Span::styled(" ymusic  ", Style::new().fg(ACCENT).bold()));
     }
     let compact = area.width < 130;
     for (n, (icon, name)) in tabs.iter().enumerate() {
         if n == app.tab.index() {
-            spans.push(Span::styled(format!(" {} {name} ", n + 1), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()));
+            spans.push(Span::styled(
+                format!(" {} {name} ", n + 1),
+                Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+            ));
         } else {
             spans.push(Span::styled(format!(" {}", n + 1), Style::new().fg(MUTED)));
             let label = if area.width < 76 {
@@ -256,14 +265,29 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
-    let who = if app.account.login.is_empty() { app.account.name.clone() } else { app.account.login.clone() };
-    let mut right = vec![Span::styled(format!("{} {who}", i.user), Style::new().fg(SUB))];
+    let who = if app.account.login.is_empty() {
+        app.account.name.clone()
+    } else {
+        app.account.login.clone()
+    };
+    let mut right = vec![Span::styled(
+        format!("{} {who}", i.user),
+        Style::new().fg(SUB),
+    )];
     if app.account.has_plus {
-        let plus = if compact { format!("  {} ", i.plus) } else { format!("  {} Плюс ", i.plus) };
+        let plus = if compact {
+            format!("  {} ", i.plus)
+        } else {
+            format!("  {} Плюс ", i.plus)
+        };
         right.push(Span::styled(plus, Style::new().fg(ACCENT).bold()));
     }
     let right = Line::from(right);
-    let [l, r] = Layout::horizontal([Constraint::Min(10), Constraint::Length(right.width() as u16 + 1)]).areas(area);
+    let [l, r] = Layout::horizontal([
+        Constraint::Min(10),
+        Constraint::Length(right.width() as u16 + 1),
+    ])
+    .areas(area);
     f.render_widget(Paragraph::new(Line::from(spans)), l);
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), r);
 }
@@ -288,12 +312,17 @@ fn hsl(h: f64, s: f64, l: f64) -> (f64, f64, f64) {
 
 /// Generative "cover art": a diagonal gradient seeded by the album id, drawn with half blocks.
 fn draw_cover(buf: &mut Buffer, area: Rect, seed: &str, note: &str) {
-    let h = seed.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |a, b| (a ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    let h = seed.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |a, b| {
+        (a ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    });
     let hue1 = (h % 360) as f64;
     let hue2 = hue1 + 40.0 + ((h >> 12) % 100) as f64;
     let c1 = hsl(hue1, 0.65, 0.55);
     let c2 = hsl(hue2, 0.70, 0.22);
-    let (w, hh) = (f64::from(area.width.max(1)), f64::from(area.height.max(1) * 2));
+    let (w, hh) = (
+        f64::from(area.width.max(1)),
+        f64::from(area.height.max(1) * 2),
+    );
     let color = |x: u16, py: u16| {
         let t = ((f64::from(x) / w) * 0.55 + (f64::from(py) / hh) * 0.45).clamp(0.0, 1.0);
         let mix = |a: f64, b: f64| ((a + (b - a) * t) * 255.0) as u8;
@@ -302,13 +331,17 @@ fn draw_cover(buf: &mut Buffer, area: Rect, seed: &str, note: &str) {
     for y in 0..area.height {
         for x in 0..area.width {
             if let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) {
-                cell.set_symbol("▀").set_fg(color(x, y * 2)).set_bg(color(x, y * 2 + 1));
+                cell.set_symbol("▀")
+                    .set_fg(color(x, y * 2))
+                    .set_bg(color(x, y * 2 + 1));
             }
         }
     }
     let (cx, cy) = (area.width / 2, area.height / 2);
     if let Some(cell) = buf.cell_mut((area.x + cx, area.y + cy)) {
-        cell.set_symbol(note).set_fg(Color::Rgb(255, 255, 255)).set_bg(color(cx, cy * 2));
+        cell.set_symbol(note)
+            .set_fg(Color::Rgb(255, 255, 255))
+            .set_bg(color(cx, cy * 2));
     }
 }
 
@@ -347,33 +380,64 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines = vec![
         Line::from(""),
-        Line::from(Span::styled(t.title.as_str(), Style::new().fg(Color::Reset).bold())),
+        Line::from(Span::styled(
+            t.title.as_str(),
+            Style::new().fg(Color::Reset).bold(),
+        )),
         Line::from(Span::styled(t.artists.as_str(), Style::new().fg(SUB))),
     ];
     if !t.album.is_empty() {
-        lines.push(Line::from(Span::styled(format!("{} {}", i.album, t.album), Style::new().fg(MUTED))));
+        lines.push(Line::from(Span::styled(
+            format!("{} {}", i.album, t.album),
+            Style::new().fg(MUTED),
+        )));
     }
     lines.push(Line::from(""));
     let src = app.source_name();
     if !src.is_empty() {
         let icon = if app.queue.is_wave() { i.wave } else { i.queue };
-        lines.push(Line::from(Span::styled(format!("{icon} {src}"), Style::new().fg(ACCENT))));
+        lines.push(Line::from(Span::styled(
+            format!("{icon} {src}"),
+            Style::new().fg(ACCENT),
+        )));
     }
     if t.is_podcast() {
-        lines.push(Line::from(Span::styled(podcast_progress(t), Style::new().fg(SUB))));
+        lines.push(Line::from(Span::styled(
+            podcast_progress(t),
+            Style::new().fg(SUB),
+        )));
     }
     if t.is_music() || t.is_podcast() {
         if app.is_liked(t) {
-            let label = if t.is_podcast() { "Выпуск понравился" } else { "В «Мне нравится»" };
-            lines.push(Line::from(Span::styled(format!("{} {label}", i.heart), Style::new().fg(HEART))));
+            let label = if t.is_podcast() {
+                "Выпуск понравился"
+            } else {
+                "В «Мне нравится»"
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{} {label}", i.heart),
+                Style::new().fg(HEART),
+            )));
         } else {
             lines.push(Line::from(vec![
                 Span::styled("l", Style::new().fg(ACCENT).bold()),
-                Span::styled(if t.is_podcast() { " — лайк выпуску" } else { " — добавить в любимые" }, Style::new().fg(MUTED)),
+                Span::styled(
+                    if t.is_podcast() {
+                        " — лайк выпуску"
+                    } else {
+                        " — добавить в любимые"
+                    },
+                    Style::new().fg(MUTED),
+                ),
             ]));
         }
     }
-    f.render_widget(Paragraph::new(lines).alignment(Alignment::Center).wrap(Wrap { trim: true }), info);
+    f.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        info,
+    );
 }
 
 /// Square at the top of «Сейчас играет» for the cover or the spectrum, and the area left for the
@@ -388,18 +452,33 @@ fn art_layout(app: &App, inner: Rect) -> (Rect, Rect) {
         cover_w = inner.width;
         cover_h = (f64::from(cover_w) / ratio).round() as u16;
     }
-    let [_, cover_area, info] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(cover_h), Constraint::Min(0)]).areas(inner);
-    let [cover_area] = Layout::horizontal([Constraint::Length(cover_w)]).flex(Flex::Center).areas(cover_area);
+    let [_, cover_area, info] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(cover_h),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    let [cover_area] = Layout::horizontal([Constraint::Length(cover_w)])
+        .flex(Flex::Center)
+        .areas(cover_area);
     (cover_area, info)
 }
 
 fn draw_now_cover(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(proto) = app.current_cover() {
-        f.render_stateful_widget(StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))), area, proto);
+        f.render_stateful_widget(
+            StatefulImage::default().resize(Resize::Scale(Some(FilterType::Triangle))),
+            area,
+            proto,
+        );
     } else if let Some(t) = app.current() {
         // Placeholder while the cover is loading (or when there is none).
-        draw_cover(f.buffer_mut(), area, t.album_id.as_deref().unwrap_or(&t.id), ic(app).note);
+        draw_cover(
+            f.buffer_mut(),
+            area,
+            t.album_id.as_deref().unwrap_or(&t.id),
+            ic(app).note,
+        );
     }
 }
 
@@ -452,7 +531,8 @@ fn rgb(c: Color) -> (u8, u8, u8) {
 /// `38;2;r;g;b` as separate attributes and shows basic colours, but has the 256-colour palette.
 pub fn truecolor() -> bool {
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
-    matches!(colorterm.as_str(), "truecolor" | "24bit") || std::env::var("TERM_PROGRAM").as_deref() != Ok("Apple_Terminal")
+    matches!(colorterm.as_str(), "truecolor" | "24bit")
+        || std::env::var("TERM_PROGRAM").as_deref() != Ok("Apple_Terminal")
 }
 
 /// Replaces the 24-bit colours of a drawn frame (cover halfblocks included) with the nearest of
@@ -473,7 +553,10 @@ fn indexed(r: u8, g: u8, b: u8) -> u8 {
     const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
     let level = |v: u8| (0..6).min_by_key(|&i| LEVELS[i].abs_diff(v)).unwrap_or(0);
     let dist = |(x, y, z): (u8, u8, u8)| {
-        [(x, r), (y, g), (z, b)].iter().map(|&(a, c)| u32::from(a.abs_diff(c)).pow(2)).sum::<u32>()
+        [(x, r), (y, g), (z, b)]
+            .iter()
+            .map(|&(a, c)| u32::from(a.abs_diff(c)).pow(2))
+            .sum::<u32>()
     };
     let (ri, gi, bi) = (level(r), level(g), level(b));
     let cube = (LEVELS[ri], LEVELS[gi], LEVELS[bi]);
@@ -520,7 +603,13 @@ fn render_tracks(
     f.render_stateful_widget(table, area, &mut window);
 }
 
-fn track_table<'a>(app: &App, tracks: &'a [Track], base: usize, playing: Option<usize>, history: bool) -> Table<'a> {
+fn track_table<'a>(
+    app: &App,
+    tracks: &'a [Track],
+    base: usize,
+    playing: Option<usize>,
+    history: bool,
+) -> Table<'a> {
     let i = ic(app);
     let rows: Vec<Row> = tracks
         .iter()
@@ -557,11 +646,17 @@ fn track_table<'a>(app: &App, tracks: &'a [Track], base: usize, playing: Option<
             };
             Row::new(vec![
                 Cell::from(Line::from(num).alignment(Alignment::Right)),
-                Cell::from(Line::from(vec![heart, Span::styled(t.title.as_str(), title_style)])),
+                Cell::from(Line::from(vec![
+                    heart,
+                    Span::styled(t.title.as_str(), title_style),
+                ])),
                 Cell::from(Span::styled(t.artists.as_str(), artist_style)),
                 Cell::from(
-                    Line::from(Span::styled(fmt_time(t.duration_ms as f64 / 1000.0), Style::new().fg(MUTED)))
-                        .alignment(Alignment::Right),
+                    Line::from(Span::styled(
+                        fmt_time(t.duration_ms as f64 / 1000.0),
+                        Style::new().fg(MUTED),
+                    ))
+                    .alignment(Alignment::Right),
                 ),
             ])
         })
@@ -574,12 +669,20 @@ fn track_table<'a>(app: &App, tracks: &'a [Track], base: usize, playing: Option<
     ])
     .style(Style::new().fg(MUTED))
     .bottom_margin(1);
-    Table::new(rows, [Constraint::Length(4), Constraint::Fill(3), Constraint::Fill(2), Constraint::Length(6)])
-        .header(header)
-        .column_spacing(2)
-        .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
-        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
-        .highlight_spacing(HighlightSpacing::Always)
+    Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Fill(3),
+            Constraint::Fill(2),
+            Constraint::Length(6),
+        ],
+    )
+    .header(header)
+    .column_spacing(2)
+    .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+    .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+    .highlight_spacing(HighlightSpacing::Always)
 }
 
 fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
@@ -597,19 +700,30 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
             ("?", "все горячие клавиши"),
         ];
         let mut lines = vec![
-            Line::from(Span::styled(format!("{}  ymusic", i.logo), Style::new().fg(ACCENT).bold())),
-            Line::from(Span::styled("Яндекс Музыка в терминале", Style::new().fg(SUB))),
+            Line::from(Span::styled(
+                format!("{}  ymusic", i.logo),
+                Style::new().fg(ACCENT).bold(),
+            )),
+            Line::from(Span::styled(
+                "Яндекс Музыка в терминале",
+                Style::new().fg(SUB),
+            )),
             Line::from(""),
         ];
         for (k, d) in rows {
             lines.push(Line::from(vec![
-                Span::styled(format!(" {k} "), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()),
+                Span::styled(
+                    format!(" {k} "),
+                    Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+                ),
                 Span::styled(format!("  {d:<36}"), Style::new().fg(SUB)),
             ]));
             lines.push(Line::from(""));
         }
         let h = lines.len() as u16;
-        let [v] = Layout::vertical([Constraint::Length(h)]).flex(Flex::Center).areas(inner);
+        let [v] = Layout::vertical([Constraint::Length(h)])
+            .flex(Flex::Center)
+            .areas(inner);
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), v);
         return;
     }
@@ -619,9 +733,22 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let icon = if app.queue.is_wave() { i.wave } else { i.queue };
     let fetching = app.wave.as_ref().is_some_and(|w| w.fetching);
-    let title = if fetching { format!("{title} · {}", spinner(app.tick)) } else { title };
+    let title = if fetching {
+        format!("{title} · {}", spinner(app.tick))
+    } else {
+        title
+    };
     let mut st = std::mem::take(&mut app.queue_state);
-    render_tracks(f, area, app, app.queue.tracks(), &mut st, app.queue.pos(), true, panel(icon, title));
+    render_tracks(
+        f,
+        area,
+        app,
+        app.queue.tracks(),
+        &mut st,
+        app.queue.pos(),
+        true,
+        panel(icon, title),
+    );
     app.queue_state = st;
 }
 
@@ -636,7 +763,16 @@ fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
         .flatten()
         .and_then(|id| app.likes.tracks().iter().position(|t| t.id == id));
     let mut st = std::mem::take(&mut app.liked_state);
-    render_tracks(f, area, app, app.likes.tracks(), &mut st, playing, false, panel(ic(app).liked, title));
+    render_tracks(
+        f,
+        area,
+        app,
+        app.likes.tracks(),
+        &mut st,
+        playing,
+        false,
+        panel(ic(app).liked, title),
+    );
     app.liked_state = st;
 }
 
@@ -653,7 +789,16 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
             .flatten()
             .and_then(|id| open.tracks.iter().position(|t| t.id == id));
         let mut st = std::mem::take(&mut app.open_state);
-        render_tracks(f, area, app, &open.tracks, &mut st, playing, false, panel(i.queue, title));
+        render_tracks(
+            f,
+            area,
+            app,
+            &open.tracks,
+            &mut st,
+            playing,
+            false,
+            panel(i.queue, title),
+        );
         app.open_state = st;
         return;
     }
@@ -666,11 +811,21 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
     if app.playlists.list().is_empty() && !app.playlists.loading() {
         let inner = block.inner(area);
         f.render_widget(block, area);
-        let [v] = Layout::vertical([Constraint::Length(1)]).flex(Flex::Center).areas(inner);
-        f.render_widget(Paragraph::new(Span::styled("Плейлистов нет", Style::new().fg(SUB))).alignment(Alignment::Center), v);
+        let [v] = Layout::vertical([Constraint::Length(1)])
+            .flex(Flex::Center)
+            .areas(inner);
+        f.render_widget(
+            Paragraph::new(Span::styled("Плейлистов нет", Style::new().fg(SUB)))
+                .alignment(Alignment::Center),
+            v,
+        );
         return;
     }
-    let playing = app.queue.is_list().then_some(app.playlists.playing.as_deref()).flatten();
+    let playing = app
+        .queue
+        .is_list()
+        .then_some(app.playlists.playing.as_deref())
+        .flatten();
     let rows: Vec<Row> = app
         .playlists
         .list()
@@ -679,18 +834,29 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(n, p)| {
             let on = playing == Some(p.key().as_str());
             let num = if on {
-                let s = if app.paused { i.pause } else { equalizer(app.tick) };
+                let s = if app.paused {
+                    i.pause
+                } else {
+                    equalizer(app.tick)
+                };
                 Span::styled(s, Style::new().fg(ACCENT).bold())
             } else {
                 Span::styled(format!("{}", n + 1), Style::new().fg(MUTED))
             };
-            let title_style = if on { Style::new().fg(ACCENT).bold() } else { Style::new().fg(Color::Reset) };
+            let title_style = if on {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new().fg(Color::Reset)
+            };
             Row::new(vec![
                 Cell::from(Line::from(num).alignment(Alignment::Right)),
                 Cell::from(Span::styled(p.title.as_str(), title_style)),
                 Cell::from(
-                    Line::from(Span::styled(format!("{} {}", p.track_count, i.note), Style::new().fg(MUTED)))
-                        .alignment(Alignment::Right),
+                    Line::from(Span::styled(
+                        format!("{} {}", p.track_count, i.note),
+                        Style::new().fg(MUTED),
+                    ))
+                    .alignment(Alignment::Right),
                 ),
             ])
         })
@@ -702,24 +868,41 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
     ])
     .style(Style::new().fg(MUTED))
     .bottom_margin(1);
-    let table = Table::new(rows, [Constraint::Length(4), Constraint::Fill(1), Constraint::Length(8)])
-        .header(header)
-        .column_spacing(2)
-        .block(block)
-        .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
-        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
-        .highlight_spacing(HighlightSpacing::Always);
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Fill(1),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .column_spacing(2)
+    .block(block)
+    .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+    .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+    .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(table, area, &mut app.playlists_state);
 }
 
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     let i = ic(app);
-    let [input, results] = Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
-    let mut spans = vec![Span::styled(format!("{}  ", i.search), Style::new().fg(ACCENT))];
+    let [input, results] =
+        Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
+    let mut spans = vec![Span::styled(
+        format!("{}  ", i.search),
+        Style::new().fg(ACCENT),
+    )];
     if app.search.input.is_empty() && !app.search.editing {
-        spans.push(Span::styled("Трек или исполнитель…  (/ или i — ввод)", Style::new().fg(MUTED)));
+        spans.push(Span::styled(
+            "Трек или исполнитель…  (/ или i — ввод)",
+            Style::new().fg(MUTED),
+        ));
     } else {
-        spans.push(Span::styled(app.search.input.clone(), Style::new().fg(Color::Reset).bold()));
+        spans.push(Span::styled(
+            app.search.input.clone(),
+            Style::new().fg(Color::Reset).bold(),
+        ));
     }
     if app.search.editing && (app.tick / 2).is_multiple_of(2) {
         spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
@@ -748,14 +931,24 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     let current = app.current().map(|c| c.id.clone());
     let playing = current.and_then(|id| app.search.results().iter().position(|t| t.id == id));
     let mut st = std::mem::take(&mut app.search_state);
-    render_tracks(f, results, app, app.search.results(), &mut st, playing, false, panel(i.search, title));
+    render_tracks(
+        f,
+        results,
+        app,
+        app.search.results(),
+        &mut st,
+        playing,
+        false,
+        panel(i.search, title),
+    );
     app.search_state = st;
 }
 
 // ---------------------------------------------------------------- podcasts
 
 fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
-    let [sections, mut content] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let [sections, mut content] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let mut tabs = Vec::new();
     for (section, title) in [
         (PodcastSection::Mine, "Мои"),
@@ -771,12 +964,19 @@ fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
     }
     f.render_widget(Paragraph::new(Line::from(tabs)), sections);
     if app.podcasts.section == PodcastSection::Search && app.podcasts.open.is_none() {
-        let [input, results] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(content);
+        let [input, results] =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(content);
         content = results;
         let podcasts = &app.podcasts;
-        let mut spans = vec![Span::styled(format!("{}  ", ic(app).search), Style::new().fg(ACCENT))];
+        let mut spans = vec![Span::styled(
+            format!("{}  ", ic(app).search),
+            Style::new().fg(ACCENT),
+        )];
         if podcasts.input.is_empty() && !podcasts.editing {
-            spans.push(Span::styled("Название подкаста…  (/ или i — ввод)", Style::new().fg(MUTED)));
+            spans.push(Span::styled(
+                "Название подкаста…  (/ или i — ввод)",
+                Style::new().fg(MUTED),
+            ));
         } else {
             // Keep the end and the cursor visible while editing a long query.
             let room = input.width.saturating_sub(8) as usize;
@@ -805,7 +1005,11 @@ fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// A window in a two-line podcast table, keeping the selected row in view.
-fn podcast_window(state: &mut TableState, len: usize, height: u16) -> (usize, usize, Option<usize>) {
+fn podcast_window(
+    state: &mut TableState,
+    len: usize,
+    height: u16,
+) -> (usize, usize, Option<usize>) {
     let visible = (height.saturating_sub(2) as usize / 2).max(1);
     let selected = state.selected().filter(|&s| s < len);
     let mut offset = state.offset();
@@ -818,7 +1022,11 @@ fn podcast_window(state: &mut TableState, len: usize, height: u16) -> (usize, us
     }
     offset = offset.min(len.saturating_sub(visible));
     *state.offset_mut() = offset;
-    (offset, (offset + visible).min(len), selected.map(|s| s - offset))
+    (
+        offset,
+        (offset + visible).min(len),
+        selected.map(|s| s - offset),
+    )
 }
 
 fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
@@ -826,10 +1034,16 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
     let shown = podcasts.shows.len();
     let of = match podcasts.total {
         Some(total) if total > shown => format!(" из {total}"),
-        None if podcasts.section == PodcastSection::Search && !podcasts.query.is_empty() => "+".into(),
+        None if podcasts.section == PodcastSection::Search && !podcasts.query.is_empty() => {
+            "+".into()
+        }
         _ => String::new(),
     };
-    let loading = if podcasts.loading { format!(" · {}", spinner(app.tick)) } else { String::new() };
+    let loading = if podcasts.loading {
+        format!(" · {}", spinner(app.tick))
+    } else {
+        String::new()
+    };
     let block = panel(ic(app).info, format!("Подкасты · {shown}{of}{loading}"));
     if shown == 0 {
         let message = if podcasts.loading {
@@ -844,37 +1058,70 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
         };
         let inner = block.inner(area);
         f.render_widget(block, area);
-        f.render_widget(Paragraph::new(message).style(Style::new().fg(SUB)).wrap(Wrap { trim: true }), inner);
+        f.render_widget(
+            Paragraph::new(message)
+                .style(Style::new().fg(SUB))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
         return;
     }
-    let (start, end, selected) = podcast_window(&mut app.podcasts.state, shown, block.inner(area).height);
+    let (start, end, selected) =
+        podcast_window(&mut app.podcasts.state, shown, block.inner(area).height);
     let current = app.current().filter(|t| t.is_podcast());
-    let rows = app.podcasts.shows[start..end].iter().enumerate().map(|(n, show)| {
-        let on = current.is_some_and(|t| t.album_id.as_deref() == Some(show.id.as_str()));
-        let style = if on { Style::new().fg(ACCENT).bold() } else { Style::new().fg(Color::Reset) };
-        let favorite = if app.podcasts.liked.contains(&show.id) { " · В Моих" } else { "" };
-        let summary = show.description.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
-        let details = format!("{} вып.{}  {}", show.episodes, favorite, summary);
-        Row::new(vec![
-            Cell::from(Span::styled(
-                if on { ic(app).play.to_string() } else { (start + n + 1).to_string() },
-                Style::new().fg(if on { ACCENT } else { MUTED }),
-            )),
-            Cell::from(vec![
-                Line::from(Span::styled(show.title.as_str(), style)),
-                Line::from(Span::styled(details, Style::new().fg(SUB))),
-            ]),
-        ])
-        .height(2)
-    });
+    let rows = app.podcasts.shows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(n, show)| {
+            let on = current.is_some_and(|t| t.album_id.as_deref() == Some(show.id.as_str()));
+            let style = if on {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new().fg(Color::Reset)
+            };
+            let favorite = if app.podcasts.liked.contains(&show.id) {
+                " · В Моих"
+            } else {
+                ""
+            };
+            let summary = show
+                .description
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            let details = format!("{} вып.{}  {}", show.episodes, favorite, summary);
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    if on {
+                        ic(app).play.to_string()
+                    } else {
+                        (start + n + 1).to_string()
+                    },
+                    Style::new().fg(if on { ACCENT } else { MUTED }),
+                )),
+                Cell::from(vec![
+                    Line::from(Span::styled(show.title.as_str(), style)),
+                    Line::from(Span::styled(details, Style::new().fg(SUB))),
+                ]),
+            ])
+            .height(2)
+        });
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(0)])
-        .header(Row::new(["#", "Подкаст · выпуски / описание"]).style(Style::new().fg(MUTED)).bottom_margin(1))
+        .header(
+            Row::new(["#", "Подкаст · выпуски / описание"])
+                .style(Style::new().fg(MUTED))
+                .bottom_margin(1),
+        )
         .block(block)
         .column_spacing(1)
         .row_highlight_style(Style::new().bg(SEL_BG).bold())
         .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
         .highlight_spacing(HighlightSpacing::Always);
-    f.render_stateful_widget(table, area, &mut TableState::default().with_selected(selected));
+    f.render_stateful_widget(
+        table,
+        area,
+        &mut TableState::default().with_selected(selected),
+    );
 }
 
 fn podcast_progress(track: &Track) -> String {
@@ -886,75 +1133,140 @@ fn podcast_progress(track: &Track) -> String {
 }
 
 fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
-    let Some(open) = &app.podcasts.open else { return };
-    let favorite = if app.podcasts.liked.contains(&open.show.id) { " · В Моих" } else { "" };
-    let loading = if open.loading { format!(" · {}", spinner(app.tick)) } else { String::new() };
-    let title = format!("{}{} · {}/{}{}", open.show.title, favorite, open.tracks.len(), open.total, loading);
+    let Some(open) = &app.podcasts.open else {
+        return;
+    };
+    let favorite = if app.podcasts.liked.contains(&open.show.id) {
+        " · В Моих"
+    } else {
+        ""
+    };
+    let loading = if open.loading {
+        format!(" · {}", spinner(app.tick))
+    } else {
+        String::new()
+    };
+    let title = format!(
+        "{}{} · {}/{}{}",
+        open.show.title,
+        favorite,
+        open.tracks.len(),
+        open.total,
+        loading
+    );
     let block = panel(ic(app).info, title);
     if open.tracks.is_empty() {
         let inner = block.inner(area);
-        let message = if open.loading { "Загрузка выпусков…" } else { "Выпусков нет" };
+        let message = if open.loading {
+            "Загрузка выпусков…"
+        } else {
+            "Выпусков нет"
+        };
         f.render_widget(block, area);
         f.render_widget(Paragraph::new(message).style(Style::new().fg(SUB)), inner);
         return;
     }
     let len = open.tracks.len();
-    let (start, end, selected) = podcast_window(&mut app.podcasts.episode_state, len, block.inner(area).height);
+    let (start, end, selected) = podcast_window(
+        &mut app.podcasts.episode_state,
+        len,
+        block.inner(area).height,
+    );
     let open = app.podcasts.open.as_ref().unwrap();
     let current = app.current().map(|t| t.id.as_str());
-    let rows = open.tracks[start..end].iter().enumerate().map(|(n, track)| {
-        let on = current == Some(track.id.as_str());
-        let style = if !track.available {
-            Style::new().fg(MUTED).crossed_out()
-        } else if on {
-            Style::new().fg(ACCENT).bold()
-        } else {
-            Style::new().fg(Color::Reset)
-        };
-        let marker = if on {
-            if app.loading_track { spinner(app.tick) } else if app.paused { ic(app).pause } else { ic(app).play }
-        } else {
-            ""
-        };
-        let number = if on { marker.to_string() } else { (start + n + 1).to_string() };
-        let date = track.published.as_deref().unwrap_or("Без даты").split('T').next().unwrap_or("Без даты");
-        let compact = area.width < 60;
-        let progress = if on {
-            let position = fmt_time(app.time_pos);
-            if compact { position } else { format!("С {position}") }
-        } else if compact {
-            match &track.progress {
-                Some(progress) if progress.finished => "Готово".into(),
-                Some(progress) if progress.position > 0.0 => fmt_time(progress.position),
-                _ => "Новый".into(),
-            }
-        } else {
-            podcast_progress(track)
-        };
-        let details = format!("{date} · {} · {progress}", fmt_time(track.duration_ms as f64 / 1000.0));
-        let title = Span::styled(track.title.as_str(), style);
-        let title = if app.is_liked(track) {
-            Line::from(vec![Span::styled(format!("{} ", ic(app).heart), Style::new().fg(HEART)), title])
-        } else {
-            Line::from(title)
-        };
-        Row::new(vec![
-            Cell::from(Span::styled(number, Style::new().fg(if on { ACCENT } else { MUTED }))),
-            Cell::from(vec![
-                title,
-                Line::from(Span::styled(details, Style::new().fg(SUB))),
-            ]),
-        ])
-        .height(2)
-    });
+    let rows = open.tracks[start..end]
+        .iter()
+        .enumerate()
+        .map(|(n, track)| {
+            let on = current == Some(track.id.as_str());
+            let style = if !track.available {
+                Style::new().fg(MUTED).crossed_out()
+            } else if on {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new().fg(Color::Reset)
+            };
+            let marker = if on {
+                if app.loading_track {
+                    spinner(app.tick)
+                } else if app.paused {
+                    ic(app).pause
+                } else {
+                    ic(app).play
+                }
+            } else {
+                ""
+            };
+            let number = if on {
+                marker.to_string()
+            } else {
+                (start + n + 1).to_string()
+            };
+            let date = track
+                .published
+                .as_deref()
+                .unwrap_or("Без даты")
+                .split('T')
+                .next()
+                .unwrap_or("Без даты");
+            let compact = area.width < 60;
+            let progress = if on {
+                let position = fmt_time(app.time_pos);
+                if compact {
+                    position
+                } else {
+                    format!("С {position}")
+                }
+            } else if compact {
+                match &track.progress {
+                    Some(progress) if progress.finished => "Готово".into(),
+                    Some(progress) if progress.position > 0.0 => fmt_time(progress.position),
+                    _ => "Новый".into(),
+                }
+            } else {
+                podcast_progress(track)
+            };
+            let details = format!(
+                "{date} · {} · {progress}",
+                fmt_time(track.duration_ms as f64 / 1000.0)
+            );
+            let title = Span::styled(track.title.as_str(), style);
+            let title = if app.is_liked(track) {
+                Line::from(vec![
+                    Span::styled(format!("{} ", ic(app).heart), Style::new().fg(HEART)),
+                    title,
+                ])
+            } else {
+                Line::from(title)
+            };
+            Row::new(vec![
+                Cell::from(Span::styled(
+                    number,
+                    Style::new().fg(if on { ACCENT } else { MUTED }),
+                )),
+                Cell::from(vec![
+                    title,
+                    Line::from(Span::styled(details, Style::new().fg(SUB))),
+                ]),
+            ])
+            .height(2)
+        });
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(0)])
-        .header(Row::new(["#", "Выпуск · дата / длительность / прогресс"]).style(Style::new().fg(MUTED)).bottom_margin(1))
+        .header(
+            Row::new(["#", "Выпуск · дата / длительность / прогресс"])
+                .style(Style::new().fg(MUTED))
+                .bottom_margin(1),
+        )
         .block(block)
         .column_spacing(1)
         .row_highlight_style(Style::new().bg(SEL_BG).bold())
         .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
         .highlight_spacing(HighlightSpacing::Always);
-    f.render_stateful_widget(table, area, &mut TableState::default().with_selected(selected));
+    f.render_stateful_widget(
+        table,
+        area,
+        &mut TableState::default().with_selected(selected),
+    );
 }
 
 /// Borrow the text while wrapping at grapheme boundaries, preferring whitespace.
@@ -995,7 +1307,10 @@ fn podcast_description_lines(text: &str, width: u16) -> Vec<Line<'_>> {
             }
             if end == 0 {
                 // A single wide grapheme cannot fit this terminal: clip it as a unit.
-                end = span.styled_graphemes(Style::default()).next().map_or(rest.len(), |g| g.symbol.len());
+                end = span
+                    .styled_graphemes(Style::default())
+                    .next()
+                    .map_or(rest.len(), |g| g.symbol.len());
             } else if let Some(at) = space.filter(|&at| at > 0) {
                 end = at;
             }
@@ -1010,9 +1325,15 @@ fn draw_podcast_description(f: &mut Frame, app: &mut App) {
     if app.tab != Tab::Podcasts {
         return;
     }
-    let Some((title, description)) = &app.podcasts.description else { return };
-    let [vertical] = Layout::vertical([Constraint::Percentage(85)]).flex(Flex::Center).areas(f.area());
-    let [area] = Layout::horizontal([Constraint::Max(90)]).flex(Flex::Center).areas(vertical);
+    let Some((title, description)) = &app.podcasts.description else {
+        return;
+    };
+    let [vertical] = Layout::vertical([Constraint::Percentage(85)])
+        .flex(Flex::Center)
+        .areas(f.area());
+    let [area] = Layout::horizontal([Constraint::Max(90)])
+        .flex(Flex::Center)
+        .areas(vertical);
     f.render_widget(Clear, area);
     let close = keymap::hint_keys(&[A::Back, A::PodcastDescription]);
     let block = panel(ic(app).info, title)
@@ -1023,17 +1344,31 @@ fn draw_podcast_description(f: &mut Frame, app: &mut App) {
         )));
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let text = if description.trim().is_empty() { "Описание отсутствует" } else { description };
+    let text = if description.trim().is_empty() {
+        "Описание отсутствует"
+    } else {
+        description
+    };
     let lines = podcast_description_lines(text, inner.width);
-    let last = lines.len().saturating_sub(inner.height as usize).min(u16::MAX as usize) as u16;
+    let last = lines
+        .len()
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16;
     app.podcasts.description_scroll = app.podcasts.description_scroll.min(last);
-    f.render_widget(Paragraph::new(lines).scroll((app.podcasts.description_scroll, 0)), inner);
+    f.render_widget(
+        Paragraph::new(lines).scroll((app.podcasts.description_scroll, 0)),
+        inner,
+    );
 }
 
 fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
     let i = ic(app);
     let active = (app.queue.is_wave())
-        .then(|| app.wave.as_ref().map(|w| (w.station.clone(), w.name.clone())))
+        .then(|| {
+            app.wave
+                .as_ref()
+                .map(|w| (w.station.clone(), w.name.clone()))
+        })
         .flatten();
     let items: Vec<ListItem> = app
         .stations
@@ -1057,15 +1392,24 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
                 ])
             }
             StationRow::Station(s) => {
-                let on = active.as_ref().is_some_and(|(id, name)| *id == s.id && *name == s.name);
+                let on = active
+                    .as_ref()
+                    .is_some_and(|(id, name)| *id == s.id && *name == s.name);
                 let line = if on {
-                    let mark = if app.paused { i.pause } else { equalizer(app.tick) };
+                    let mark = if app.paused {
+                        i.pause
+                    } else {
+                        equalizer(app.tick)
+                    };
                     Line::from(vec![
                         Span::styled(format!("   {mark:<3} "), Style::new().fg(ACCENT)),
                         Span::styled(s.name.as_str(), Style::new().fg(ACCENT).bold()),
                     ])
                 } else {
-                    Line::from(vec![Span::styled("   ·   ", Style::new().fg(MUTED)), Span::raw(s.name.as_str())])
+                    Line::from(vec![
+                        Span::styled("   ·   ", Style::new().fg(MUTED)),
+                        Span::raw(s.name.as_str()),
+                    ])
                 };
                 ListItem::new(line)
             }
@@ -1083,7 +1427,10 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     let i = ic(app);
-    let block = Block::new().borders(Borders::TOP).border_style(Style::new().fg(BORDER)).padding(Padding::horizontal(1));
+    let block = Block::new()
+        .borders(Borders::TOP)
+        .border_style(Style::new().fg(BORDER))
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let [l1, l2] = Layout::vertical([Constraint::Length(1); 2]).areas(inner);
@@ -1101,7 +1448,10 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     let filled = ((app.volume.min(100.0) / 10.0).round() as usize).min(10);
     let vol_color = if app.muted { MUTED } else { ACCENT };
     let mut right = vec![];
-    let repeat = match (app.current().is_some_and(Track::is_podcast), app.queue.repeat()) {
+    let repeat = match (
+        app.current().is_some_and(Track::is_podcast),
+        app.queue.repeat(),
+    ) {
         (false, Repeat::All) => Some(i.repeat),
         (false, Repeat::One) => Some(i.repeat_one),
         _ => None,
@@ -1112,7 +1462,10 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     let preset = &crate::eq::PRESETS[app.eq];
     if !preset.is_flat() {
         right.push(Span::styled("EQ ", Style::new().fg(ACCENT).bold()));
-        right.push(Span::styled(format!("{}   ", preset.name), Style::new().fg(SUB)));
+        right.push(Span::styled(
+            format!("{}   ", preset.name),
+            Style::new().fg(SUB),
+        ));
     }
     right.extend([
         Span::styled(format!("{vol_icon} "), Style::new().fg(vol_color)),
@@ -1122,10 +1475,17 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
     ]);
     let right = Line::from(right);
 
-    let play_icon = if app.paused || app.current().is_none() { i.play } else { i.pause };
+    let play_icon = if app.paused || app.current().is_none() {
+        i.play
+    } else {
+        i.pause
+    };
     let mut left = vec![
         Span::styled(format!("{} ", i.prev), Style::new().fg(SUB)),
-        Span::styled(format!(" {play_icon} "), Style::new().fg(ON_ACCENT).bg(ACCENT).bold()),
+        Span::styled(
+            format!(" {play_icon} "),
+            Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+        ),
         Span::styled(format!(" {}", i.next), Style::new().fg(SUB)),
         Span::raw("   "),
     ];
@@ -1134,10 +1494,20 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
             if app.loading_track {
                 left.push(Span::styled("Загрузка… ", Style::new().fg(ACCENT)));
             }
-            left.push(Span::styled(t.title.as_str(), Style::new().fg(Color::Reset).bold()));
-            left.push(Span::styled(format!("  {}", t.artists), Style::new().fg(SUB)));
+            left.push(Span::styled(
+                t.title.as_str(),
+                Style::new().fg(Color::Reset).bold(),
+            ));
+            left.push(Span::styled(
+                format!("  {}", t.artists),
+                Style::new().fg(SUB),
+            ));
             if let Some(info) = app.audio_info.as_ref().filter(|_| app.show_audio_info) {
-                let codec = info.codec.strip_suffix("-mp4").unwrap_or(&info.codec).to_uppercase();
+                let codec = info
+                    .codec
+                    .strip_suffix("-mp4")
+                    .unwrap_or(&info.codec)
+                    .to_uppercase();
                 let text = match (info.bitrate, codec.is_empty()) {
                     (0, true) => String::new(),
                     (0, false) => format!(" ({codec})"),
@@ -1147,13 +1517,23 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
                 left.push(Span::styled(text, Style::new().fg(SUB)));
             }
             if app.is_liked(t) {
-                left.push(Span::styled(format!("  {}", i.heart), Style::new().fg(HEART)));
+                left.push(Span::styled(
+                    format!("  {}", i.heart),
+                    Style::new().fg(HEART),
+                ));
             }
         }
-        None => left.push(Span::styled("Ничего не играет — нажмите w", Style::new().fg(MUTED))),
+        None => left.push(Span::styled(
+            "Ничего не играет — нажмите w",
+            Style::new().fg(MUTED),
+        )),
     }
-    let [a, b] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(right.width() as u16)]).spacing(2).areas(l1);
+    let [a, b] = Layout::horizontal([
+        Constraint::Min(10),
+        Constraint::Length(right.width() as u16),
+    ])
+    .spacing(2)
+    .areas(l1);
     f.render_widget(Paragraph::new(Line::from(left)), a);
     f.render_widget(Paragraph::new(right).alignment(Alignment::Right), b);
 
@@ -1165,7 +1545,11 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
         fmt_time(app.duration)
     };
     let bar_w = l2.width.saturating_sub((pos.len() + dur.len() + 2) as u16) as usize;
-    let ratio = if app.duration > 0.0 { (app.time_pos / app.duration).clamp(0.0, 1.0) } else { 0.0 };
+    let ratio = if app.duration > 0.0 {
+        (app.time_pos / app.duration).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let done = ((bar_w as f64) * ratio) as usize;
     let mut spans = vec![Span::styled(format!("{pos} "), Style::new().fg(SUB))];
     if bar_w > 0 {
@@ -1173,7 +1557,10 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled("━".repeat(done), Style::new().fg(color)));
         if done < bar_w {
             spans.push(Span::styled("●", Style::new().fg(color)));
-            spans.push(Span::styled("━".repeat(bar_w - done - 1), Style::new().fg(BORDER)));
+            spans.push(Span::styled(
+                "━".repeat(bar_w - done - 1),
+                Style::new().fg(BORDER),
+            ));
         }
     }
     spans.push(Span::styled(format!(" {dur}"), Style::new().fg(SUB)));
@@ -1183,108 +1570,145 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
 fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
     let i = ic(app);
     if let Some(s) = app.visible_status() {
-        let (icon, color) = if app.status_error { (i.error, ERROR) } else { (i.info, ACCENT) };
-        f.render_widget(Paragraph::new(Span::styled(format!(" {icon} {s}"), Style::new().fg(color))), area);
+        let (icon, color) = if app.status_error {
+            (i.error, ERROR)
+        } else {
+            (i.info, ACCENT)
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(format!(" {icon} {s}"), Style::new().fg(color))),
+            area,
+        );
         return;
     }
-    let keys: &[(&str, &str)] = if app.search.editing || (app.tab == Tab::Podcasts && app.podcasts.editing) {
-        &[("Enter", "искать"), ("Esc", "отмена"), ("Ctrl+U", "очистить")]
-    } else if let Some(modal) = &app.modal {
-        match modal {
-            Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
-            Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => &[("Enter", "удалить"), ("Esc", "отмена")],
-            Modal::Rename { .. } => &[("Enter", "сохранить"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
-            Modal::NewPlaylist { .. } => &[("Enter", "создать"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
-            Modal::OpenLink { .. } => &[("Enter", "играть"), ("Esc", "отмена"), ("Ctrl+U", "очистить")],
-            Modal::Settings { .. } => &[("↑↓", "выбор"), ("←→", "изменить"), ("Enter", "открыть"), ("Esc", "закрыть")],
-            Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
-        }
-    } else {
-        let actions: &[(&[Action], &str)] = if app.tab == Tab::Podcasts {
-            if app.podcasts.description.is_some() {
-                &[
-                    (&[A::Back, A::PodcastDescription], "закрыть"),
-                    (&[A::Up, A::Down], "прокрутка"),
-                    (&[A::PageUp, A::PageDown], "страницы"),
-                    (&[A::Top, A::Bottom], "начало / конец"),
-                ]
-            } else if app.podcasts.open.is_some() {
-                &[
-                    (&[A::Activate], "продолжить"),
-                    (&[A::PodcastFromStart], "с начала"),
-                    (&[A::PodcastDescription], "описание"),
-                    (&[A::LikeSelected], "лайк выпуска"),
-                    (&[A::PodcastFavorite], "в Мои"),
-                    (&[A::Back], "назад"),
-                    (&[A::Help], "помощь"),
-                ]
-            } else {
-                &[
-                    (&[A::Activate], "выпуски"),
-                    (&[A::PodcastPreviousSection, A::PodcastNextSection], "раздел"),
-                    (&[A::Search], "поиск"),
-                    (&[A::PodcastFavorite], "в Мои"),
-                    (&[A::PodcastDescription], "описание"),
-                    (&[A::Reload], "обновить"),
-                    (&[A::Help], "помощь"),
-                ]
-            }
-        } else if app.tab == Tab::Playlists && app.playlists.open.is_some() {
+    let keys: &[(&str, &str)] =
+        if app.search.editing || (app.tab == Tab::Podcasts && app.podcasts.editing) {
             &[
-                (&[A::Activate], "играть"),
-                (&[A::Shuffle], "в случайном порядке"),
-                (&[A::Remove], "удалить"),
-                (&[A::AddToPlaylist], "в плейлист"),
-                (&[A::Rename], "переименовать"),
-                (&[A::Back], "назад"),
+                ("Enter", "искать"),
+                ("Esc", "отмена"),
+                ("Ctrl+U", "очистить"),
             ]
+        } else if let Some(modal) = &app.modal {
+            match modal {
+                Modal::AddTo { .. } => &[("↑↓", "выбор"), ("Enter", "добавить"), ("Esc", "отмена")],
+                Modal::ConfirmRemove { .. } | Modal::ConfirmDelete { .. } => {
+                    &[("Enter", "удалить"), ("Esc", "отмена")]
+                }
+                Modal::Rename { .. } => &[
+                    ("Enter", "сохранить"),
+                    ("Esc", "отмена"),
+                    ("Ctrl+U", "очистить"),
+                ],
+                Modal::NewPlaylist { .. } => &[
+                    ("Enter", "создать"),
+                    ("Esc", "отмена"),
+                    ("Ctrl+U", "очистить"),
+                ],
+                Modal::OpenLink { .. } => &[
+                    ("Enter", "играть"),
+                    ("Esc", "отмена"),
+                    ("Ctrl+U", "очистить"),
+                ],
+                Modal::Settings { .. } => &[
+                    ("↑↓", "выбор"),
+                    ("←→", "изменить"),
+                    ("Enter", "открыть"),
+                    ("Esc", "закрыть"),
+                ],
+                Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
+            }
         } else {
-            match app.tab {
-                Tab::Stations => &[
-                    (&[A::Activate], "запустить"),
-                    (&[A::PlayPause], "пауза"),
-                    (&[A::Next], "далее"),
-                    (&[A::LikeCurrent], "лайк"),
-                    (&[A::Dislike], "дизлайк"),
-                    (&[A::Help], "помощь"),
-                    (&[A::Quit], "выход"),
-                ],
-                Tab::Playlists => &[
-                    (&[A::Activate], "открыть"),
-                    (&[A::NewPlaylist], "новый"),
-                    (&[A::Shuffle], "в случайном порядке"),
-                    (&[A::Rename], "переименовать"),
-                    (&[A::Remove], "удалить"),
-                    (&[A::Reload], "обновить"),
-                    (&[A::Help], "помощь"),
-                ],
-                Tab::Liked | Tab::Search => &[
+            let actions: &[(&[Action], &str)] = if app.tab == Tab::Podcasts {
+                if app.podcasts.description.is_some() {
+                    &[
+                        (&[A::Back, A::PodcastDescription], "закрыть"),
+                        (&[A::Up, A::Down], "прокрутка"),
+                        (&[A::PageUp, A::PageDown], "страницы"),
+                        (&[A::Top, A::Bottom], "начало / конец"),
+                    ]
+                } else if app.podcasts.open.is_some() {
+                    &[
+                        (&[A::Activate], "продолжить"),
+                        (&[A::PodcastFromStart], "с начала"),
+                        (&[A::PodcastDescription], "описание"),
+                        (&[A::LikeSelected], "лайк выпуска"),
+                        (&[A::PodcastFavorite], "в Мои"),
+                        (&[A::Back], "назад"),
+                        (&[A::Help], "помощь"),
+                    ]
+                } else {
+                    &[
+                        (&[A::Activate], "выпуски"),
+                        (
+                            &[A::PodcastPreviousSection, A::PodcastNextSection],
+                            "раздел",
+                        ),
+                        (&[A::Search], "поиск"),
+                        (&[A::PodcastFavorite], "в Мои"),
+                        (&[A::PodcastDescription], "описание"),
+                        (&[A::Reload], "обновить"),
+                        (&[A::Help], "помощь"),
+                    ]
+                }
+            } else if app.tab == Tab::Playlists && app.playlists.open.is_some() {
+                &[
                     (&[A::Activate], "играть"),
                     (&[A::Shuffle], "в случайном порядке"),
-                    (&[A::LikeSelected], "лайк"),
-                    (&[A::TrackWave], "волна по треку"),
-                    (&[A::PlayPause], "пауза"),
-                    (&[A::Next], "далее"),
-                    (&[A::Help], "помощь"),
-                ],
-                Tab::Wave => &[
-                    (&[A::MyWave], "волна"),
-                    (&[A::PlayPause], "пауза"),
-                    (&[A::Next, A::Prev], "трек"),
-                    (&[A::LikeCurrent], "лайк"),
-                    (&[A::Dislike], "дизлайк"),
-                    (&[A::SeekBack, A::SeekForward], "перемотка"),
-                    (&[A::VolumeUp, A::VolumeDown], "громкость"),
-                    (&[A::Help], "помощь"),
-                    (&[A::Quit], "выход"),
-                ],
-                Tab::Podcasts => unreachable!("podcast hints are handled above"),
-            }
+                    (&[A::Remove], "удалить"),
+                    (&[A::AddToPlaylist], "в плейлист"),
+                    (&[A::Rename], "переименовать"),
+                    (&[A::Back], "назад"),
+                ]
+            } else {
+                match app.tab {
+                    Tab::Stations => &[
+                        (&[A::Activate], "запустить"),
+                        (&[A::PlayPause], "пауза"),
+                        (&[A::Next], "далее"),
+                        (&[A::LikeCurrent], "лайк"),
+                        (&[A::Dislike], "дизлайк"),
+                        (&[A::Help], "помощь"),
+                        (&[A::Quit], "выход"),
+                    ],
+                    Tab::Playlists => &[
+                        (&[A::Activate], "открыть"),
+                        (&[A::NewPlaylist], "новый"),
+                        (&[A::Shuffle], "в случайном порядке"),
+                        (&[A::Rename], "переименовать"),
+                        (&[A::Remove], "удалить"),
+                        (&[A::Reload], "обновить"),
+                        (&[A::Help], "помощь"),
+                    ],
+                    Tab::Liked | Tab::Search => &[
+                        (&[A::Activate], "играть"),
+                        (&[A::Shuffle], "в случайном порядке"),
+                        (&[A::LikeSelected], "лайк"),
+                        (&[A::TrackWave], "волна по треку"),
+                        (&[A::PlayPause], "пауза"),
+                        (&[A::Next], "далее"),
+                        (&[A::Help], "помощь"),
+                    ],
+                    Tab::Wave => &[
+                        (&[A::MyWave], "волна"),
+                        (&[A::PlayPause], "пауза"),
+                        (&[A::Next, A::Prev], "трек"),
+                        (&[A::LikeCurrent], "лайк"),
+                        (&[A::Dislike], "дизлайк"),
+                        (&[A::SeekBack, A::SeekForward], "перемотка"),
+                        (&[A::VolumeUp, A::VolumeDown], "громкость"),
+                        (&[A::Help], "помощь"),
+                        (&[A::Quit], "выход"),
+                    ],
+                    Tab::Podcasts => unreachable!("podcast hints are handled above"),
+                }
+            };
+            let help = keymap::hint_keys(&[A::Help]);
+            let hints: Vec<(String, &str)> = actions
+                .iter()
+                .map(|(a, d)| (keymap::hint_keys(a), *d))
+                .collect();
+            return draw_hint_line(f, app, area, &hints, &help);
         };
-        let help = keymap::hint_keys(&[A::Help]);
-        let hints: Vec<(String, &str)> = actions.iter().map(|(a, d)| (keymap::hint_keys(a), *d)).collect();
-        return draw_hint_line(f, app, area, &hints, &help);
-    };
     let hints: Vec<(String, &str)> = keys.iter().map(|(k, d)| (k.to_string(), *d)).collect();
     draw_hint_line(f, app, area, &hints, "");
 }
@@ -1294,7 +1718,8 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
 fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)], keep: &str) {
     // «Настройки» sit at the right edge, except while text is typed (`o` is input there).
     let about = (!app.search.editing
-        && !(app.tab == Tab::Podcasts && (app.podcasts.editing || app.podcasts.description.is_some()))
+        && !(app.tab == Tab::Podcasts
+            && (app.podcasts.editing || app.podcasts.description.is_some()))
         && app.modal.is_none())
     .then(|| {
         Line::from(vec![
@@ -1307,7 +1732,9 @@ fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)],
     let hint_w = |(k, d): &&(String, &str)| Line::from(key_hint(k, d).to_vec()).width();
     let mut shown: Vec<&(String, &str)> = keys.iter().collect();
     while 1 + shown.iter().map(hint_w).sum::<usize>() + right_w > area.width as usize {
-        let Some(last) = shown.iter().rposition(|(k, _)| k != keep) else { break };
+        let Some(last) = shown.iter().rposition(|(k, _)| k != keep) else {
+            break;
+        };
         shown.remove(last);
     }
     let mut spans = vec![Span::raw(" ")];
@@ -1339,12 +1766,19 @@ fn draw_help(f: &mut Frame, app: &App) {
                 Span::styled(section.title().to_uppercase(), Style::new().fg(SUB).bold()),
             ]));
             for row in keymap::ROWS.iter().filter(|r| r.section == section) {
-                if podcasts && row.keys.iter().any(|(_, action)| matches!(action, A::Activate | A::Shuffle | A::OpenLink | A::Dislike)) {
+                if podcasts
+                    && row.keys.iter().any(|(_, action)| {
+                        matches!(action, A::Activate | A::Shuffle | A::OpenLink | A::Dislike)
+                    })
+                {
                     continue;
                 }
                 let Some(help) = row.help else { continue };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("   {:<12}", keymap::row_keys(row)), Style::new().fg(ACCENT).bold()),
+                    Span::styled(
+                        format!("   {:<12}", keymap::row_keys(row)),
+                        Style::new().fg(ACCENT).bold(),
+                    ),
                     Span::styled(help, Style::new().fg(Color::Reset)),
                 ]));
             }
@@ -1354,7 +1788,12 @@ fn draw_help(f: &mut Frame, app: &App) {
         lines
     };
     let sections: &[Section] = if podcasts {
-        &[Section::Podcasts, Section::Ratings, Section::Playback, Section::Navigation]
+        &[
+            Section::Podcasts,
+            Section::Ratings,
+            Section::Playback,
+            Section::Navigation,
+        ]
     } else {
         &Section::ALL
     };
@@ -1369,12 +1808,22 @@ fn draw_help(f: &mut Frame, app: &App) {
     };
     let rows = columns.iter().map(Vec::len).max().unwrap_or(0) as u16;
     let width = (columns.len() as u16 * COL + 4).min(area.width);
-    let [v] = Layout::vertical([Constraint::Length((rows + 4).min(area.height))]).flex(Flex::Center).areas(area);
-    let [r] = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Center).areas(v);
+    let [v] = Layout::vertical([Constraint::Length((rows + 4).min(area.height))])
+        .flex(Flex::Center)
+        .areas(area);
+    let [r] = Layout::horizontal([Constraint::Length(width)])
+        .flex(Flex::Center)
+        .areas(v);
     f.render_widget(Clear, r);
     let block = panel(i.keys, "Горячие клавиши")
         .border_style(Style::new().fg(ACCENT))
-        .title_bottom(Line::from(Span::styled(" любая клавиша — закрыть ", Style::new().fg(MUTED))).centered())
+        .title_bottom(
+            Line::from(Span::styled(
+                " любая клавиша — закрыть ",
+                Style::new().fg(MUTED),
+            ))
+            .centered(),
+        )
         .padding(Padding::uniform(1));
     let inner = block.inner(r);
     f.render_widget(block, r);
@@ -1406,24 +1855,46 @@ fn draw_about(f: &mut Frame, i: &Icons) {
     let link = Style::new().fg(ACCENT).underlined();
     // One entry per row: text segments (text, style, link target); an empty entry is a blank row.
     let rows: Vec<Vec<(String, Style, Option<&str>)>> = vec![
-        vec![(format!("{}  ymusic", i.logo), Style::new().fg(ACCENT).bold(), None)],
+        vec![(
+            format!("{}  ymusic", i.logo),
+            Style::new().fg(ACCENT).bold(),
+            None,
+        )],
         vec![],
-        vec![(format!("Версия {}", env!("CARGO_PKG_VERSION")), Style::new().fg(SUB), None)],
+        vec![(
+            format!("Версия {}", env!("CARGO_PKG_VERSION")),
+            Style::new().fg(SUB),
+            None,
+        )],
         vec![],
         vec![],
         vec![(REPO_URL.into(), link, Some(REPO_URL))],
         vec![(AUR_URL.into(), link, Some(AUR_URL))],
         vec![(AUR_BIN_URL.into(), link, Some(AUR_BIN_URL))],
     ];
-    let row_width = |row: &[(String, Style, Option<&str>)]| row.iter().map(|(t, ..)| Span::raw(t.as_str()).width()).sum::<usize>();
+    let row_width = |row: &[(String, Style, Option<&str>)]| {
+        row.iter()
+            .map(|(t, ..)| Span::raw(t.as_str()).width())
+            .sum::<usize>()
+    };
     let widest = rows.iter().map(|r| row_width(r)).max().unwrap_or(0) as u16;
     let area = f.area();
-    let [v] = Layout::vertical([Constraint::Length((rows.len() as u16 + 4).min(area.height))]).flex(Flex::Center).areas(area);
-    let [r] = Layout::horizontal([Constraint::Length((widest + 10).min(area.width))]).flex(Flex::Center).areas(v);
+    let [v] = Layout::vertical([Constraint::Length((rows.len() as u16 + 4).min(area.height))])
+        .flex(Flex::Center)
+        .areas(area);
+    let [r] = Layout::horizontal([Constraint::Length((widest + 10).min(area.width))])
+        .flex(Flex::Center)
+        .areas(v);
     f.render_widget(Clear, r);
     let block = panel(i.info, "О программе")
         .border_style(Style::new().fg(ACCENT))
-        .title_bottom(Line::from(Span::styled(" любая клавиша — закрыть ", Style::new().fg(MUTED))).centered())
+        .title_bottom(
+            Line::from(Span::styled(
+                " любая клавиша — закрыть ",
+                Style::new().fg(MUTED),
+            ))
+            .centered(),
+        )
         .padding(Padding::uniform(1));
     let inner = block.inner(r);
     f.render_widget(block, r);
@@ -1434,7 +1905,13 @@ fn draw_about(f: &mut Frame, i: &Icons) {
         if w > inner.width {
             // Too narrow for links: plain, truncated text.
             let text: String = row.iter().map(|(t, ..)| t.as_str()).collect();
-            buf.set_stringn(inner.x, y, &text, inner.width as usize, Style::new().fg(SUB));
+            buf.set_stringn(
+                inner.x,
+                y,
+                &text,
+                inner.width as usize,
+                Style::new().fg(SUB),
+            );
             continue;
         }
         let mut x = inner.x + (inner.width - w) / 2;
@@ -1465,6 +1942,8 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Output => "Вывод звука",
         Setting::HideAccount => "Скрыть аккаунт",
         Setting::RemainingTime => "Обратный отсчёт",
+        Setting::Ynison => "Ynison",
+        Setting::Autoplay => "Автовоспроизведение",
         Setting::AudioInfo => "Показывать битрейт и кодек",
         Setting::Lastfm => "Last.fm",
         Setting::About => "О программе",
@@ -1475,7 +1954,10 @@ fn setting_name(s: Setting) -> &'static str {
 /// Explanation shown under the settings list for the selected row.
 fn setting_note(app: &App, s: Setting) -> String {
     match s {
-        Setting::Quality => format!("{} · со следующего трека", crate::api::QUALITIES[app.quality].note),
+        Setting::Quality => format!(
+            "{} · со следующего трека",
+            crate::api::QUALITIES[app.quality].note
+        ),
         Setting::Equalizer => "Слышно сразу".into(),
         Setting::Crossfade => "Конец трека накладывается на начало следующего".into(),
         Setting::PodcastAll => "В очередь — все записи списка или только выбранная".into(),
@@ -1485,12 +1967,19 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Api => "Запасной вариант — API сайта music.yandex.ru".into(),
         Setting::Art => "Над треком в «Сейчас играет»: обложка альбома или спектр".into(),
         Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
-        Setting::Output if cfg!(target_os = "macos") => "Системный вывод или PulseAudio, если он установлен".into(),
+        Setting::Output if cfg!(target_os = "macos") => {
+            "Системный вывод или PulseAudio, если он установлен".into()
+        }
         Setting::Output => "Авто: PipeWire или PulseAudio, без них — прямо в ALSA".into(),
         Setting::HideAccount => "Без логина и значка Плюса в заголовке".into(),
+        Setting::Ynison => "Очередь и позиция между устройствами Яндекс Музыки".into(),
+        Setting::Autoplay if !app.ynison.enabled => "Доступно при включённом Ynison".into(),
+        Setting::Autoplay => "При запуске продолжать трек с последнего места".into(),
         Setting::AudioInfo => "Фактический формат потока рядом с исполнителем".into(),
         Setting::RemainingTime => "Справа от полосы — сколько осталось до конца трека".into(),
-        Setting::Lastfm if !crate::api::lastfm::available() => "Ключ Last.fm не задан при сборке".into(),
+        Setting::Lastfm if !crate::api::lastfm::available() => {
+            "Ключ Last.fm не задан при сборке".into()
+        }
         Setting::Lastfm => match app.lastfm {
             Lastfm::Off => "Скробблинг · Enter — подключить через браузер".into(),
             Lastfm::Connecting { .. } => "Разрешите доступ в браузере · Enter — отмена".into(),
@@ -1509,10 +1998,16 @@ fn popup(f: &mut Frame, icon: &str, title: &str, w: u16, h: u16) -> Rect {
 /// Like [`popup`], for a box with extra decorations (e.g. a bottom title).
 fn popup_block(f: &mut Frame, block: Block, w: u16, h: u16) -> Rect {
     let area = f.area();
-    let [v] = Layout::vertical([Constraint::Length((h + 4).min(area.height))]).flex(Flex::Center).areas(area);
-    let [r] = Layout::horizontal([Constraint::Length((w + 4).min(area.width))]).flex(Flex::Center).areas(v);
+    let [v] = Layout::vertical([Constraint::Length((h + 4).min(area.height))])
+        .flex(Flex::Center)
+        .areas(area);
+    let [r] = Layout::horizontal([Constraint::Length((w + 4).min(area.width))])
+        .flex(Flex::Center)
+        .areas(v);
     f.render_widget(Clear, r);
-    let block = block.border_style(Style::new().fg(ACCENT)).padding(Padding::uniform(1));
+    let block = block
+        .border_style(Style::new().fg(ACCENT))
+        .padding(Padding::uniform(1));
     let inner = block.inner(r);
     f.render_widget(block, r);
     inner
@@ -1522,13 +2017,24 @@ fn draw_modal(f: &mut Frame, app: &App) {
     let i = ic(app);
     let Some(modal) = &app.modal else { return };
     match modal {
-        Modal::AddTo { track, choices, sel } => {
+        Modal::AddTo {
+            track,
+            choices,
+            sel,
+        } => {
             let visible = (choices.len() + 1).min(12);
             let inner = popup(f, i.queue, "Добавить в плейлист", 48, visible as u16 + 2);
-            let [head, _, list] =
-                Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(inner);
+            let [head, _, list] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .areas(inner);
             f.render_widget(
-                Paragraph::new(Span::styled(format!("{} — {}", track.title, track.artists), Style::new().fg(SUB))),
+                Paragraph::new(Span::styled(
+                    format!("{} — {}", track.title, track.artists),
+                    Style::new().fg(SUB),
+                )),
                 head,
             );
             let items: Vec<ListItem> = choices
@@ -1536,10 +2042,16 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .map(|p| {
                     ListItem::new(Line::from(vec![
                         Span::raw(p.title.clone()),
-                        Span::styled(format!("  {} {}", p.track_count, i.note), Style::new().fg(MUTED)),
+                        Span::styled(
+                            format!("  {} {}", p.track_count, i.note),
+                            Style::new().fg(MUTED),
+                        ),
                     ]))
                 })
-                .chain([ListItem::new(Span::styled("+ Новый плейлист", Style::new().fg(ACCENT)))])
+                .chain([ListItem::new(Span::styled(
+                    "+ Новый плейлист",
+                    Style::new().fg(ACCENT),
+                ))])
                 .collect();
             let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
             let widget = List::new(items)
@@ -1551,8 +2063,14 @@ fn draw_modal(f: &mut Frame, app: &App) {
         Modal::ConfirmRemove { pl, track, .. } => {
             let inner = popup(f, i.error, "Удалить трек", 48, 4);
             let lines = vec![
-                Line::from(Span::styled(track.title.clone(), Style::new().fg(Color::Reset).bold())),
-                Line::from(Span::styled(format!("из плейлиста «{}»?", pl.title), Style::new().fg(SUB))),
+                Line::from(Span::styled(
+                    track.title.clone(),
+                    Style::new().fg(Color::Reset).bold(),
+                )),
+                Line::from(Span::styled(
+                    format!("из плейлиста «{}»?", pl.title),
+                    Style::new().fg(SUB),
+                )),
                 Line::from(""),
                 Line::from([key_hint("Enter", "удалить"), key_hint("Esc", "отмена")].concat()),
             ];
@@ -1565,7 +2083,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
                     format!("«{}» · {} {}", pl.title, pl.track_count, i.note),
                     Style::new().fg(Color::Reset).bold(),
                 )),
-                Line::from(Span::styled("Плейлист будет удалён из аккаунта.", Style::new().fg(SUB))),
+                Line::from(Span::styled(
+                    "Плейлист будет удалён из аккаунта.",
+                    Style::new().fg(SUB),
+                )),
                 Line::from(""),
                 Line::from([key_hint("Enter", "удалить"), key_hint("Esc", "отмена")].concat()),
             ];
@@ -1574,20 +2095,40 @@ fn draw_modal(f: &mut Frame, app: &App) {
         Modal::Settings { sel } => {
             let rows = Setting::ALL;
             let n = rows.len() as u16;
-            let block = panel(i.settings, "Настройки")
-                .title_bottom(Line::from(Span::styled(" Esc — закрыть окно ", Style::new().fg(MUTED))).centered());
+            let block = panel(i.settings, "Настройки").title_bottom(
+                Line::from(Span::styled(" Esc — закрыть окно ", Style::new().fg(MUTED))).centered(),
+            );
             let inner = popup_block(f, block, 54, n + 2);
-            let [list, _, note] =
-                Layout::vertical([Constraint::Length(n), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+            let [list, _, note] = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
             let items: Vec<ListItem> = rows
                 .iter()
                 .map(|&s| {
                     let name = setting_name(s);
-                    let label = if s == Setting::Logout { Style::new().fg(ERROR) } else { Style::new() };
+                    let label = if s == Setting::Logout {
+                        Style::new().fg(ERROR)
+                    } else if s == Setting::Autoplay && !app.ynison.enabled {
+                        Style::new().fg(MUTED)
+                    } else {
+                        Style::new()
+                    };
                     let mut spans = vec![Span::styled(format!("{name:<27}"), label)];
                     if let Some(v) = app.setting_value(s) {
                         spans.push(Span::styled("‹ ", Style::new().fg(MUTED)));
-                        spans.push(Span::styled(v, Style::new().fg(ACCENT).bold()));
+                        spans.push(Span::styled(
+                            v,
+                            Style::new()
+                                .fg(if s == Setting::Autoplay && !app.ynison.enabled {
+                                    MUTED
+                                } else {
+                                    ACCENT
+                                })
+                                .bold(),
+                        ));
                         spans.push(Span::styled(" ›", Style::new().fg(MUTED)));
                     }
                     ListItem::new(Line::from(spans))
@@ -1600,7 +2141,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .highlight_spacing(HighlightSpacing::Always);
             f.render_stateful_widget(widget, list, &mut st);
             let text = setting_note(app, rows[*sel]);
-            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(MUTED))), note);
+            f.render_widget(
+                Paragraph::new(Span::styled(text, Style::new().fg(MUTED))),
+                note,
+            );
         }
         Modal::ConfirmLogout => {
             let inner = popup(f, i.error, "Выход из аккаунта", 48, 4);
@@ -1609,7 +2153,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
                     format!("Выйти из аккаунта {}?", app.account.login),
                     Style::new().fg(Color::Reset).bold(),
                 )),
-                Line::from(Span::styled("Токен будет удалён, программа закроется.", Style::new().fg(SUB))),
+                Line::from(Span::styled(
+                    "Токен будет удалён, программа закроется.",
+                    Style::new().fg(SUB),
+                )),
                 Line::from(""),
                 Line::from([key_hint("Enter", "выйти"), key_hint("Esc", "отмена")].concat()),
             ];
@@ -1617,15 +2164,27 @@ fn draw_modal(f: &mut Frame, app: &App) {
         }
         Modal::Rename { input, .. } => {
             let inner = popup(f, i.queue, "Название плейлиста", 48, 1);
-            let mut spans = vec![Span::styled(input.clone(), Style::new().fg(Color::Reset).bold())];
+            let mut spans = vec![Span::styled(
+                input.clone(),
+                Style::new().fg(Color::Reset).bold(),
+            )];
             if (app.tick / 2).is_multiple_of(2) {
                 spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), inner);
         }
         Modal::NewPlaylist { input, track } => {
-            let inner = popup(f, i.queue, "Новый плейлист", 48, if track.is_some() { 3 } else { 1 });
-            let mut spans = vec![Span::styled(input.clone(), Style::new().fg(Color::Reset).bold())];
+            let inner = popup(
+                f,
+                i.queue,
+                "Новый плейлист",
+                48,
+                if track.is_some() { 3 } else { 1 },
+            );
+            let mut spans = vec![Span::styled(
+                input.clone(),
+                Style::new().fg(Color::Reset).bold(),
+            )];
             if input.is_empty() {
                 spans.push(Span::styled("Название", Style::new().fg(MUTED)));
             } else if (app.tick / 2).is_multiple_of(2) {
@@ -1634,7 +2193,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let mut lines = vec![Line::from(spans)];
             if let Some(t) = track {
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(format!("и добавить: {} — {}", t.title, t.artists), Style::new().fg(SUB))));
+                lines.push(Line::from(Span::styled(
+                    format!("и добавить: {} — {}", t.title, t.artists),
+                    Style::new().fg(SUB),
+                )));
             }
             f.render_widget(Paragraph::new(lines), inner);
         }
@@ -1646,7 +2208,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let text: String = input.chars().skip(skip).collect();
             let mut spans = vec![Span::styled(text, Style::new().fg(Color::Reset).bold())];
             if input.is_empty() {
-                spans.push(Span::styled("Ссылка на трек, альбом или плейлист", Style::new().fg(MUTED)));
+                spans.push(Span::styled(
+                    "Ссылка на трек, альбом или плейлист",
+                    Style::new().fg(MUTED),
+                ));
             } else if (app.tick / 2).is_multiple_of(2) {
                 spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
             }
@@ -1662,12 +2227,19 @@ mod tests {
 
     #[test]
     fn player_audio_info_toggle() {
-        use ratatui::{backend::TestBackend, Terminal};
+        use ratatui::{Terminal, backend::TestBackend};
         let mut app = App::for_test();
-        let track = Track::from_json(&serde_json::json!({"id": "1", "title": "Трек", "artists": [{"name": "Исполнитель"}]})).unwrap();
+        let track = Track::from_json(
+            &serde_json::json!({"id": "1", "title": "Трек", "artists": [{"name": "Исполнитель"}]}),
+        )
+        .unwrap();
         app.queue.replace(crate::queue::Source::None, vec![track]);
         app.queue.select(0);
-        app.audio_info = Some(crate::api::FileInfo { codec: "aac-mp4".into(), bitrate: 256, ..Default::default() });
+        app.audio_info = Some(crate::api::FileInfo {
+            codec: "aac-mp4".into(),
+            bitrate: 256,
+            ..Default::default()
+        });
         let mut term = Terminal::new(TestBackend::new(120, 3)).unwrap();
         for (enabled, codec, bitrate, expected) in [
             (false, "aac-mp4", 256, ""),
@@ -1680,11 +2252,17 @@ mod tests {
             let info = app.audio_info.as_mut().unwrap();
             info.codec = codec.into();
             info.bitrate = bitrate;
-            term.draw(|f| super::draw_player(f, &app, f.area())).unwrap();
+            term.draw(|f| super::draw_player(f, &app, f.area()))
+                .unwrap();
             let buf = term.backend().buffer();
             let text: String = (0..120).map(|x| buf[(x, 1)].symbol()).collect();
-            assert!(text.contains(&format!("Трек  Исполнитель{expected}")), "{text}");
-            if expected.is_empty() { assert!(!text.contains("кбит/с") && !text.contains("AAC")); }
+            assert!(
+                text.contains(&format!("Трек  Исполнитель{expected}")),
+                "{text}"
+            );
+            if expected.is_empty() {
+                assert!(!text.contains("кбит/с") && !text.contains("AAC"));
+            }
         }
     }
 
@@ -1696,8 +2274,9 @@ mod tests {
         let area = Rect::new(0, 0, 8, 3);
         let mut buf = Buffer::empty(area);
         super::draw_spectrum(&mut buf, area, &[1.0, 0.5, 0.0, 1.0 / 24.0]);
-        let rows: Vec<String> =
-            (0..3).map(|y| (0..8).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
+        let rows: Vec<String> = (0..3)
+            .map(|y| (0..8).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect();
         assert_eq!(rows, ["█       ", "█ ▄     ", "█ █   ▁ "]);
         // Narrower than the number of bars: one column each, no gaps, extra bars dropped.
         let area = Rect::new(0, 0, 2, 1);
@@ -1717,13 +2296,18 @@ mod tests {
         assert_eq!(super::indexed(255, 219, 77), 221);
         assert_eq!(super::indexed(42, 42, 56), 236);
         let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 2, 1));
-        buf[(0, 0)].set_fg(Color::Rgb(255, 0, 0)).set_bg(Color::Rgb(0, 0, 0));
+        buf[(0, 0)]
+            .set_fg(Color::Rgb(255, 0, 0))
+            .set_bg(Color::Rgb(0, 0, 0));
         buf[(1, 0)].set_fg(Color::Yellow);
         super::to_256(&mut buf);
-        assert_eq!((buf[(0, 0)].fg, buf[(0, 0)].bg), (Color::Indexed(196), Color::Indexed(16)));
+        assert_eq!(
+            (buf[(0, 0)].fg, buf[(0, 0)].bg),
+            (Color::Indexed(196), Color::Indexed(16))
+        );
         assert_eq!(buf[(1, 0)].fg, Color::Yellow);
     }
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
     fn podcast_description_wrapping() {
@@ -1736,9 +2320,11 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines.iter().all(|line| line.width() == 2));
         let lines = super::podcast_description_lines("Один два три", 8);
-        assert_eq!(lines.iter().map(ToString::to_string).collect::<Vec<_>>(), ["Один два", "три"]);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["Один два", "три"]
+        );
     }
-
 
     /// Renders every tab.
     #[test]
@@ -1759,18 +2345,36 @@ mod tests {
             progress: None,
             published: None,
         };
-        app.queue.replace(crate::queue::Source::None, vec![
-            Track { id: "0".into(), title: "Группа крови".into(), artists: "Кино".into(), ..t.clone() },
-            t.clone(),
-            Track { id: "3".into(), title: "Искала".into(), artists: "Земфира".into(), ..t.clone() },
-        ]);
+        app.queue.replace(
+            crate::queue::Source::None,
+            vec![
+                Track {
+                    id: "0".into(),
+                    title: "Группа крови".into(),
+                    artists: "Кино".into(),
+                    ..t.clone()
+                },
+                t.clone(),
+                Track {
+                    id: "3".into(),
+                    title: "Искала".into(),
+                    artists: "Земфира".into(),
+                    ..t.clone()
+                },
+            ],
+        );
         app.queue.select(1);
         app.likes.set_loaded(vec![t.clone()]);
         app.playlists.set_loaded(
             ["Bloodborne soundtracks", "В дорогу"]
                 .iter()
                 .enumerate()
-                .map(|(n, t)| crate::api::Playlist { owner: "1".into(), kind: n.to_string(), title: (*t).into(), track_count: 61 })
+                .map(|(n, t)| crate::api::Playlist {
+                    owner: "1".into(),
+                    kind: n.to_string(),
+                    title: (*t).into(),
+                    track_count: 61,
+                })
                 .collect(),
         );
         app.playlists_state.select(Some(0));
@@ -1784,7 +2388,12 @@ mod tests {
                 term.draw(|f| super::draw(f, &mut app)).unwrap();
                 let buf = term.backend().buffer().clone();
                 let text: String = (0..buf.area.height)
-                    .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+                    .map(|y| {
+                        (0..buf.area.width)
+                            .map(|x| buf[(x, y)].symbol().to_string())
+                            .collect::<String>()
+                            + "\n"
+                    })
                     .collect();
                 println!("{text}");
                 assert!(text.contains("Выхода нет"));
@@ -1796,9 +2405,17 @@ mod tests {
         term.draw(|f| super::draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer().clone();
         let text: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
             .collect();
-        assert!(text.contains("1:01 ") && text.contains(" -2:39") && !text.contains("3:40"), "{text}");
+        assert!(
+            text.contains("1:01 ") && text.contains(" -2:39") && !text.contains("3:40"),
+            "{text}"
+        );
         app.remaining_time = false;
 
         // Opened playlist and the pop-up dialogs.
@@ -1806,14 +2423,30 @@ mod tests {
         use crate::library::OpenPlaylist;
         let pl = app.playlists.list()[0].clone();
         app.tab = Tab::Playlists;
-        app.playlists.open = Some(OpenPlaylist { pl: pl.clone(), tracks: app.queue.tracks().to_vec(), loading: false, req: 0 });
+        app.playlists.open = Some(OpenPlaylist {
+            pl: pl.clone(),
+            tracks: app.queue.tracks().to_vec(),
+            loading: false,
+            req: 0,
+        });
         app.open_state.select(Some(2));
         let modals = [
             Some(Modal::ConfirmDelete { pl: pl.clone() }),
             None,
-            Some(Modal::AddTo { track: t.clone(), choices: app.playlists.list().to_vec(), sel: 1 }),
-            Some(Modal::ConfirmRemove { pl: pl.clone(), index: 2, track: app.queue.tracks()[2].clone() }),
-            Some(Modal::Rename { pl: pl.clone(), input: "Новое название".into() }),
+            Some(Modal::AddTo {
+                track: t.clone(),
+                choices: app.playlists.list().to_vec(),
+                sel: 1,
+            }),
+            Some(Modal::ConfirmRemove {
+                pl: pl.clone(),
+                index: 2,
+                track: app.queue.tracks()[2].clone(),
+            }),
+            Some(Modal::Rename {
+                pl: pl.clone(),
+                input: "Новое название".into(),
+            }),
             Some(Modal::Settings { sel: 2 }),
             Some(Modal::ConfirmLogout),
         ];
@@ -1832,7 +2465,12 @@ mod tests {
             term.draw(|f| super::draw(f, &mut app)).unwrap();
             let buf = term.backend().buffer().clone();
             let text: String = (0..buf.area.height)
-                .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                        + "\n"
+                })
                 .collect();
             println!("{text}");
             assert!(text.contains(want), "{want}");
@@ -1846,7 +2484,12 @@ mod tests {
         term.draw(|f| super::draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer().clone();
         let bar: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
             .filter(|l| l.contains("%"))
             .collect();
         println!("{bar}");
@@ -1858,7 +2501,12 @@ mod tests {
         term.draw(|f| super::draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer().clone();
         let text: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
             .collect();
         // What a terminal shows: replay the cells ratatui actually sends (diff against an empty
         // screen), with OSC 8 sequences stripped.
@@ -1880,7 +2528,10 @@ mod tests {
                 }
             }
         }
-        let plain: String = screen.iter().map(|l| l.iter().collect::<String>() + "\n").collect();
+        let plain: String = screen
+            .iter()
+            .map(|l| l.iter().collect::<String>() + "\n")
+            .collect();
         println!("{plain}");
         for want in [
             "О программе",
@@ -1900,7 +2551,12 @@ mod tests {
         term.draw(|f| super::draw(f, &mut app)).unwrap();
         let buf = term.backend().buffer().clone();
         let text: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n")
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
             .collect();
         println!("{text}");
     }
@@ -1914,8 +2570,23 @@ mod tests {
         let mut picker = Picker::from_fontsize((10, 20));
         picker.set_protocol_type(ProtocolType::Kitty);
         app.picker = Some(picker);
-        let track = |id: &str| Track { id: id.into(), album_id: None, title: id.into(), artists: "A".into(), main_artist: None, album: String::new(), duration_ms: 1000, available: true, cover: Some(format!("cover-{id}")), batch: None, kind: crate::api::TrackKind::Music, progress: None, published: None };
-        app.queue.replace(crate::queue::Source::None, vec![track("a"), track("b")]);
+        let track = |id: &str| Track {
+            id: id.into(),
+            album_id: None,
+            title: id.into(),
+            artists: "A".into(),
+            main_artist: None,
+            album: String::new(),
+            duration_ms: 1000,
+            available: true,
+            cover: Some(format!("cover-{id}")),
+            batch: None,
+            kind: crate::api::TrackKind::Music,
+            progress: None,
+            published: None,
+        };
+        app.queue
+            .replace(crate::queue::Source::None, vec![track("a"), track("b")]);
         app.covers = ["a", "b"]
             .iter()
             .map(|id| (format!("cover-{id}"), image::DynamicImage::new_rgb8(40, 40)))
@@ -1923,7 +2594,11 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(120, 34)).unwrap();
         let mut transmits = |app: &mut App| {
             term.draw(|f| super::draw(f, app)).unwrap();
-            term.backend().buffer().content().iter().any(|c| c.symbol().contains("_G"))
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|c| c.symbol().contains("_G"))
         };
         app.queue.select(0);
         assert!(transmits(&mut app), "first show");
@@ -1942,36 +2617,48 @@ mod tests {
     fn cover_render() {
         use ratatui_image::picker::{Picker, ProtocolType};
         let mut app = App::for_test();
-        let url = crate::api::cover_url("avatars.yandex.net/get-music-misc/34161/rotor-genre-pop-icon/%%");
+        let url = crate::api::cover_url(
+            "avatars.yandex.net/get-music-misc/34161/rotor-genre-pop-icon/%%",
+        );
         let img = app.api.fetch_image(&url).unwrap();
-        for proto in [ProtocolType::Sixel, ProtocolType::Halfblocks, ProtocolType::Kitty] {
+        for proto in [
+            ProtocolType::Sixel,
+            ProtocolType::Halfblocks,
+            ProtocolType::Kitty,
+        ] {
             let mut picker = Picker::from_fontsize((10, 20));
             picker.set_protocol_type(proto);
             app.covers = vec![(url.clone(), img.clone())];
             app.picker = Some(picker);
             app.on_resize();
-            app.queue.replace(crate::queue::Source::None, vec![Track {
-                id: "1".into(),
-                album_id: None,
-                title: "Cover".into(),
-                artists: "A".into(),
-                main_artist: None,
-                album: String::new(),
-                duration_ms: 1000,
-                available: true,
-                cover: Some(url.clone()),
-                batch: None,
-                kind: crate::api::TrackKind::Music,
-                progress: None,
-                published: None,
-            }]);
+            app.queue.replace(
+                crate::queue::Source::None,
+                vec![Track {
+                    id: "1".into(),
+                    album_id: None,
+                    title: "Cover".into(),
+                    artists: "A".into(),
+                    main_artist: None,
+                    album: String::new(),
+                    duration_ms: 1000,
+                    available: true,
+                    cover: Some(url.clone()),
+                    batch: None,
+                    kind: crate::api::TrackKind::Music,
+                    progress: None,
+                    published: None,
+                }],
+            );
             app.queue.select(0);
             let mut term = Terminal::new(TestBackend::new(120, 34)).unwrap();
             term.draw(|f| super::draw(f, &mut app)).unwrap();
             let res = app.current_cover().unwrap().last_encoding_result();
             assert!(matches!(res, Some(Ok(()))), "{proto:?}: {res:?}");
             let buf = term.backend().buffer().clone();
-            let pos = buf.content().iter().position(|c| c.symbol().len() > 8 || c.symbol() == "▀" || c.symbol() == "▄");
+            let pos = buf
+                .content()
+                .iter()
+                .position(|c| c.symbol().len() > 8 || c.symbol() == "▀" || c.symbol() == "▄");
             let at = pos.map(|p| (p as u16 % buf.area.width, p as u16 / buf.area.width));
             println!("{proto:?}: image starts at {at:?}");
             assert!(at.is_some_and(|(x, _)| x < 34), "image not in the card");

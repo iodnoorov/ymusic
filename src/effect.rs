@@ -3,15 +3,15 @@
 //! loop carries them out (`Runtime`). So every request the program makes is listed here, and
 //! tests see what was asked for without a network or sound.
 
+use crate::Lock;
 use crate::api::lastfm::{self, Scrobble};
 use crate::api::{Api, ApiError, Link, PlayContext, PlayReport, Playlist, Track};
 use crate::app::{Msg, PodcastMsg, PodcastTask};
 use crate::player::{Player, PlayerCmd};
-use crate::Lock;
 use serde_json::Value;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 
 pub enum Effect {
     Player(PlayerCmd),
@@ -25,7 +25,9 @@ pub enum Task {
     /// «Мне нравится»: the ids first (`LikedIds`), then the tracks.
     Liked,
     Podcast(PodcastTask),
-    Playlists { req: u64 },
+    Playlists {
+        req: u64,
+    },
     Stations,
     /// «Меньше ИИ-музыки» of the account.
     LessAi,
@@ -33,42 +35,114 @@ pub enum Task {
     /// A record for the listening history (nothing comes back).
     SendPlay(PlayReport),
     /// An event of a wave session (nothing comes back).
-    WaveFeedback { station: String, session: Option<String>, batch: String, event: Value },
-    WaveStart { intent: u64, station: String, name: String, settings: Option<(&'static str, &'static str)> },
-    WaveMore { wave: u64, station: String, session: Option<String>, recent: Vec<String> },
+    WaveFeedback {
+        station: String,
+        session: Option<String>,
+        batch: String,
+        event: Value,
+    },
+    WaveStart {
+        intent: u64,
+        station: String,
+        name: String,
+        settings: Option<(&'static str, &'static str)>,
+    },
+    WaveMore {
+        wave: u64,
+        station: String,
+        session: Option<String>,
+        recent: Vec<String>,
+    },
     /// The link to the current track.
-    TrackUrl { generation: u64, full_id: String, quality: &'static str },
+    TrackUrl {
+        generation: u64,
+        full_id: String,
+        quality: &'static str,
+    },
     /// The link to the next track, played after the current one.
-    Preload { generation: u64, idx: usize, track: Track, quality: &'static str },
+    Preload {
+        generation: u64,
+        idx: usize,
+        track: Track,
+        quality: &'static str,
+    },
     Cover(String),
-    SetLike { track: Track, like: bool, req: u64 },
+    SetLike {
+        track: Track,
+        like: bool,
+        req: u64,
+    },
     Dislike(Track),
-    Search { generation: u64, query: String, page: usize },
+    Search {
+        generation: u64,
+        query: String,
+        page: usize,
+    },
     /// The tracks of the playlist opened in «Плейлисты».
-    OpenPlaylist { pl: Playlist, req: u64 },
+    OpenPlaylist {
+        pl: Playlist,
+        req: u64,
+    },
     /// A playlist to play.
-    PlayPlaylist { intent: u64, pl: Playlist, shuffle: bool },
-    AddToPlaylist { pl: Playlist, track: Track },
-    RemoveFromPlaylist { pl: Playlist, index: usize, track: Track },
+    PlayPlaylist {
+        intent: u64,
+        pl: Playlist,
+        shuffle: bool,
+    },
+    AddToPlaylist {
+        pl: Playlist,
+        track: Track,
+    },
+    RemoveFromPlaylist {
+        pl: Playlist,
+        index: usize,
+        track: Track,
+    },
     DeletePlaylist(Playlist),
-    RenamePlaylist { pl: Playlist, title: String },
+    RenamePlaylist {
+        pl: Playlist,
+        title: String,
+    },
     /// A new playlist, with `track` added to it.
-    CreatePlaylist { title: String, track: Option<Track> },
-    Artist { intent: u64, id: String, name: String },
+    CreatePlaylist {
+        title: String,
+        track: Option<Track>,
+    },
+    Artist {
+        intent: u64,
+        id: String,
+        name: String,
+    },
     /// An album; `fallback` names it if the server gives no title.
-    Album { intent: u64, id: String, fallback: String },
-    Link { intent: u64, link: Link },
+    Album {
+        intent: u64,
+        id: String,
+        fallback: String,
+    },
+    Link {
+        intent: u64,
+        link: Link,
+    },
     /// Copies a link with a clipboard tool (OSC 52 is sent at once by the app).
     CopyWithTool(String),
     /// Looks for a Yandex Music link in the clipboard.
     ReadClipboard,
     /// Opens a link in the browser.
     OpenUrl(String),
-    LastfmToken { req: u64 },
+    LastfmToken {
+        req: u64,
+    },
     /// Whether the user has confirmed the token yet.
     LastfmSession(String),
-    LastfmNowPlaying { session: String, track: Scrobble },
-    LastfmScrobble { session: String, req: u64, tracks: Vec<Scrobble> },
+    LastfmNowPlaying {
+        session: String,
+        track: Scrobble,
+    },
+    LastfmScrobble {
+        session: String,
+        req: u64,
+        tracks: Vec<Scrobble>,
+    },
 }
 
 fn text(e: anyhow::Error) -> ApiError {
@@ -89,34 +163,78 @@ impl Task {
                 let tracks = api.tracks(&ids);
                 Msg::Liked(tracks.map_err(text))
             }
-            Task::Playlists { req } => Msg::Playlists { req, result: api.playlists().map_err(text) },
+            Task::Playlists { req } => Msg::Playlists {
+                req,
+                result: api.playlists().map_err(text),
+            },
             Task::Stations => match api.stations() {
                 Ok(s) if !s.is_empty() => Msg::Stations(s),
                 _ => return,
             },
             Task::LessAi => Msg::LessAi(api.ai_reduction().map_err(text)),
-            Task::SetLessAi(on) => Msg::LessAiSet { on, result: api.set_ai_reduction(on).map_err(text) },
+            Task::SetLessAi(on) => Msg::LessAiSet {
+                on,
+                result: api.set_ai_reduction(on).map_err(text),
+            },
             Task::SendPlay(report) => {
                 let _ = api.send_play(&report);
                 return;
             }
-            Task::WaveFeedback { station, session, batch, event } => {
+            Task::WaveFeedback {
+                station,
+                session,
+                batch,
+                event,
+            } => {
                 let _ = api.wave_feedback(&station, session.as_deref(), &batch, event);
                 return;
             }
-            Task::WaveStart { intent, station, name, settings } => {
+            Task::WaveStart {
+                intent,
+                station,
+                name,
+                settings,
+            } => {
                 let result = api.wave_start(&station, settings).map_err(text);
-                Msg::WaveStarted { intent, station, name, result }
+                Msg::WaveStarted {
+                    intent,
+                    station,
+                    name,
+                    result,
+                }
             }
-            Task::WaveMore { wave, station, session, recent } => {
-                Msg::WaveMore { wave, result: api.wave_more(&station, session.as_deref(), &recent).map_err(text) }
-            }
-            Task::TrackUrl { generation, full_id, quality } => {
-                Msg::Url { generation, result: api.stream_info(&full_id, quality).map_err(text) }
-            }
-            Task::Preload { generation, idx, track, quality } => {
+            Task::WaveMore {
+                wave,
+                station,
+                session,
+                recent,
+            } => Msg::WaveMore {
+                wave,
+                result: api
+                    .wave_more(&station, session.as_deref(), &recent)
+                    .map_err(text),
+            },
+            Task::TrackUrl {
+                generation,
+                full_id,
+                quality,
+            } => Msg::Url {
+                generation,
+                result: api.stream_info(&full_id, quality).map_err(text),
+            },
+            Task::Preload {
+                generation,
+                idx,
+                track,
+                quality,
+            } => {
                 let result = api.stream_info(&track.full_id(), quality).map_err(text);
-                Msg::Preload { generation, idx, id: track.id, result }
+                Msg::Preload {
+                    generation,
+                    idx,
+                    id: track.id,
+                    result,
+                }
             }
             Task::Cover(url) => {
                 let result = api.fetch_image(&url).map_err(text);
@@ -124,46 +242,95 @@ impl Task {
             }
             Task::SetLike { track, like, req } => {
                 let result = api.set_like(&track, like).map_err(text);
-                Msg::LikeSet { id: track.id, req, result }
+                Msg::LikeSet {
+                    id: track.id,
+                    req,
+                    result,
+                }
             }
             Task::Dislike(track) => match api.set_dislike(&track, true) {
                 Ok(()) => return,
                 Err(e) => Msg::Error(format!("Ошибка дизлайка: {e:#}")),
             },
-            Task::Search { generation, query, page } => {
+            Task::Search {
+                generation,
+                query,
+                page,
+            } => {
                 let result = api.search(&query, page).map_err(text);
-                Msg::Search { generation, query, page, result }
+                Msg::Search {
+                    generation,
+                    query,
+                    page,
+                    result,
+                }
             }
             Task::OpenPlaylist { pl, req } => {
                 let result = api.playlist_tracks(&pl).map_err(text);
-                Msg::PlaylistOpened { key: pl.key(), req, result }
+                Msg::PlaylistOpened {
+                    key: pl.key(),
+                    req,
+                    result,
+                }
             }
-            Task::PlayPlaylist { intent, pl, shuffle } => {
+            Task::PlayPlaylist {
+                intent,
+                pl,
+                shuffle,
+            } => {
                 let result = api.playlist_tracks(&pl).map_err(text);
-                let (name, context) = (format!("Плейлист: {}", pl.title), PlayContext::new("playlist", pl.key()));
-                Msg::ListLoaded { intent, name, context, shuffle, playlist: Some(pl.key()), result }
+                let (name, context) = (
+                    format!("Плейлист: {}", pl.title),
+                    PlayContext::new("playlist", pl.key()),
+                );
+                Msg::ListLoaded {
+                    intent,
+                    name,
+                    context,
+                    shuffle,
+                    playlist: Some(pl.key()),
+                    result,
+                }
             }
             Task::AddToPlaylist { pl, track } => {
                 let result = api
                     .add_to_playlist(&pl, &track)
                     .map(|()| format!("Добавлено в «{}»: {}", pl.title, track.title))
                     .map_err(text);
-                Msg::PlaylistEdited { key: pl.key(), result }
+                Msg::PlaylistEdited {
+                    key: pl.key(),
+                    result,
+                }
             }
             Task::RemoveFromPlaylist { pl, index, track } => {
                 let result = api
                     .remove_from_playlist(&pl, index, &track.id)
                     .map(|()| format!("Удалено из «{}»: {}", pl.title, track.title))
                     .map_err(text);
-                Msg::PlaylistEdited { key: pl.key(), result }
+                Msg::PlaylistEdited {
+                    key: pl.key(),
+                    result,
+                }
             }
             Task::DeletePlaylist(pl) => {
-                let result = api.delete_playlist(&pl).map(|()| format!("Плейлист удалён: «{}»", pl.title)).map_err(text);
-                Msg::PlaylistEdited { key: pl.key(), result }
+                let result = api
+                    .delete_playlist(&pl)
+                    .map(|()| format!("Плейлист удалён: «{}»", pl.title))
+                    .map_err(text);
+                Msg::PlaylistEdited {
+                    key: pl.key(),
+                    result,
+                }
             }
             Task::RenamePlaylist { pl, title } => {
-                let result = api.rename_playlist(&pl, &title).map(|()| format!("Плейлист переименован: «{title}»")).map_err(text);
-                Msg::PlaylistEdited { key: pl.key(), result }
+                let result = api
+                    .rename_playlist(&pl, &title)
+                    .map(|()| format!("Плейлист переименован: «{title}»"))
+                    .map_err(text);
+                Msg::PlaylistEdited {
+                    key: pl.key(),
+                    result,
+                }
             }
             Task::CreatePlaylist { title, track } => match api.create_playlist(&title) {
                 Ok(pl) => {
@@ -171,45 +338,100 @@ impl Task {
                         Some(t) => api
                             .add_to_playlist(&pl, t)
                             .map(|()| format!("Создан плейлист «{title}», добавлено: {}", t.title))
-                            .map_err(|e| text(e.context(format!("плейлист «{title}» создан, но трек не добавлен")))),
+                            .map_err(|e| {
+                                text(e.context(format!(
+                                    "плейлист «{title}» создан, но трек не добавлен"
+                                )))
+                            }),
                         None => Ok(format!("Создан плейлист «{title}»")),
                     };
-                    Msg::PlaylistEdited { key: pl.key(), result }
+                    Msg::PlaylistEdited {
+                        key: pl.key(),
+                        result,
+                    }
                 }
-                Err(e) => Msg::PlaylistEdited { key: String::new(), result: Err(text(e)) },
+                Err(e) => Msg::PlaylistEdited {
+                    key: String::new(),
+                    result: Err(text(e)),
+                },
             },
             Task::Artist { intent, id, name } => {
                 let result = api.artist_tracks(&id).map_err(text);
                 let context = PlayContext::new("artist", id);
-                Msg::ListLoaded { intent, name: format!("Исполнитель: {name}"), context, shuffle: false, playlist: None, result }
+                Msg::ListLoaded {
+                    intent,
+                    name: format!("Исполнитель: {name}"),
+                    context,
+                    shuffle: false,
+                    playlist: None,
+                    result,
+                }
             }
-            Task::Album { intent, id, fallback } => {
+            Task::Album {
+                intent,
+                id,
+                fallback,
+            } => {
                 let result = api.album_tracks(&id).map_err(text);
                 let name = match &result {
                     Ok((title, _)) if !title.is_empty() => format!("Альбом: {title}"),
                     _ => format!("Альбом: {fallback}"),
                 };
                 let context = PlayContext::new("album", id);
-                Msg::ListLoaded { intent, name, context, shuffle: false, playlist: None, result: result.map(|(_, t)| t) }
+                Msg::ListLoaded {
+                    intent,
+                    name,
+                    context,
+                    shuffle: false,
+                    playlist: None,
+                    result: result.map(|(_, t)| t),
+                }
             }
             Task::Link { intent, link } => linked(api, intent, link),
-            Task::CopyWithTool(url) => Msg::Copied { by_tool: crate::clipboard::copy_with_tool(&url), url },
+            Task::CopyWithTool(url) => Msg::Copied {
+                by_tool: crate::clipboard::copy_with_tool(&url),
+                url,
+            },
             Task::ReadClipboard => {
-                match crate::clipboard::paste().map(|s| s.trim().to_string()).filter(|s| crate::api::parse_link(s).is_ok()) {
+                match crate::clipboard::paste()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| crate::api::parse_link(s).is_ok())
+                {
                     Some(link) => Msg::ClipboardLink(link),
                     None => return,
                 }
             }
-            Task::OpenUrl(url) => Msg::Opened { ok: open_url(&url), url },
-            Task::LastfmToken { req } => Msg::LastfmToken { req, result: lastfm::token() },
-            Task::LastfmSession(token) => Msg::LastfmSession { result: lastfm::session(&token), token },
+            Task::OpenUrl(url) => Msg::Opened {
+                ok: open_url(&url),
+                url,
+            },
+            Task::LastfmToken { req } => Msg::LastfmToken {
+                req,
+                result: lastfm::token(),
+            },
+            Task::LastfmSession(token) => Msg::LastfmSession {
+                result: lastfm::session(&token),
+                token,
+            },
             Task::LastfmNowPlaying { session, track } => {
                 let result = lastfm::now_playing(&session, &track);
-                Msg::LastfmSent { session, req: None, result: result.map(|()| 0) }
+                Msg::LastfmSent {
+                    session,
+                    req: None,
+                    result: result.map(|()| 0),
+                }
             }
-            Task::LastfmScrobble { session, req, tracks } => {
+            Task::LastfmScrobble {
+                session,
+                req,
+                tracks,
+            } => {
                 let result = lastfm::scrobble(&session, &tracks);
-                Msg::LastfmSent { session, req: Some(req), result }
+                Msg::LastfmSent {
+                    session,
+                    req: Some(req),
+                    result,
+                }
             }
         };
         send(msg);
@@ -220,8 +442,17 @@ impl Task {
 /// returns at once; one that keeps running (it may wait for the browser) is left to it.
 fn open_url(url: &str) -> bool {
     use std::process::{Command, Stdio};
-    let bin = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    let Ok(mut child) = Command::new(bin).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    let bin = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let Ok(mut child) = Command::new(bin)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
     else {
         return false;
     };
@@ -240,7 +471,11 @@ fn open_url(url: &str) -> bool {
 fn linked(api: &Api, intent: u64, link: Link) -> Msg {
     let titled = |kind: &str, r: anyhow::Result<(String, Vec<Track>)>| match r {
         Ok((title, tracks)) => {
-            let name = if title.is_empty() { format!("{kind} по ссылке") } else { format!("{kind}: {title}") };
+            let name = if title.is_empty() {
+                format!("{kind} по ссылке")
+            } else {
+                format!("{kind}: {title}")
+            };
             (name, Ok(tracks))
         }
         Err(e) => (format!("{kind} по ссылке"), Err(text(e))),
@@ -249,15 +484,19 @@ fn linked(api: &Api, intent: u64, link: Link) -> Msg {
         Link::Track(id) => {
             let tracks = api.tracks(std::slice::from_ref(id)).map_err(text);
             if let Ok(list) = &tracks
-                && list.first().is_some_and(Track::is_podcast) {
+                && list.first().is_some_and(Track::is_podcast)
+            {
                 return Msg::Podcasts(PodcastMsg::Linked {
-                    intent, id: id.split(':').next().unwrap_or(id).to_string(),
+                    intent,
+                    id: id.split(':').next().unwrap_or(id).to_string(),
                 });
             }
             ("Трек по ссылке".to_string(), tracks)
         }
         Link::Album(id) => titled("Альбом", api.album_tracks(id)),
-        Link::Playlist { .. } | Link::PlaylistUuid(_) => titled("Плейлист", api.linked_playlist(&link)),
+        Link::Playlist { .. } | Link::PlaylistUuid(_) => {
+            titled("Плейлист", api.linked_playlist(&link))
+        }
     };
     let context = match &link {
         Link::Album(id) => PlayContext::new("album", id.clone()),
@@ -267,46 +506,114 @@ fn linked(api: &Api, intent: u64, link: Link) -> Msg {
         }
         _ => PlayContext::new("various", ""),
     };
-    Msg::ListLoaded { intent, name, context, shuffle: false, playlist: None, result }
+    Msg::ListLoaded {
+        intent,
+        name,
+        context,
+        shuffle: false,
+        playlist: None,
+        result,
+    }
 }
 
 impl Task {
     /// A saturated queue must complete the protocol too: no spinner or optimistic write may
     /// remain waiting forever for a task that was not accepted.
     fn rejected(&self) -> Msg {
-        let error = || ApiError::from_anyhow(&anyhow::anyhow!("очередь фоновых задач заполнена, повторите действие"));
-        let lastfm_error =
-            || lastfm::Error {
-                code: 0, message: "очередь фоновых задач заполнена".into(), blocked: false
-            };
+        let error = || {
+            ApiError::from_anyhow(&anyhow::anyhow!(
+                "очередь фоновых задач заполнена, повторите действие"
+            ))
+        };
+        let lastfm_error = || lastfm::Error {
+            code: 0,
+            message: "очередь фоновых задач заполнена".into(),
+            blocked: false,
+        };
         match self {
             Task::Podcast(task) => Msg::Podcasts(task.rejected(error())),
             Task::Liked => Msg::Liked(Err(error())),
-            Task::Playlists { req } => Msg::Playlists { req: *req, result: Err(error()) },
+            Task::Playlists { req } => Msg::Playlists {
+                req: *req,
+                result: Err(error()),
+            },
             Task::LessAi => Msg::LessAi(Err(error())),
-            Task::SetLessAi(on) => Msg::LessAiSet { on: *on, result: Err(error()) },
-            Task::WaveStart { intent, station, name, .. } => {
-                Msg::WaveStarted { intent: *intent, station: station.clone(), name: name.clone(), result: Err(error()) }
-            }
-            Task::WaveMore { wave, .. } => Msg::WaveMore { wave: *wave, result: Err(error()) },
-            Task::TrackUrl { generation, .. } => Msg::Url { generation: *generation, result: Err(error()) },
-            Task::Preload { generation, idx, track, .. } => {
-                Msg::Preload { generation: *generation, idx: *idx, id: track.id.clone(), result: Err(error()) }
-            }
-            Task::Cover(url) => Msg::Cover { url: url.clone(), result: Err(error()) },
-            Task::SetLike { track, req, .. } => Msg::LikeSet { id: track.id.clone(), req: *req, result: Err(error()) },
-            Task::Search { generation, query, page } => {
-                Msg::Search { generation: *generation, query: query.clone(), page: *page, result: Err(error()) }
-            }
-            Task::OpenPlaylist { pl, req } => Msg::PlaylistOpened { key: pl.key(), req: *req, result: Err(error()) },
-            Task::LastfmToken { req } => Msg::LastfmToken { req: *req, result: Err(lastfm_error()) },
-            Task::LastfmSession(token) => Msg::LastfmSession { token: token.clone(), result: Err(lastfm_error()) },
-            Task::LastfmNowPlaying { session, .. } => {
-                Msg::LastfmSent { session: session.clone(), req: None, result: Err(lastfm_error()) }
-            }
-            Task::LastfmScrobble { session, req, .. } => {
-                Msg::LastfmSent { session: session.clone(), req: Some(*req), result: Err(lastfm_error()) }
-            }
+            Task::SetLessAi(on) => Msg::LessAiSet {
+                on: *on,
+                result: Err(error()),
+            },
+            Task::WaveStart {
+                intent,
+                station,
+                name,
+                ..
+            } => Msg::WaveStarted {
+                intent: *intent,
+                station: station.clone(),
+                name: name.clone(),
+                result: Err(error()),
+            },
+            Task::WaveMore { wave, .. } => Msg::WaveMore {
+                wave: *wave,
+                result: Err(error()),
+            },
+            Task::TrackUrl { generation, .. } => Msg::Url {
+                generation: *generation,
+                result: Err(error()),
+            },
+            Task::Preload {
+                generation,
+                idx,
+                track,
+                ..
+            } => Msg::Preload {
+                generation: *generation,
+                idx: *idx,
+                id: track.id.clone(),
+                result: Err(error()),
+            },
+            Task::Cover(url) => Msg::Cover {
+                url: url.clone(),
+                result: Err(error()),
+            },
+            Task::SetLike { track, req, .. } => Msg::LikeSet {
+                id: track.id.clone(),
+                req: *req,
+                result: Err(error()),
+            },
+            Task::Search {
+                generation,
+                query,
+                page,
+            } => Msg::Search {
+                generation: *generation,
+                query: query.clone(),
+                page: *page,
+                result: Err(error()),
+            },
+            Task::OpenPlaylist { pl, req } => Msg::PlaylistOpened {
+                key: pl.key(),
+                req: *req,
+                result: Err(error()),
+            },
+            Task::LastfmToken { req } => Msg::LastfmToken {
+                req: *req,
+                result: Err(lastfm_error()),
+            },
+            Task::LastfmSession(token) => Msg::LastfmSession {
+                token: token.clone(),
+                result: Err(lastfm_error()),
+            },
+            Task::LastfmNowPlaying { session, .. } => Msg::LastfmSent {
+                session: session.clone(),
+                req: None,
+                result: Err(lastfm_error()),
+            },
+            Task::LastfmScrobble { session, req, .. } => Msg::LastfmSent {
+                session: session.clone(),
+                req: Some(*req),
+                result: Err(lastfm_error()),
+            },
             _ => Msg::Error(error().to_string()),
         }
     }
@@ -346,7 +653,12 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(player: Player, tx: Sender<Msg>) -> Runtime {
-        Runtime { player, tx, pool: Pool::new(WORKERS, WORKERS - 1), generation: Arc::default() }
+        Runtime {
+            player,
+            tx,
+            pool: Pool::new(WORKERS, WORKERS - 1),
+            generation: Arc::default(),
+        }
     }
 
     /// `api`: as the tasks are to use it (the app's settings applied); `generation`: the app's
@@ -368,7 +680,9 @@ impl Runtime {
                             let _ = tx.send(m);
                         });
                     });
-                    if !accepted { let _ = self.tx.send(rejected); }
+                    if !accepted {
+                        let _ = self.tx.send(rejected);
+                    }
                 }
             }
         }
@@ -413,14 +727,18 @@ impl Pool {
         for n in 0..threads {
             let shared = shared.clone();
             // Threads end with the program.
-            let _ = std::thread::Builder::new().name(format!("task-{n}")).spawn(move || shared.work());
+            let _ = std::thread::Builder::new()
+                .name(format!("task-{n}"))
+                .spawn(move || shared.work());
         }
         Pool { shared }
     }
 
     fn run(&self, urgent: bool, job: impl FnOnce() + Send + 'static) -> bool {
         let mut q = self.shared.queues.locked();
-        if q.stopped || q.urgent.len() + q.background.len() >= MAX_QUEUED { return false; }
+        if q.stopped || q.urgent.len() + q.background.len() >= MAX_QUEUED {
+            return false;
+        }
         if urgent {
             q.urgent.push_back(Box::new(job));
         } else {
@@ -447,7 +765,9 @@ impl PoolShared {
             let (job, background) = {
                 let mut q = self.queues.locked();
                 loop {
-                    if q.stopped { return; }
+                    if q.stopped {
+                        return;
+                    }
                     if let Some(job) = q.urgent.pop_front() {
                         break (job, false);
                     }
@@ -457,7 +777,10 @@ impl PoolShared {
                         q.running += 1;
                         break (job, true);
                     }
-                    q = self.changed.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    q = self
+                        .changed
+                        .wait(q)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                 }
             };
             // A job that panics takes only itself down, not the thread.
@@ -481,7 +804,11 @@ mod tests {
     #[test]
     fn stale_links() {
         use super::Task;
-        let url = Task::TrackUrl { generation: 2, full_id: "1".into(), quality: "nq" };
+        let url = Task::TrackUrl {
+            generation: 2,
+            full_id: "1".into(),
+            quality: "nq",
+        };
         assert!(url.stale(3) && !url.stale(2));
         assert!(!Task::Stations.stale(3));
     }
@@ -506,12 +833,17 @@ mod tests {
         pool.run(true, move || {
             let _ = urgent.send("urgent".into());
         });
-        assert_eq!(finished.recv_timeout(Duration::from_secs(5)).unwrap(), "urgent");
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "urgent"
+        );
         // The fourth one has not started: releasing it alone does nothing yet.
         release[3].send(()).unwrap();
         assert!(finished.recv_timeout(Duration::from_millis(200)).is_err());
         release[0].send(()).unwrap();
-        let mut rest: Vec<String> = (0..2).map(|_| finished.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
+        let mut rest: Vec<String> = (0..2)
+            .map(|_| finished.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
         rest.sort();
         assert_eq!(rest, ["background 0", "background 3"]);
         // A job that panics leaves its thread working.
@@ -520,7 +852,10 @@ mod tests {
         pool.run(true, move || {
             let _ = after.send("after".into());
         });
-        assert_eq!(finished.recv_timeout(Duration::from_secs(5)).unwrap(), "after");
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "after"
+        );
     }
 }
 
@@ -539,7 +874,17 @@ mod bounded_tests {
         assert_eq!(Arc::strong_count(&guard), MAX_QUEUED + 1);
         drop(pool);
         assert_eq!(Arc::strong_count(&guard), 1);
-        let task = Task::TrackUrl { generation: 42, full_id: "1".into(), quality: "nq" };
-        assert!(matches!(task.rejected(), Msg::Url { generation: 42, result: Err(_) }));
+        let task = Task::TrackUrl {
+            generation: 42,
+            full_id: "1".into(),
+            quality: "nq",
+        };
+        assert!(matches!(
+            task.rejected(),
+            Msg::Url {
+                generation: 42,
+                result: Err(_)
+            }
+        ));
     }
 }

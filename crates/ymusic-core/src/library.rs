@@ -2,8 +2,8 @@
 //! Each keeps what was loaded and what is loading, and drops answers that came too late; the
 //! requests themselves are made by the app (`Task`).
 
-use ymusic_api::{Playlist, Track};
 use std::collections::HashSet;
+use ymusic_api::{Playlist, Track};
 
 /// «Мне нравится».
 #[derive(Default)]
@@ -62,7 +62,10 @@ impl Likes {
 
     /// The ids came (`id:album` or `id`), before the tracks.
     pub fn ids_loaded(&mut self, ids: &[String]) {
-        self.ids = ids.iter().map(|i| i.split(':').next().unwrap_or(i).to_string()).collect();
+        self.ids = ids
+            .iter()
+            .map(|i| i.split(':').next().unwrap_or(i).to_string())
+            .collect();
         for (t, like) in &self.pending {
             if *like {
                 self.ids.insert(t.id.clone());
@@ -110,7 +113,10 @@ pub enum Page<E> {
     Stale,
     Failed(E),
     /// `new`: the tracks not among the results yet; `first`: page 0 of a new query.
-    Loaded { first: bool, new: Vec<Track> },
+    Loaded {
+        first: bool,
+        new: Vec<Track>,
+    },
 }
 
 impl Search {
@@ -162,7 +168,13 @@ impl Search {
     }
 
     /// Page `page` of `query` came: (tracks, total found).
-    pub fn page_loaded<E>(&mut self, generation: u64, query: &str, page: usize, result: Result<(Vec<Track>, Option<usize>), E>) -> Page<E> {
+    pub fn page_loaded<E>(
+        &mut self,
+        generation: u64,
+        query: &str,
+        page: usize,
+        result: Result<(Vec<Track>, Option<usize>), E>,
+    ) -> Page<E> {
         if generation != self.generation || query != self.query || page != self.pages {
             return Page::Stale;
         }
@@ -178,13 +190,19 @@ impl Search {
         }
         // Pages may overlap if the results shift between requests.
         let seen: HashSet<&str> = self.results.iter().map(|t| t.id.as_str()).collect();
-        let new: Vec<Track> = list.into_iter().filter(|t| !seen.contains(t.id.as_str())).collect();
+        let new: Vec<Track> = list
+            .into_iter()
+            .filter(|t| !seen.contains(t.id.as_str()))
+            .collect();
         if new.is_empty() && page > 0 {
             // Nothing new: stop asking for more pages.
             self.total = Some(self.results.len());
         }
         self.results.extend(new.iter().cloned());
-        Page::Loaded { first: page == 0, new }
+        Page::Loaded {
+            first: page == 0,
+            new,
+        }
     }
 }
 
@@ -221,7 +239,11 @@ impl Playlists {
 
     /// The account's own playlists (others' can be played, not changed).
     pub fn own(&self, uid: &str) -> Vec<Playlist> {
-        self.list.iter().filter(|p| p.owner == uid).cloned().collect()
+        self.list
+            .iter()
+            .filter(|p| p.owner == uid)
+            .cloned()
+            .collect()
     }
 
     /// Tests: these playlists are loaded.
@@ -240,7 +262,11 @@ impl Playlists {
 
     /// Answer to load `req`; `None` if a newer load was started meanwhile. The open playlist
     /// follows (renamed), or is closed if it is gone.
-    pub fn loaded<E>(&mut self, req: u64, result: Result<Vec<Playlist>, E>) -> Option<Result<(), E>> {
+    pub fn loaded<E>(
+        &mut self,
+        req: u64,
+        result: Result<Vec<Playlist>, E>,
+    ) -> Option<Result<(), E>> {
         if req != self.req {
             return None;
         }
@@ -262,7 +288,12 @@ impl Playlists {
 
     /// Opens `pl`: its tracks are to be loaded.
     pub fn open(&mut self, pl: Playlist) {
-        self.open = Some(OpenPlaylist { pl, tracks: Vec::new(), loading: true, req: 0 });
+        self.open = Some(OpenPlaylist {
+            pl,
+            tracks: Vec::new(),
+            loading: true,
+            req: 0,
+        });
     }
 
     /// A new load of the open playlist's tracks: (playlist, request number).
@@ -276,8 +307,16 @@ impl Playlists {
 
     /// The tracks of playlist `key` came for request `req`; `None` if it is not open any more or a
     /// newer request was made. `Some(Ok(n))`: `n` tracks.
-    pub fn open_loaded<E>(&mut self, key: &str, req: u64, result: Result<Vec<Track>, E>) -> Option<Result<usize, E>> {
-        let open = self.open.as_mut().filter(|o| o.pl.key() == key && o.req == req)?;
+    pub fn open_loaded<E>(
+        &mut self,
+        key: &str,
+        req: u64,
+        result: Result<Vec<Track>, E>,
+    ) -> Option<Result<usize, E>> {
+        let open = self
+            .open
+            .as_mut()
+            .filter(|o| o.pl.key() == key && o.req == req)?;
         open.loading = false;
         Some(result.map(|tracks| {
             open.tracks = tracks;
@@ -308,11 +347,17 @@ mod tests {
         likes.set(&track("2"), false);
         likes.ids_loaded(&["1:10".into(), "2:20".into()]);
         assert!(likes.contains("5") && likes.contains("1") && !likes.contains("2"));
-        likes.loaded::<String>(Ok(vec![track("1"), track("2")])).unwrap();
+        likes
+            .loaded::<String>(Ok(vec![track("1"), track("2")]))
+            .unwrap();
         assert_eq!(ids(likes.tracks()), ["5", "1"]);
         assert!(likes.begin_load());
         assert!(likes.loaded(Err("сеть")).is_err());
-        assert_eq!(ids(likes.tracks()), ["5", "1"], "a failed load keeps the list");
+        assert_eq!(
+            ids(likes.tracks()),
+            ["5", "1"],
+            "a failed load keeps the list"
+        );
     }
 
     #[test]
@@ -330,29 +375,52 @@ mod tests {
         assert_eq!(ids(likes.tracks()), ["music"]);
         assert!(likes.begin_load());
         likes.set(&podcast, true);
-        likes.loaded::<()>(Ok(vec![track("music"), podcast, book])).unwrap();
+        likes
+            .loaded::<()>(Ok(vec![track("music"), podcast, book]))
+            .unwrap();
         assert_eq!(ids(likes.tracks()), ["music"]);
         assert!(likes.contains("podcast") && likes.contains("book"));
     }
 
     #[test]
     fn search_pages() {
-        let mut s = Search { input: "  queen ".into(), ..Search::default() };
+        let mut s = Search {
+            input: "  queen ".into(),
+            ..Search::default()
+        };
         assert!(s.submit());
         assert_eq!(s.next_page(), ("queen".to_string(), 0));
         assert!(!s.can_load_more(), "loading");
-        assert!(matches!(s.page_loaded::<()>(s.generation(), "other", 0, Ok((vec![track("x")], None))), Page::Stale));
-        let Page::Loaded { first: true, new } = s.page_loaded::<()>(s.generation(), "queen", 0, Ok((vec![track("a"), track("b")], None))) else {
+        assert!(matches!(
+            s.page_loaded::<()>(s.generation(), "other", 0, Ok((vec![track("x")], None))),
+            Page::Stale
+        ));
+        let Page::Loaded { first: true, new } = s.page_loaded::<()>(
+            s.generation(),
+            "queen",
+            0,
+            Ok((vec![track("a"), track("b")], None)),
+        ) else {
             panic!()
         };
         assert_eq!(ids(&new), ["a", "b"]);
         assert!(s.can_load_more());
         assert_eq!(s.next_page().1, 1);
         // Overlapping pages: only the new tracks; a page with nothing new ends the search.
-        let Page::Loaded { new, .. } = s.page_loaded::<()>(s.generation(), "queen", 1, Ok((vec![track("b"), track("c")], None))) else { panic!() };
+        let Page::Loaded { new, .. } = s.page_loaded::<()>(
+            s.generation(),
+            "queen",
+            1,
+            Ok((vec![track("b"), track("c")], None)),
+        ) else {
+            panic!()
+        };
         assert_eq!(ids(&new), ["c"]);
         s.next_page();
-        assert!(matches!(s.page_loaded::<()>(s.generation(), "queen", 2, Ok((vec![track("a")], None))), Page::Loaded { first: false, .. }));
+        assert!(matches!(
+            s.page_loaded::<()>(s.generation(), "queen", 2, Ok((vec![track("a")], None))),
+            Page::Loaded { first: false, .. }
+        ));
         assert_eq!(s.total(), Some(3));
         assert!(!s.can_load_more());
         s.input.clear();
@@ -362,22 +430,50 @@ mod tests {
 
     #[test]
     fn playlists() {
-        let pl = |k: &str, title: &str| Playlist { owner: "1".into(), kind: k.into(), title: title.into(), track_count: 0 };
+        let pl = |k: &str, title: &str| Playlist {
+            owner: "1".into(),
+            kind: k.into(),
+            title: title.into(),
+            track_count: 0,
+        };
         let mut p = Playlists::default();
         let old = p.begin_load();
         let new = p.begin_load();
-        assert!(p.loaded::<()>(old, Ok(vec![pl("old", "Old")])).is_none(), "a newer load was started");
+        assert!(
+            p.loaded::<()>(old, Ok(vec![pl("old", "Old")])).is_none(),
+            "a newer load was started"
+        );
         assert!(p.loading());
-        p.loaded::<()>(new, Ok(vec![pl("3", "Mine"), Playlist { owner: "2".into(), ..pl("4", "Theirs") }])).unwrap().unwrap();
+        p.loaded::<()>(
+            new,
+            Ok(vec![
+                pl("3", "Mine"),
+                Playlist {
+                    owner: "2".into(),
+                    ..pl("4", "Theirs")
+                },
+            ]),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(p.own("1").len(), 1);
 
         p.open(pl("3", "Mine"));
         let (open, req) = p.reload_open().unwrap();
-        assert!(p.open_loaded::<()>(&open.key(), req - 1, Ok(vec![])).is_none(), "an older request");
-        assert_eq!(p.open_loaded::<()>(&open.key(), req, Ok(vec![track("a")])), Some(Ok(1)));
+        assert!(
+            p.open_loaded::<()>(&open.key(), req - 1, Ok(vec![]))
+                .is_none(),
+            "an older request"
+        );
+        assert_eq!(
+            p.open_loaded::<()>(&open.key(), req, Ok(vec![track("a")])),
+            Some(Ok(1))
+        );
         // Renamed elsewhere: the open one follows; deleted: it is closed.
         let r = p.begin_load();
-        p.loaded::<()>(r, Ok(vec![pl("3", "Renamed")])).unwrap().unwrap();
+        p.loaded::<()>(r, Ok(vec![pl("3", "Renamed")]))
+            .unwrap()
+            .unwrap();
         assert_eq!(p.open.as_ref().unwrap().pl.title, "Renamed");
         let r = p.begin_load();
         p.loaded::<()>(r, Ok(vec![])).unwrap().unwrap();
@@ -391,7 +487,12 @@ mod generation_tests {
     #[test]
     fn reopening_a_playlist_rejects_the_previous_opening() {
         let mut p = Playlists::default();
-        let pl = Playlist { owner: "1".into(), kind: "1".into(), title: "p".into(), track_count: 0 };
+        let pl = Playlist {
+            owner: "1".into(),
+            kind: "1".into(),
+            title: "p".into(),
+            track_count: 0,
+        };
         p.open(pl.clone());
         let (_, old) = p.reload_open().unwrap();
         p.open = None;
@@ -403,7 +504,10 @@ mod generation_tests {
     }
     #[test]
     fn resubmitting_the_same_search_rejects_the_previous_submission() {
-        let mut s = Search { input: "q".into(), ..Search::default() };
+        let mut s = Search {
+            input: "q".into(),
+            ..Search::default()
+        };
         s.submit();
         let old = s.generation();
         s.next_page();
@@ -413,8 +517,14 @@ mod generation_tests {
         s.input = "q".into();
         s.submit();
         s.next_page();
-        assert!(matches!(s.page_loaded::<()>(old, "q", 0, Ok((vec![], None))), Page::Stale));
+        assert!(matches!(
+            s.page_loaded::<()>(old, "q", 0, Ok((vec![], None))),
+            Page::Stale
+        ));
         assert!(s.loading());
-        assert!(matches!(s.page_loaded::<()>(s.generation(), "q", 0, Ok((vec![], None))), Page::Loaded { .. }));
+        assert!(matches!(
+            s.page_loaded::<()>(s.generation(), "q", 0, Ok((vec![], None))),
+            Page::Loaded { .. }
+        ));
     }
 }

@@ -19,7 +19,12 @@ impl App {
         self.set_status(format!("Запуск: {name}…"));
         let settings = station.settings;
         let id = station.id.clone();
-        self.task(Task::WaveStart { intent, station: id, name, settings });
+        self.task(Task::WaveStart {
+            intent,
+            station: id,
+            name,
+            settings,
+        });
     }
 
     pub(super) fn fetch_more_wave(&mut self) {
@@ -29,8 +34,21 @@ impl App {
         }
         w.fetching = true;
         let (wave, st, sess) = (w.id, w.station.clone(), w.session.clone());
-        let recent: Vec<String> = self.queue.tracks().iter().rev().take(10).rev().map(Track::full_id).collect();
-        self.task(Task::WaveMore { wave, station: st, session: sess, recent });
+        let recent: Vec<String> = self
+            .queue
+            .tracks()
+            .iter()
+            .rev()
+            .take(10)
+            .rev()
+            .map(Track::full_id)
+            .collect();
+        self.task(Task::WaveMore {
+            wave,
+            station: st,
+            session: sess,
+            recent,
+        });
     }
 
     pub(super) fn on_wave_started(
@@ -65,7 +83,10 @@ impl App {
                     self.search.feeds_queue = false;
                     self.preload = None;
                 }
-                self.wave_feedback(json!({"type": "radioStarted", "timestamp": iso_now(), "from": from}), None);
+                self.wave_feedback(
+                    json!({"type": "radioStarted", "timestamp": iso_now(), "from": from}),
+                    None,
+                );
                 self.tab = Tab::Wave;
                 if finishing {
                     self.set_status(format!("После этого трека: {name}"));
@@ -78,7 +99,9 @@ impl App {
         }
     }
     pub(super) fn on_wave_more(&mut self, wave: u64, result: Result<WaveBatch, ApiError>) {
-        let Some(w) = self.wave.as_mut().filter(|w| w.id == wave && w.fetching) else { return };
+        let Some(w) = self.wave.as_mut().filter(|w| w.id == wave && w.fetching) else {
+            return;
+        };
         w.fetching = false;
         match result {
             Ok(b) => {

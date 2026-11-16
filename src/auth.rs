@@ -10,8 +10,8 @@
 //! once (a browser allows one), so another local process has only a moment to get in.
 
 use crate::api::CLIENT_ID;
-use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, anyhow, bail};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, PipeReader, PipeWriter, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -19,15 +19,16 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
-use tungstenite::{stream::MaybeTlsStream, Message, WebSocket};
+use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub fn auth_url() -> String {
-    crate::config::env_str("LOGIN_URL")
-        .unwrap_or_else(|| format!("https://oauth.yandex.ru/authorize?response_type=token&client_id={CLIENT_ID}"))
+    crate::config::env_str("LOGIN_URL").unwrap_or_else(|| {
+        format!("https://oauth.yandex.ru/authorize?response_type=token&client_id={CLIENT_ID}")
+    })
 }
 
 /// Interactive menu shown by `ymusic login` and on first start.
@@ -68,7 +69,9 @@ pub fn parse_token(s: &str) -> Option<String> {
         return Some(t);
     }
     let s = s.trim();
-    let ok = s.len() >= 20 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let ok = s.len() >= 20
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     ok.then(|| s.to_string())
 }
 
@@ -77,7 +80,10 @@ fn extract_token(text: &str) -> Option<String> {
     let mut rest = text;
     while let Some(i) = rest.find("access_token=") {
         rest = &rest[i + "access_token=".len()..];
-        let tok: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+        let tok: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
         if tok.len() >= 20 {
             return Some(tok);
         }
@@ -121,9 +127,24 @@ const CANDIDATES: &[&str] = &[
 
 fn classify(bin: &str) -> Option<Kind> {
     let name = Path::new(bin).file_name()?.to_string_lossy().to_lowercase();
-    if ["firefox", "zen", "librewolf", "waterfox", "floorp", "mullvad"].iter().any(|k| name.contains(k)) {
+    if [
+        "firefox",
+        "zen",
+        "librewolf",
+        "waterfox",
+        "floorp",
+        "mullvad",
+    ]
+    .iter()
+    .any(|k| name.contains(k))
+    {
         Some(Kind::Firefox)
-    } else if ["chrom", "brave", "vivaldi", "edge", "yandex", "opera", "thorium"].iter().any(|k| name.contains(k)) {
+    } else if [
+        "chrom", "brave", "vivaldi", "edge", "yandex", "opera", "thorium",
+    ]
+    .iter()
+    .any(|k| name.contains(k))
+    {
         Some(Kind::Chromium)
     } else {
         None
@@ -143,15 +164,18 @@ fn which(bin: &str) -> Option<String> {
 /// Binary of the default browser from its .desktop file.
 #[cfg(target_os = "linux")]
 fn default_browser_bin() -> Option<String> {
-    let out = Command::new("xdg-settings").args(["get", "default-web-browser"]).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new("xdg-settings")
+        .args(["get", "default-web-browser"])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     let desktop = String::from_utf8(out.stdout).ok()?.trim().to_string();
     if desktop.is_empty() {
         return None;
     }
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut dirs = vec![
-        std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share")),
-    ];
+    let mut dirs =
+        vec![std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"))];
     dirs.extend(
         std::env::var("XDG_DATA_DIRS")
             .unwrap_or_else(|_| "/usr/local/share:/usr/share".into())
@@ -159,7 +183,9 @@ fn default_browser_bin() -> Option<String> {
             .map(String::from),
     );
     for d in dirs {
-        let Ok(content) = std::fs::read_to_string(PathBuf::from(d).join("applications").join(&desktop)) else {
+        let Ok(content) =
+            std::fs::read_to_string(PathBuf::from(d).join("applications").join(&desktop))
+        else {
             continue;
         };
         let exec = content.lines().find_map(|l| l.strip_prefix("Exec="))?;
@@ -174,7 +200,9 @@ fn default_browser_bin() -> Option<String> {
 #[cfg(target_os = "linux")]
 fn candidates() -> impl Iterator<Item = String> {
     let default = default_browser_bin().and_then(|b| which(&b));
-    default.into_iter().chain(CANDIDATES.iter().filter_map(|c| which(c)))
+    default
+        .into_iter()
+        .chain(CANDIDATES.iter().filter_map(|c| which(c)))
 }
 
 #[cfg(target_os = "linux")]
@@ -224,7 +252,11 @@ fn https_handler(handlers: &str) -> Option<String> {
         .split("},")
         .find(|e| e.lines().any(|l| l.trim() == "LSHandlerURLScheme = https;"))?
         .lines()
-        .filter_map(|l| l.trim().strip_prefix("LSHandlerRoleAll = ")?.strip_suffix(';'))
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("LSHandlerRoleAll = ")?
+                .strip_suffix(';')
+        })
         .map(|v| v.trim_matches('"'))
         .find(|v| *v != "-")
         .map(String::from)
@@ -234,22 +266,42 @@ fn https_handler(handlers: &str) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn default_browser_bin() -> Option<String> {
     let out = Command::new("defaults")
-        .args(["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
+        .args([
+            "read",
+            "com.apple.LaunchServices/com.apple.launchservices.secure",
+            "LSHandlers",
+        ])
         .stderr(Stdio::null())
         .output()
         .ok()?;
     let id = https_handler(&String::from_utf8(out.stdout).ok()?)?;
-    let out = Command::new("mdfind").arg(format!("kMDItemCFBundleIdentifier == '{id}'")).stderr(Stdio::null()).output().ok()?;
-    let app = String::from_utf8(out.stdout).ok()?.lines().next()?.to_string();
+    let out = Command::new("mdfind")
+        .arg(format!("kMDItemCFBundleIdentifier == '{id}'"))
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let app = String::from_utf8(out.stdout)
+        .ok()?
+        .lines()
+        .next()?
+        .to_string();
     app_bin(Path::new(&app))
 }
 
 #[cfg(target_os = "macos")]
 fn candidates() -> impl Iterator<Item = String> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let dirs = [PathBuf::from("/Applications"), PathBuf::from(home).join("Applications")];
-    let apps = APPS.iter().flat_map(move |a| dirs.clone().map(|d| d.join(a))).filter(|p| p.is_dir());
-    default_browser_bin().into_iter().chain(apps.filter_map(|p| app_bin(&p)))
+    let dirs = [
+        PathBuf::from("/Applications"),
+        PathBuf::from(home).join("Applications"),
+    ];
+    let apps = APPS
+        .iter()
+        .flat_map(move |a| dirs.clone().map(|d| d.join(a)))
+        .filter(|p| p.is_dir());
+    default_browser_bin()
+        .into_iter()
+        .chain(apps.filter_map(|p| app_bin(&p)))
 }
 
 /// `YMUSIC_BROWSER`: a program, or on macOS also an application bundle.
@@ -301,14 +353,18 @@ fn create_profile_dir() -> Result<PathBuf> {
     let mut last = None;
     for _ in 0..16 {
         let random = crate::api::random_u64();
-        let dir = std::env::temp_dir().join(format!("ymusic-login-{}-{random:016x}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("ymusic-login-{}-{random:016x}", std::process::id()));
         match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
             Err(e) => return Err(e).context("не удалось создать временный профиль браузера"),
         }
     }
-    Err(last.map_or_else(|| anyhow!("не удалось создать временный профиль браузера"), anyhow::Error::from))
+    Err(last.map_or_else(
+        || anyhow!("не удалось создать временный профиль браузера"),
+        anyhow::Error::from,
+    ))
 }
 
 /// Our ends of the pipes a Chromium-based browser speaks CDP over, and its ends, to be closed here
@@ -332,14 +388,21 @@ fn debugging_pipes(cmd: &mut Command) -> Result<Pipes> {
     // while the other is put in place; dup2 clears close-on-exec on the copies the browser gets.
     unsafe {
         cmd.pre_exec(move || {
-            let (input, output) = (libc::fcntl(input, libc::F_DUPFD_CLOEXEC, 10), libc::fcntl(output, libc::F_DUPFD_CLOEXEC, 10));
+            let (input, output) = (
+                libc::fcntl(input, libc::F_DUPFD_CLOEXEC, 10),
+                libc::fcntl(output, libc::F_DUPFD_CLOEXEC, 10),
+            );
             if input < 0 || output < 0 || libc::dup2(input, 3) < 0 || libc::dup2(output, 4) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    Ok(Pipes { to_browser, from_browser, theirs: (their_in, their_out) })
+    Ok(Pipes {
+        to_browser,
+        from_browser,
+        theirs: (their_in, their_out),
+    })
 }
 
 pub fn browser_login() -> Result<String> {
@@ -351,7 +414,9 @@ pub fn browser_login() -> Result<String> {
     let url = auth_url();
 
     let mut cmd = Command::new(&browser.bin);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let mut pipes = None;
     match browser.kind {
         Kind::Firefox => {
@@ -359,9 +424,12 @@ pub fn browser_login() -> Result<String> {
                 let _ = std::fs::remove_dir_all(&profile);
                 return Err(e.into());
             }
-            cmd.arg("--profile").arg(&profile).args(["--no-remote", "--new-instance"]);
+            cmd.arg("--profile")
+                .arg(&profile)
+                .args(["--no-remote", "--new-instance"]);
             // Any free port: the browser tells which one on stderr.
-            cmd.args(["--remote-debugging-port", "0"]).stderr(Stdio::piped());
+            cmd.args(["--remote-debugging-port", "0"])
+                .stderr(Stdio::piped());
             if headless {
                 cmd.arg("--headless");
             }
@@ -370,7 +438,11 @@ pub fn browser_login() -> Result<String> {
         Kind::Chromium => {
             cmd.arg(format!("--user-data-dir={}", profile.display()));
             cmd.arg("--remote-debugging-pipe");
-            cmd.args(["--no-first-run", "--no-default-browser-check", "--new-window"]);
+            cmd.args([
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--new-window",
+            ]);
             if headless {
                 cmd.arg("--headless=new");
             }
@@ -384,7 +456,11 @@ pub fn browser_login() -> Result<String> {
             }
         }
     }
-    let name = Path::new(&browser.bin).file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let name = Path::new(&browser.bin)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     println!("\n  Открываю окно браузера ({name})… Войдите в аккаунт Яндекса.");
     println!("  После входа окно закроется само. Ctrl+C — отмена.");
     let mut child = match cmd.spawn() {
@@ -398,9 +474,15 @@ pub fn browser_login() -> Result<String> {
     let mut session = Session { child, profile };
     CANCELLED.store(false, Ordering::Relaxed);
     let mut handlers = Vec::new();
-    for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+    for signal in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
         // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
-        handlers.push(unsafe { signal_hook::low_level::register(signal, || CANCELLED.store(true, Ordering::Relaxed)) }?);
+        handlers.push(unsafe {
+            signal_hook::low_level::register(signal, || CANCELLED.store(true, Ordering::Relaxed))
+        }?);
     }
     let deadline = Instant::now() + LOGIN_TIMEOUT;
     let token = match (pipes, stderr) {
@@ -412,7 +494,13 @@ pub fn browser_login() -> Result<String> {
         signal_hook::low_level::unregister(h);
     }
     // Ctrl+C reaches the browser too, so it may close first: report the cancel, not the closed window.
-    token.map_err(|e| if CANCELLED.load(Ordering::Relaxed) { anyhow!("вход отменён") } else { e })
+    token.map_err(|e| {
+        if CANCELLED.load(Ordering::Relaxed) {
+            anyhow!("вход отменён")
+        } else {
+            e
+        }
+    })
 }
 
 const FIREFOX_PREFS: &str = r#"
@@ -459,7 +547,10 @@ fn ws_recv(ws: &mut Ws) -> Result<Option<String>> {
         Ok(Message::Text(t)) => Ok(Some(t.to_string())),
         Ok(_) => Ok(None),
         Err(tungstenite::Error::Io(e))
-            if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
         {
             Ok(None)
         }
@@ -510,7 +601,10 @@ impl Pipe {
                 }
             }
         });
-        Pipe { to_browser, messages }
+        Pipe {
+            to_browser,
+            messages,
+        }
     }
 }
 
@@ -518,14 +612,18 @@ impl Channel for Pipe {
     fn send_json(&mut self, v: Value) -> Result<()> {
         let mut msg = v.to_string().into_bytes();
         msg.push(0);
-        self.to_browser.write_all(&msg).context("окно браузера закрыто до завершения входа")
+        self.to_browser
+            .write_all(&msg)
+            .context("окно браузера закрыто до завершения входа")
     }
 
     fn next_message(&mut self) -> Result<Option<String>> {
         match self.messages.recv_timeout(Duration::from_millis(400)) {
             Ok(m) => Ok(Some(m)),
             Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => bail!("окно браузера закрыто до завершения входа"),
+            Err(RecvTimeoutError::Disconnected) => {
+                bail!("окно браузера закрыто до завершения входа")
+            }
         }
     }
 }
@@ -595,13 +693,32 @@ fn bidi_address(stderr: std::process::ChildStderr, child: &mut Child) -> Result<
 }
 
 /// Firefox-based browsers: WebDriver BiDi.
-fn bidi_capture(stderr: std::process::ChildStderr, url: &str, child: &mut Child, deadline: Instant) -> Result<String> {
+fn bidi_capture(
+    stderr: std::process::ChildStderr,
+    url: &str,
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<String> {
     let address = bidi_address(stderr, child)?;
     let mut ws = ws_connect(&format!("{address}/session"), child, deadline)?;
-    ws_send(&mut ws, json!({"id": 1, "method": "session.new", "params": {"capabilities": {}}}))?;
-    let events = ["browsingContext.navigationStarted", "browsingContext.fragmentNavigated", "browsingContext.load", "network.responseStarted"];
-    ws_send(&mut ws, json!({"id": 2, "method": "session.subscribe", "params": {"events": events}}))?;
-    ws_send(&mut ws, json!({"id": 3, "method": "browsingContext.getTree", "params": {}}))?;
+    ws_send(
+        &mut ws,
+        json!({"id": 1, "method": "session.new", "params": {"capabilities": {}}}),
+    )?;
+    let events = [
+        "browsingContext.navigationStarted",
+        "browsingContext.fragmentNavigated",
+        "browsingContext.load",
+        "network.responseStarted",
+    ];
+    ws_send(
+        &mut ws,
+        json!({"id": 2, "method": "session.subscribe", "params": {"events": events}}),
+    )?;
+    ws_send(
+        &mut ws,
+        json!({"id": 3, "method": "browsingContext.getTree", "params": {}}),
+    )?;
 
     // Wait for the top-level context and navigate it to the login page.
     // The window may not exist yet right after start: poll, and create a tab if it never shows up.
@@ -611,10 +728,15 @@ fn bidi_capture(stderr: std::process::ChildStderr, url: &str, child: &mut Child,
         if start.elapsed() > Duration::from_secs(20) {
             bail!("браузер не ответил на запрос WebDriver BiDi");
         }
-        let Some(text) = ws_recv(&mut ws)? else { continue };
+        let Some(text) = ws_recv(&mut ws)? else {
+            continue;
+        };
         let v: Value = serde_json::from_str(&text).unwrap_or_default();
         if v["id"] == 1 && v["type"] == "error" {
-            bail!("BiDi: {}", v["message"].as_str().unwrap_or("session.new failed"));
+            bail!(
+                "BiDi: {}",
+                v["message"].as_str().unwrap_or("session.new failed")
+            );
         }
         if v["id"] == 3 {
             if let Some(c) = v["result"]["contexts"][0]["context"].as_str() {
@@ -667,7 +789,9 @@ fn cdp_capture(pipes: Pipes, child: &mut Child, deadline: Instant) -> Result<Str
     // Without our copies of the browser's ends, its exit closes the pipe.
     drop(pipes.theirs);
     let mut pipe = Pipe::new(pipes.to_browser, pipes.from_browser);
-    pipe.send_json(json!({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": true}}))?;
+    pipe.send_json(
+        json!({"id": 1, "method": "Target.setDiscoverTargets", "params": {"discover": true}}),
+    )?;
     let attach = json!({"autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true});
     pipe.send_json(json!({"id": 2, "method": "Target.setAutoAttach", "params": attach}))?;
     let ids = std::cell::Cell::new(100);
@@ -693,17 +817,23 @@ mod tests {
     #[test]
     fn parse() {
         assert_eq!(
-            super::parse_token("https://music.yandex.ru/#access_token=y0_ABCDEFGHIJKLMNOPQRSTUV&token_type=bearer").as_deref(),
+            super::parse_token(
+                "https://music.yandex.ru/#access_token=y0_ABCDEFGHIJKLMNOPQRSTUV&token_type=bearer"
+            )
+            .as_deref(),
             Some("y0_ABCDEFGHIJKLMNOPQRSTUV")
         );
-        assert_eq!(super::parse_token("y0_XYZXYZXYZXYZXYZXYZXYZ").as_deref(), Some("y0_XYZXYZXYZXYZXYZXYZXYZ"));
+        assert_eq!(
+            super::parse_token("y0_XYZXYZXYZXYZXYZXYZXYZ").as_deref(),
+            Some("y0_XYZXYZXYZXYZXYZXYZXYZ")
+        );
         assert_eq!(super::parse_token("https://music.yandex.ru/"), None);
         assert_eq!(super::parse_token("short"), None);
     }
 
     #[test]
     fn classify() {
-        use super::{classify, Kind};
+        use super::{Kind, classify};
         assert_eq!(classify("/usr/bin/zen-browser"), Some(Kind::Firefox));
         assert_eq!(classify("firefox"), Some(Kind::Firefox));
         assert_eq!(classify("google-chrome-stable"), Some(Kind::Chromium));
@@ -722,7 +852,8 @@ mod tests {
         let mut child = cmd.spawn().unwrap();
         drop(pipes.theirs);
         let mut pipe = super::Pipe::new(pipes.to_browser, pipes.from_browser);
-        pipe.send_json(serde_json::json!({"id": 1, "method": "Target.getTargets"})).unwrap();
+        pipe.send_json(serde_json::json!({"id": 1, "method": "Target.getTargets"}))
+            .unwrap();
         let echoed = loop {
             if let Some(m) = pipe.next_message().unwrap() {
                 break m;
@@ -730,7 +861,10 @@ mod tests {
         };
         assert_eq!(echoed, r#"{"id":1,"method":"Target.getTargets"}"#);
         // Our end closed: the child reads the end of input and exits, which closes its end too.
-        let super::Pipe { to_browser, messages } = pipe;
+        let super::Pipe {
+            to_browser,
+            messages,
+        } = pipe;
         drop(to_browser);
         assert!(child.wait().unwrap().success());
         assert!(messages.recv().is_err());
@@ -739,9 +873,15 @@ mod tests {
     #[test]
     fn profile_dir() {
         use std::os::unix::fs::PermissionsExt;
-        let (a, b) = (super::create_profile_dir().unwrap(), super::create_profile_dir().unwrap());
+        let (a, b) = (
+            super::create_profile_dir().unwrap(),
+            super::create_profile_dir().unwrap(),
+        );
         assert_ne!(a, b);
-        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let _ = (std::fs::remove_dir(a), std::fs::remove_dir(b));
     }
 
@@ -765,7 +905,10 @@ mod tests {
         LSHandlerURLScheme = http;
     }
 )"#;
-        assert_eq!(super::https_handler(handlers).as_deref(), Some("org.mozilla.firefox"));
+        assert_eq!(
+            super::https_handler(handlers).as_deref(),
+            Some("org.mozilla.firefox")
+        );
         assert_eq!(super::https_handler("()"), None);
     }
 }

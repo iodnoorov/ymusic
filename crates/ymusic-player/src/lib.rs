@@ -26,7 +26,8 @@ pub(crate) trait Lock<T> {
 
 impl<T> Lock<T> for std::sync::Mutex<T> {
     fn locked(&self) -> std::sync::MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -59,7 +60,10 @@ pub enum PlayerEvent {
     Eof,
     /// The track failed; `network` — its download did (no connection, the server stopped
     /// answering), not the file itself.
-    Error { message: String, network: bool },
+    Error {
+        message: String,
+        network: bool,
+    },
     /// `Load`, `Next` or `Stop` has been carried out: what played before is dropped. Events sent
     /// before this one are about it.
     Cleared,
@@ -68,7 +72,10 @@ pub enum PlayerEvent {
     /// Levels of the spectrum bands (`SPECTRUM_BANDS`), dB, low to high.
     Spectrum(Vec<f32>),
     /// The output asked for by `PlayerCmd::Output` did not open; `kept` is the one still in use.
-    OutputFailed { kept: Option<String>, error: String },
+    OutputFailed {
+        kept: Option<String>,
+        error: String,
+    },
 }
 
 /// Bands of the spectrum visualizer: log-spaced from `SPECTRUM_LOW` to `SPECTRUM_HIGH` Hz.

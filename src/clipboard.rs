@@ -34,7 +34,13 @@ fn tools() -> (Vec<Tool>, Vec<Tool>) {
         (x11, ("xclip", &["-selection", "clipboard", "-o"])),
         (x11, ("xsel", &["--clipboard", "--output"])),
     ];
-    let available = |tools: [(bool, Tool); 3]| tools.into_iter().filter(|(ok, _)| *ok).map(|(_, t)| t).collect();
+    let available = |tools: [(bool, Tool); 3]| {
+        tools
+            .into_iter()
+            .filter(|(ok, _)| *ok)
+            .map(|(_, t)| t)
+            .collect()
+    };
     (available(copy), available(paste))
 }
 
@@ -55,8 +61,15 @@ pub fn paste() -> Option<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let text = tools().1.iter().find_map(|(bin, args)| {
-            let out = Command::new(bin).args(*args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+            let out = Command::new(bin)
+                .args(*args)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
         });
         let _ = tx.send(text);
     });
@@ -73,7 +86,10 @@ fn run(bin: &str, args: &[&str], text: &str) -> bool {
     else {
         return false;
     };
-    let written = child.stdin.take().is_some_and(|mut s| s.write_all(text.as_bytes()).is_ok());
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut s| s.write_all(text.as_bytes()).is_ok());
     child.wait().is_ok_and(|s| s.success()) && written
 }
 

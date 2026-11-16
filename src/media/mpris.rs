@@ -19,7 +19,10 @@ const NO_TRACK: &str = "/org/mpris/MediaPlayer2/TrackList/NoTrack";
 
 /// D-Bus object path of a track (only letters, digits and `_` are allowed in its elements).
 fn track_path(id: &str) -> String {
-    let id: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    let id: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
     format!("/org/ymusic/track/t{id}")
 }
 
@@ -38,7 +41,13 @@ type Send = Arc<dyn Fn(Remote) + std::marker::Send + Sync>;
 struct Inbox(Mutex<(VecDeque<Update>, Option<Waker>, bool)>);
 
 enum Update {
-    Changed { track: bool, status: bool, volume: bool, repeat: bool, shuffle: bool },
+    Changed {
+        track: bool,
+        status: bool,
+        volume: bool,
+        repeat: bool,
+        shuffle: bool,
+    },
     Seeked(f64),
 }
 
@@ -93,17 +102,28 @@ impl Mpris {
         let inbox = Arc::new(Inbox::default());
         let current = Arc::new(Mutex::new(Current::default()));
         let (i, c, s): (_, _, Send) = (inbox.clone(), current.clone(), Arc::new(send));
-        let _ = std::thread::Builder::new().name("mpris".into()).spawn(move || {
-            let _ = zbus::block_on(serve(i.clone(), c, s));
-            i.close();
-        });
-        Mpris { inbox, current, last: State::default(), clock: Clock::default() }
+        let _ = std::thread::Builder::new()
+            .name("mpris".into())
+            .spawn(move || {
+                let _ = zbus::block_on(serve(i.clone(), c, s));
+                i.close();
+            });
+        Mpris {
+            inbox,
+            current,
+            last: State::default(),
+            clock: Clock::default(),
+        }
     }
 
     /// Takes the app's state and position (seconds), tells the desktop what changed.
     pub fn sync(&mut self, state: State, position: f64) {
-        let same_track = state.track.as_ref().map(|t| &t.id) == self.last.track.as_ref().map(|t| &t.id);
-        if self.clock.seeked(position, self.last.status == Status::Playing, same_track) {
+        let same_track =
+            state.track.as_ref().map(|t| &t.id) == self.last.track.as_ref().map(|t| &t.id);
+        if self
+            .clock
+            .seeked(position, self.last.status == Status::Playing, same_track)
+        {
             self.inbox.push(Update::Seeked(position));
         }
         let mut cur = self.current.locked();
@@ -137,16 +157,31 @@ async fn serve(inbox: Arc<Inbox>, current: Arc<Mutex<Current>>, send: Send) -> z
         .build()
         .await?;
     // A second copy of the program takes a name of its own, as the specification suggests.
-    let owned = |r: zbus::Result<RequestNameReply>| matches!(r, Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner));
-    if !owned(conn.request_name_with_flags(NAME, RequestNameFlags::DO_NOT_QUEUE).await) {
+    let owned = |r: zbus::Result<RequestNameReply>| {
+        matches!(
+            r,
+            Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner)
+        )
+    };
+    if !owned(
+        conn.request_name_with_flags(NAME, RequestNameFlags::DO_NOT_QUEUE)
+            .await,
+    ) {
         let name = format!("{NAME}.instance{}", std::process::id());
-        conn.request_name_with_flags(name.as_str(), RequestNameFlags::DO_NOT_QUEUE).await?;
+        conn.request_name_with_flags(name.as_str(), RequestNameFlags::DO_NOT_QUEUE)
+            .await?;
     }
     let player = conn.object_server().interface::<_, Player>(PATH).await?;
     while let Some(update) = inbox.next().await {
         let emitter = player.signal_emitter();
         match update {
-            Update::Changed { track, status, volume, repeat, shuffle } => {
+            Update::Changed {
+                track,
+                status,
+                volume,
+                repeat,
+                shuffle,
+            } => {
                 let p = player.get().await;
                 if track {
                     p.metadata_changed(emitter).await?;
@@ -266,7 +301,13 @@ impl Player {
     }
 
     fn set_position(&self, track_id: ObjectPath<'_>, position: i64) {
-        let current = self.current.locked().state.track.as_ref().map(|t| track_path(&t.id));
+        let current = self
+            .current
+            .locked()
+            .state
+            .track
+            .as_ref()
+            .map(|t| track_path(&t.id));
         // A request for another track than the current one is ignored, as the specification says.
         if current.as_deref() == Some(track_id.as_str()) && position >= 0 {
             (self.send)(Remote::SeekTo(position as f64 / 1e6));
@@ -305,7 +346,10 @@ impl Player {
         let cur = self.current.locked();
         let mut m = HashMap::new();
         let Some(t) = &cur.state.track else {
-            m.insert("mpris:trackid".into(), owned(ObjectPath::from_static_str_unchecked(NO_TRACK)));
+            m.insert(
+                "mpris:trackid".into(),
+                owned(ObjectPath::from_static_str_unchecked(NO_TRACK)),
+            );
             return m;
         };
         if let Ok(path) = ObjectPath::try_from(track_path(&t.id)) {
@@ -419,7 +463,13 @@ mod tests {
             art_url: None,
             url: String::new(),
         };
-        State { track: Some(track), status, volume: 50.0, repeat: Repeat::Off, shuffle: false }
+        State {
+            track: Some(track),
+            status,
+            volume: 50.0,
+            repeat: Repeat::Off,
+            shuffle: false,
+        }
     }
 
     /// The tracking part alone, without the D-Bus thread.
@@ -436,7 +486,13 @@ mod tests {
         let mut q = m.inbox.0.locked();
         q.0.drain(..)
             .map(|u| match u {
-                Update::Changed { track, status, volume, repeat, shuffle } => {
+                Update::Changed {
+                    track,
+                    status,
+                    volume,
+                    repeat,
+                    shuffle,
+                } => {
                     format!("changed {track} {status} {volume} {repeat} {shuffle}")
                 }
                 Update::Seeked(p) => format!("seeked {p}"),
@@ -461,9 +517,22 @@ mod tests {
         assert!(drain(&m).is_empty());
         m.sync(state("1", Status::Paused), 10.5);
         assert_eq!(drain(&m), ["changed false true false false false"]);
-        m.sync(State { repeat: Repeat::One, ..state("1", Status::Paused) }, 10.5);
+        m.sync(
+            State {
+                repeat: Repeat::One,
+                ..state("1", Status::Paused)
+            },
+            10.5,
+        );
         assert_eq!(drain(&m), ["changed false false false true false"]);
-        m.sync(State { repeat: Repeat::One, shuffle: true, ..state("1", Status::Paused) }, 10.5);
+        m.sync(
+            State {
+                repeat: Repeat::One,
+                shuffle: true,
+                ..state("1", Status::Paused)
+            },
+            10.5,
+        );
         assert_eq!(drain(&m), ["changed false false false false true"]);
         // A new track starting from 0 is not a seek.
         m.sync(state("2", Status::Playing), 0.0);
@@ -482,7 +551,10 @@ mod tests {
     #[test]
     fn track_paths() {
         assert_eq!(track_path("39089632"), "/org/ymusic/track/t39089632");
-        assert_eq!(track_path("bfc384d6-bd20"), "/org/ymusic/track/tbfc384d6_bd20");
+        assert_eq!(
+            track_path("bfc384d6-bd20"),
+            "/org/ymusic/track/tbfc384d6_bd20"
+        );
         assert!(ObjectPath::try_from(track_path("a:b-c")).is_ok());
     }
 }

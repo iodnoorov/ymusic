@@ -9,21 +9,22 @@
 //! The bindings come from Apple's SDK headers (objc2-audio-toolbox and friends), so the structures
 //! are laid out as Core Audio expects, not as written out by hand.
 
-use super::output::{Sink, RATE};
+use super::output::{RATE, Sink};
 use super::ring::Ring;
 use crate::Lock;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objc2_audio_toolbox::{
-    kAudioUnitManufacturer_Apple, kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat,
-    kAudioUnitScope_Global, kAudioUnitScope_Input, kAudioUnitSubType_DefaultOutput, kAudioUnitType_Output,
-    AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext, AudioComponentInstanceDispose,
-    AudioComponentInstanceNew, AudioOutputUnitStart, AudioOutputUnitStop, AudioUnit, AudioUnitInitialize,
-    AudioUnitRenderActionFlags, AudioUnitReset, AudioUnitSetProperty, AudioUnitUninitialize,
+    AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
+    AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioOutputUnitStart,
+    AudioOutputUnitStop, AudioUnit, AudioUnitInitialize, AudioUnitRenderActionFlags,
+    AudioUnitReset, AudioUnitSetProperty, AudioUnitUninitialize, kAudioUnitManufacturer_Apple,
+    kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global,
+    kAudioUnitScope_Input, kAudioUnitSubType_DefaultOutput, kAudioUnitType_Output,
 };
 use objc2_core_audio::{AudioConvertHostTimeToNanos, AudioGetCurrentHostTime};
 use objc2_core_audio_types::{
-    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM, AudioBufferList,
-    AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
+    AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
 };
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -81,7 +82,10 @@ impl Heard {
         }
         loop {
             let seq = self.seq.load(Ordering::Acquire);
-            let (frames, at) = (self.frames.load(Ordering::Relaxed), self.at.load(Ordering::Relaxed));
+            let (frames, at) = (
+                self.frames.load(Ordering::Relaxed),
+                self.at.load(Ordering::Relaxed),
+            );
             std::sync::atomic::fence(Ordering::Acquire);
             if seq.is_multiple_of(2) && self.seq.load(Ordering::Relaxed) == seq {
                 return (frames, at);
@@ -105,7 +109,9 @@ unsafe extern "C-unwind" fn render(
         // Audio passes a valid time stamp and an interleaved buffer of the format we set.
         let (shared, time) = unsafe { (ctx.cast::<Shared>().as_ref(), time.as_ref()) };
         // SAFETY: as above; null only in notifications, which this callback is not set for.
-        let Some(list) = (unsafe { data.as_mut() }) else { return 0 };
+        let Some(list) = (unsafe { data.as_mut() }) else {
+            return 0;
+        };
         if list.mNumberBuffers == 0 {
             return 0;
         }
@@ -152,12 +158,22 @@ impl CoreAudio {
                 return Err(anyhow!("Core Audio: нет устройства вывода"));
             }
             let mut unit: AudioUnit = std::ptr::null_mut();
-            check(AudioComponentInstanceNew(component, NonNull::from(&mut unit)), "AudioComponentInstanceNew")?;
+            check(
+                AudioComponentInstanceNew(component, NonNull::from(&mut unit)),
+                "AudioComponentInstanceNew",
+            )?;
             unit
         };
-        let shared = Box::new(Shared { ring, heard: Heard::default() });
+        let shared = Box::new(Shared {
+            ring,
+            heard: Heard::default(),
+        });
         // From here on `Drop` disposes of the unit.
-        let out = CoreAudio { unit, shared, paused: Mutex::new(true) };
+        let out = CoreAudio {
+            unit,
+            shared,
+            paused: Mutex::new(true),
+        };
         let format = AudioStreamBasicDescription {
             mSampleRate: f64::from(RATE),
             mFormatID: kAudioFormatLinearPCM,
@@ -179,9 +195,23 @@ impl CoreAudio {
                 AudioUnitSetProperty(unit, id, kAudioUnitScope_Input, 0, data, size as u32)
             };
             let format_ptr: *const AudioStreamBasicDescription = &format;
-            check(set(kAudioUnitProperty_StreamFormat, format_ptr.cast(), size_of_val(&format)), "формат")?;
+            check(
+                set(
+                    kAudioUnitProperty_StreamFormat,
+                    format_ptr.cast(),
+                    size_of_val(&format),
+                ),
+                "формат",
+            )?;
             let callback_ptr: *const AURenderCallbackStruct = &callback;
-            check(set(kAudioUnitProperty_SetRenderCallback, callback_ptr.cast(), size_of_val(&callback)), "обработчик")?;
+            check(
+                set(
+                    kAudioUnitProperty_SetRenderCallback,
+                    callback_ptr.cast(),
+                    size_of_val(&callback),
+                ),
+                "обработчик",
+            )?;
             check(AudioUnitInitialize(unit), "AudioUnitInitialize")?;
         }
         out.set_paused(false)?;
@@ -209,8 +239,11 @@ impl Sink for CoreAudio {
     }
 
     fn flush(&self) -> Result<()> {
-        // SAFETY: an initialized unit.
-        check(unsafe { AudioUnitReset(self.unit, kAudioUnitScope_Global, 0) }, "сброс")?;
+        check(
+            // SAFETY: an initialized unit.
+            unsafe { AudioUnitReset(self.unit, kAudioUnitScope_Global, 0) },
+            "сброс",
+        )?;
         self.shared.heard.drop_all();
         Ok(())
     }
@@ -222,8 +255,14 @@ impl Sink for CoreAudio {
             return Ok(0);
         }
         // SAFETY: plain calls.
-        let (now, at) = unsafe { (AudioConvertHostTimeToNanos(AudioGetCurrentHostTime()), AudioConvertHostTimeToNanos(at)) };
-        let ahead = frames as i128 + (i128::from(at) - i128::from(now)) * i128::from(RATE) / 1_000_000_000;
+        let (now, at) = unsafe {
+            (
+                AudioConvertHostTimeToNanos(AudioGetCurrentHostTime()),
+                AudioConvertHostTimeToNanos(at),
+            )
+        };
+        let ahead =
+            frames as i128 + (i128::from(at) - i128::from(now)) * i128::from(RATE) / 1_000_000_000;
         Ok(ahead.max(0) as u64)
     }
 }

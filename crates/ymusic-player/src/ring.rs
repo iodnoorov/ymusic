@@ -5,19 +5,19 @@
 //! What only the producer and the control thread share — marks, spectra, a requested seek, the
 //! generation — is under a mutex the output never touches.
 
-use crate::Lock;
-use std::sync::PoisonError;
 use super::output::RATE;
+use crate::Lock;
 use std::collections::VecDeque;
 use std::io;
 #[cfg(not(target_os = "linux"))]
 use std::io::{Read, Write};
+#[cfg(not(target_os = "linux"))]
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(not(target_os = "linux"))]
-use std::os::fd::AsRawFd;
-#[cfg(not(target_os = "linux"))]
 use std::os::unix::net::UnixStream;
+use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -34,10 +34,18 @@ const MAX_SPECTRA: usize = 32;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mark {
     /// A track (`job`) starts at `at` seconds into it; `gapless` — right after the previous one.
-    Start { job: u64, at: f64, duration: Option<f64>, gapless: bool },
+    Start {
+        job: u64,
+        at: f64,
+        duration: Option<f64>,
+        gapless: bool,
+    },
     End,
     /// `network` — see `PlayerEvent::Error`.
-    Error { message: String, network: bool },
+    Error {
+        message: String,
+        network: bool,
+    },
 }
 
 /// What the producer and the control thread share.
@@ -111,7 +119,11 @@ impl Ring {
             let read = self.read.load(Ordering::Acquire);
             let room = (CAPACITY - (written - read) as usize).min(data.len() / 2);
             if room == 0 {
-                meta = self.cleared.wait_timeout(meta, FULL_WAIT).unwrap_or_else(PoisonError::into_inner).0;
+                meta = self
+                    .cleared
+                    .wait_timeout(meta, FULL_WAIT)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
                 continue;
             }
             let start = written as usize * 2;
@@ -150,7 +162,10 @@ impl Ring {
         let gain = f32::from_bits(self.gain.load(Ordering::Relaxed));
         let start = read as usize * 2;
         for i in 0..frames * 2 {
-            put(amplify(f32::from_bits(self.slots[(start + i) % self.slots.len()].load(Ordering::Relaxed)), gain));
+            put(amplify(
+                f32::from_bits(self.slots[(start + i) % self.slots.len()].load(Ordering::Relaxed)),
+                gain,
+            ));
         }
         self.read.fetch_max(read + frames as u64, Ordering::Release);
         frames
@@ -193,7 +208,9 @@ impl Ring {
     /// decode/probe must never let a cancelled job publish into the new stream.
     pub fn mark_if(&self, generation: u64, mark: Mark) -> bool {
         let mut meta = self.meta.locked();
-        if meta.generation != generation { return false; }
+        if meta.generation != generation {
+            return false;
+        }
         let at = self.written.load(Ordering::Relaxed);
         meta.marks.push_back((at, mark));
         true
@@ -201,7 +218,9 @@ impl Ring {
 
     pub fn start_if(&self, job: u64, generation: u64, mark: Mark) -> bool {
         let mut meta = self.meta.locked();
-        if meta.generation != generation { return false; }
+        if meta.generation != generation {
+            return false;
+        }
         meta.producing = job;
         let at = self.written.load(Ordering::Relaxed);
         meta.marks.push_back((at, mark));
@@ -214,7 +233,8 @@ impl Ring {
     }
 
     fn clear_locked(&self, meta: &mut Meta) {
-        self.read.fetch_max(self.written.load(Ordering::SeqCst), Ordering::Release);
+        self.read
+            .fetch_max(self.written.load(Ordering::SeqCst), Ordering::Release);
         meta.marks.clear();
         meta.spectra.clear();
         meta.seek = None;
@@ -357,7 +377,15 @@ mod tests {
     fn marks_and_clearing() {
         let ring = Arc::new(Ring::default());
         let generation = ring.begin(1);
-        assert!(ring.mark_if(generation, Mark::Start { job: 1, at: 0.0, duration: None, gapless: false }));
+        assert!(ring.mark_if(
+            generation,
+            Mark::Start {
+                job: 1,
+                at: 0.0,
+                duration: None,
+                gapless: false
+            }
+        ));
         assert!(ring.push(&[0.5; 100], generation));
         ring.mark_if(generation, Mark::End);
         assert_eq!(ring.reached(0).len(), 1);
@@ -412,7 +440,9 @@ mod tests {
         let total = CAPACITY * 7 + 123;
         let r = ring.clone();
         let producer = std::thread::spawn(move || {
-            let data: Vec<f32> = (0..total).flat_map(|i| [i as f32 / total as f32, -(i as f32) / total as f32]).collect();
+            let data: Vec<f32> = (0..total)
+                .flat_map(|i| [i as f32 / total as f32, -(i as f32) / total as f32])
+                .collect();
             for chunk in data.chunks(2 * 997) {
                 assert!(r.push(chunk, generation));
             }
@@ -422,9 +452,16 @@ mod tests {
         while got.len() < total * 2 {
             match ring.take_into(&mut buf) {
                 0 => {
-                    let mut fd = libc::pollfd { fd: wake.fd(), events: libc::POLLIN, revents: 0 };
-                    // SAFETY: one valid pollfd.
-                    assert!(unsafe { libc::poll(&mut fd, 1, 5000) } == 1, "the output was not woken");
+                    let mut fd = libc::pollfd {
+                        fd: wake.fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    assert!(
+                        // SAFETY: one valid pollfd.
+                        unsafe { libc::poll(&mut fd, 1, 5000) } == 1,
+                        "the output was not woken"
+                    );
                     wake.reset();
                 }
                 n => got.extend_from_slice(&buf[..n * 2]),
@@ -432,7 +469,13 @@ mod tests {
         }
         producer.join().unwrap();
         let expected = |i: usize| [i as f32 / total as f32, -(i as f32) / total as f32];
-        assert!(got.as_chunks::<2>().0.iter().enumerate().all(|(i, f)| *f == expected(i)));
+        assert!(
+            got.as_chunks::<2>()
+                .0
+                .iter()
+                .enumerate()
+                .all(|(i, f)| *f == expected(i))
+        );
         assert_eq!(ring.handed(), total as u64);
     }
 }
@@ -450,7 +493,16 @@ mod generation_tests {
             wait.recv().unwrap();
             assert!(!r.push(&[0.5; 2], generation));
             assert!(!r.mark_if(generation, Mark::End));
-            assert!(!r.start_if(2, generation, Mark::Start { job: 2, at: 0., duration: None, gapless: true }));
+            assert!(!r.start_if(
+                2,
+                generation,
+                Mark::Start {
+                    job: 2,
+                    at: 0.,
+                    duration: None,
+                    gapless: true
+                }
+            ));
         });
         assert!(ring.request_seek(1, 10.));
         go.send(()).unwrap();
@@ -458,7 +510,15 @@ mod generation_tests {
         assert!(ring.reached(u64::MAX).is_empty());
         let (current, seek) = ring.poll_seek();
         assert_eq!(seek, Some(10.));
-        assert!(ring.mark_if(current, Mark::Start { job: 1, at: 10., duration: None, gapless: false }));
+        assert!(ring.mark_if(
+            current,
+            Mark::Start {
+                job: 1,
+                at: 10.,
+                duration: None,
+                gapless: false
+            }
+        ));
         ring.clear();
         assert!(ring.reached(u64::MAX).is_empty());
     }

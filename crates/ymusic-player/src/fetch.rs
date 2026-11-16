@@ -34,15 +34,22 @@ struct State {
 
 impl State {
     fn available(&self, pos: u64) -> u64 {
-        self.valid.iter().find(|r| r.start <= pos && pos < r.end).map_or(0, |r| r.end - pos)
+        self.valid
+            .iter()
+            .find(|r| r.start <= pos && pos < r.end)
+            .map_or(0, |r| r.end - pos)
     }
 
     fn record(&mut self, mut range: Range<u64>) {
-        if range.is_empty() { return; }
+        if range.is_empty() {
+            return;
+        }
         let first = self.valid.partition_point(|r| r.end < range.start);
         let mut end = first;
         while let Some(r) = self.valid.get(end) {
-            if r.start > range.end { break; }
+            if r.start > range.end {
+                break;
+            }
             range.start = range.start.min(r.start);
             range.end = range.end.max(r.end);
             end += 1;
@@ -72,7 +79,11 @@ impl State {
             if have == 0 {
                 // Do not refetch a received prefix after a short/disconnected response.
                 let block_end = (pos / BLOCK + 1) * BLOCK;
-                let next_cached = self.valid.iter().find(|r| r.start > pos).map_or(limit, |r| r.start);
+                let next_cached = self
+                    .valid
+                    .iter()
+                    .find(|r| r.start > pos)
+                    .map_or(limit, |r| r.start);
                 return Some(pos..block_end.min(ahead).min(next_cached));
             }
             pos += have;
@@ -109,15 +120,20 @@ impl Download {
         match tempfile::tempfile() {
             Ok(file) => shared.state.locked().file = Some(file),
             Err(e) => {
-                shared.update(|s| s.error = Some(format!("не удалось создать временный файл трека: {e}")));
+                shared.update(|s| {
+                    s.error = Some(format!("не удалось создать временный файл трека: {e}"))
+                });
                 return Download(shared);
             }
         }
         let (s, url, tls) = (shared.clone(), url.to_string(), tls.clone());
-        if let Err(e) = std::thread::Builder::new().name("player-download".into()).spawn({
-            let s = s.clone();
-            move || run(&s, &url, tls, stall)
-        }) {
+        if let Err(e) = std::thread::Builder::new()
+            .name("player-download".into())
+            .spawn({
+                let s = s.clone();
+                move || run(&s, &url, tls, stall)
+            })
+        {
             s.update(|st| st.error = Some(e.to_string()));
         }
         Download(shared)
@@ -141,13 +157,23 @@ impl Download {
     pub(crate) fn for_test(data: &[u8], done: bool) -> Download {
         let file = tempfile::tempfile().unwrap();
         file.write_all_at(data, 0).unwrap();
-        let mut state = State { file: Some(file), total: done.then_some(data.len() as u64), ..State::default() };
+        let mut state = State {
+            file: Some(file),
+            total: done.then_some(data.len() as u64),
+            ..State::default()
+        };
         state.record(0..data.len() as u64);
-        Download(Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new() }))
+        Download(Arc::new(Shared {
+            state: Mutex::new(state),
+            changed: Condvar::new(),
+        }))
     }
 
     pub fn reader(&self) -> Reader {
-        Reader { shared: self.0.clone(), pos: 0 }
+        Reader {
+            shared: self.0.clone(),
+            pos: 0,
+        }
     }
 }
 
@@ -163,21 +189,35 @@ fn content_range(value: &str) -> Option<ContentRange> {
     let (start, end) = range.split_once('-')?;
     let (start, inclusive) = (start.parse::<u64>().ok()?, end.parse::<u64>().ok()?);
     let end = inclusive.checked_add(1)?;
-    let total = if total == "*" { None } else { Some(total.parse::<u64>().ok()?) };
+    let total = if total == "*" {
+        None
+    } else {
+        Some(total.parse::<u64>().ok()?)
+    };
     (start < end && total.is_none_or(|n| end <= n)).then_some(ContentRange { start, end, total })
 }
 
 fn content_length(resp: &ureq::Response) -> Result<Option<u64>, String> {
-    resp.header("Content-Length").map(|v| v.parse().map_err(|_| "неверный Content-Length".into())).transpose()
+    resp.header("Content-Length")
+        .map(|v| v.parse().map_err(|_| "неверный Content-Length".into()))
+        .transpose()
 }
 
 /// A newly demanded hole preempts speculative reads at the next read/deadline boundary.
 /// Sequential responses pause at the lookahead limit instead of refetching their prefix.
 fn preempted(s: &State, request: &Range<u64>, offset: u64, sequential: bool) -> bool {
-    if s.cancelled || s.error.is_some() { return true; }
-    if s.total.is_some_and(|n| s.demand >= n) { return true; }
+    if s.cancelled || s.error.is_some() {
+        return true;
+    }
+    if s.total.is_some_and(|n| s.demand >= n) {
+        return true;
+    }
     if s.available(s.demand) == 0 {
-        if sequential { offset > s.demand } else { !request.contains(&s.demand) }
+        if sequential {
+            offset > s.demand
+        } else {
+            !request.contains(&s.demand)
+        }
     } else {
         !sequential && offset >= s.demand.saturating_add(PREFETCH)
     }
@@ -190,51 +230,82 @@ enum Received {
     Fatal(String),
 }
 
-fn receive(shared: &Shared, mut body: impl Read, request: &Range<u64>, mut offset: u64,
-    expected_end: Option<u64>, sequential: bool, progress: &mut bool) -> Received
-{
+fn receive(
+    shared: &Shared,
+    mut body: impl Read,
+    request: &Range<u64>,
+    mut offset: u64,
+    expected_end: Option<u64>,
+    sequential: bool,
+    progress: &mut bool,
+) -> Received {
     let mut buf = [0u8; CHUNK];
     loop {
         let amount = {
             let mut s = shared.state.locked();
             loop {
-                if preempted(&s, request, offset, sequential) { return Received::Interrupted; }
-                if expected_end == Some(offset) { return Received::Complete; }
+                if preempted(&s, request, offset, sequential) {
+                    return Received::Interrupted;
+                }
+                if expected_end == Some(offset) {
+                    return Received::Complete;
+                }
                 let ahead = s.demand.saturating_add(PREFETCH);
                 if !sequential || offset < ahead {
-                    let amount = expected_end.map_or(CHUNK as u64, |end| (end - offset).min(CHUNK as u64));
-                    break if sequential { amount.min(ahead - offset) as usize } else { amount as usize };
+                    let amount =
+                        expected_end.map_or(CHUNK as u64, |end| (end - offset).min(CHUNK as u64));
+                    break if sequential {
+                        amount.min(ahead - offset) as usize
+                    } else {
+                        amount as usize
+                    };
                 }
                 // Keep this healthy HTTP 200 body alive while paused. Reader progress, seeks,
                 // cancellation and terminal errors all notify this same condition variable.
-                s = shared.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
+                s = shared
+                    .changed
+                    .wait(s)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
         };
         let read = body.read(&mut buf[..amount]);
         let mut s = shared.state.locked();
-        if s.cancelled { return Received::Interrupted; }
+        if s.cancelled {
+            return Received::Interrupted;
+        }
         let n = match read {
             Ok(n) => n,
-            Err(e) => return if preempted(&s, request, offset, sequential) {
-                Received::Interrupted
-            } else {
-                Received::Retry(e.to_string())
-            },
+            Err(e) => {
+                return if preempted(&s, request, offset, sequential) {
+                    Received::Interrupted
+                } else {
+                    Received::Retry(e.to_string())
+                };
+            }
         };
         if n == 0 {
             if expected_end.is_some_and(|end| offset < end) {
                 return Received::Retry("соединение оборвалось до конца HTTP-диапазона".into());
             }
             // Only an unbounded, sequential response's EOF establishes an unknown size.
-            if sequential && let Err(e) = s.size(offset) { return Received::Fatal(e); }
+            if sequential && let Err(e) = s.size(offset) {
+                return Received::Fatal(e);
+            }
             drop(s);
             shared.changed.notify_all();
             return Received::Complete;
         }
         let end = offset + n as u64;
-        if end > MAX_FILE { return Received::Fatal("файл трека превышает 512 МиБ".into()); }
+        if end > MAX_FILE {
+            return Received::Fatal("файл трека превышает 512 МиБ".into());
+        }
         let fresh = s.available(offset) < n as u64;
-        if let Err(e) = s.file.as_ref().expect("download file").write_all_at(&buf[..n], offset) {
+        if let Err(e) = s
+            .file
+            .as_ref()
+            .expect("download file")
+            .write_all_at(&buf[..n], offset)
+        {
             return Received::Fatal(format!("не удалось сохранить загружаемый трек: {e}"));
         }
         s.record(offset..end);
@@ -245,36 +316,62 @@ fn receive(shared: &Shared, mut body: impl Read, request: &Range<u64>, mut offse
     }
 }
 
-fn fetch(shared: &Shared, agent: &ureq::Agent, url: &str, request: &Range<u64>, progress: &mut bool) -> Received {
+fn fetch(
+    shared: &Shared,
+    agent: &ureq::Agent,
+    url: &str,
+    request: &Range<u64>,
+    progress: &mut bool,
+) -> Received {
     let sequential = shared.state.locked().sequential;
     let mut req = agent.get(url).set("Accept-Encoding", "identity");
-    if !sequential { req = req.set("Range", &format!("bytes={}-{}", request.start, request.end - 1)); }
+    if !sequential {
+        req = req.set(
+            "Range",
+            &format!("bytes={}-{}", request.start, request.end - 1),
+        );
+    }
     let resp = match req.call() {
         Ok(resp) => resp,
         Err(ureq::Error::Status(416, resp)) => {
-            let total = resp.header("Content-Range").and_then(|v| v.strip_prefix("bytes */"))
+            let total = resp
+                .header("Content-Range")
+                .and_then(|v| v.strip_prefix("bytes */"))
                 .and_then(|v| v.parse::<u64>().ok());
             return match total {
                 Some(n) if request.start >= n => {
                     let result = shared.state.locked().size(n);
                     shared.changed.notify_all();
-                    match result { Ok(()) => Received::Complete, Err(e) => Received::Fatal(e) }
+                    match result {
+                        Ok(()) => Received::Complete,
+                        Err(e) => Received::Fatal(e),
+                    }
                 }
                 _ => Received::Fatal("неверный ответ HTTP 416 / Content-Range".into()),
             };
         }
         Err(e) => return Received::Retry(e.to_string()),
     };
-    if resp.header("Content-Encoding").is_some_and(|v| !v.eq_ignore_ascii_case("identity")) {
-        return Received::Fatal("сервер сжал HTTP-диапазон вопреки Accept-Encoding: identity".into());
+    if resp
+        .header("Content-Encoding")
+        .is_some_and(|v| !v.eq_ignore_ascii_case("identity"))
+    {
+        return Received::Fatal(
+            "сервер сжал HTTP-диапазон вопреки Accept-Encoding: identity".into(),
+        );
     }
-    let length = match content_length(&resp) { Ok(n) => n, Err(e) => return Received::Fatal(e) };
+    let length = match content_length(&resp) {
+        Ok(n) => n,
+        Err(e) => return Received::Fatal(e),
+    };
     let (offset, end, sequential) = match resp.status() {
         206 => {
             let Some(range) = resp.header("Content-Range").and_then(content_range) else {
                 return Received::Fatal("нет корректного Content-Range для HTTP 206".into());
             };
-            if sequential || range.start != request.start || range.end > request.end
+            if sequential
+                || range.start != request.start
+                || range.end > request.end
                 || length.is_some_and(|n| n != range.end - range.start)
             {
                 return Received::Fatal("HTTP 206 не соответствует запрошенному диапазону".into());
@@ -282,7 +379,9 @@ fn fetch(shared: &Shared, agent: &ureq::Agent, url: &str, request: &Range<u64>, 
             if let Some(total) = range.total {
                 let result = shared.state.locked().size(total);
                 shared.changed.notify_all();
-                if let Err(e) = result { return Received::Fatal(e); }
+                if let Err(e) = result {
+                    return Received::Fatal(e);
+                }
             }
             (range.start, Some(range.end), false)
         }
@@ -293,15 +392,24 @@ fn fetch(shared: &Shared, agent: &ureq::Agent, url: &str, request: &Range<u64>, 
                 length.map_or(Ok(()), |n| s.size(n))
             };
             shared.changed.notify_all();
-            if let Err(e) = result { return Received::Fatal(e); }
+            if let Err(e) = result {
+                return Received::Fatal(e);
+            }
             // A server ignoring Range always starts at zero, not at the requested offset.
             (0, length, true)
         }
         status => return Received::Fatal(format!("неожиданный HTTP-статус {status}")),
     };
-    receive(shared, resp.into_reader(), request, offset, end, sequential, progress)
+    receive(
+        shared,
+        resp.into_reader(),
+        request,
+        offset,
+        end,
+        sequential,
+        progress,
+    )
 }
-
 
 fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, io_timeout: Duration) {
     let agent = ureq::AgentBuilder::new()
@@ -315,14 +423,23 @@ fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, io_timeout: D
         let request = {
             let mut s = shared.state.locked();
             loop {
-                if s.cancelled || s.error.is_some() { return; }
-                if let Some(range) = s.request() { break range; }
-                s = shared.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
+                if s.cancelled || s.error.is_some() {
+                    return;
+                }
+                if let Some(range) = s.request() {
+                    break range;
+                }
+                s = shared
+                    .changed
+                    .wait(s)
+                    .unwrap_or_else(PoisonError::into_inner);
             }
         };
         let mut progress = false;
         let result = fetch(shared, &agent, url, &request, &mut progress);
-        if progress { retries = 0; }
+        if progress {
+            retries = 0;
+        }
         match result {
             Received::Complete | Received::Interrupted => {}
             Received::Fatal(e) => {
@@ -331,9 +448,13 @@ fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, io_timeout: D
             }
             Received::Retry(e) => {
                 let mut s = shared.state.locked();
-                if s.cancelled { return; }
+                if s.cancelled {
+                    return;
+                }
                 // Do not charge failure/retry delay to a different, newly demanded range.
-                if s.available(s.demand) == 0 && !request.contains(&s.demand) { continue; }
+                if s.available(s.demand) == 0 && !request.contains(&s.demand) {
+                    continue;
+                }
                 retries += 1;
                 if retries > MAX_RETRIES {
                     s.error = Some(e);
@@ -342,8 +463,12 @@ fn run(shared: &Shared, url: &str, tls: Arc<rustls::ClientConfig>, io_timeout: D
                     shared.changed.notify_all();
                     return;
                 }
-                drop(shared.changed.wait_timeout(s, Duration::from_millis(250 * u64::from(retries)))
-                    .unwrap_or_else(PoisonError::into_inner));
+                drop(
+                    shared
+                        .changed
+                        .wait_timeout(s, Duration::from_millis(250 * u64::from(retries)))
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
             }
         }
     }
@@ -357,20 +482,32 @@ pub struct Reader {
 
 impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() { return Ok(0); }
+        if buf.is_empty() {
+            return Ok(0);
+        }
         let mut s = self.shared.state.locked();
         loop {
             if s.cancelled {
-                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "загрузка отменена"));
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "загрузка отменена",
+                ));
             }
-            if s.total.is_some_and(|n| self.pos >= n) { return Ok(0); }
+            if s.total.is_some_and(|n| self.pos >= n) {
+                return Ok(0);
+            }
             if self.pos > MAX_FILE {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "позиция за пределами 512 МиБ"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "позиция за пределами 512 МиБ",
+                ));
             }
             let available = s.available(self.pos);
             if available != 0 {
                 let n = available.min(buf.len() as u64) as usize;
-                s.file.as_ref().ok_or_else(|| io::Error::other("нет временного файла трека"))?
+                s.file
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("нет временного файла трека"))?
                     .read_exact_at(&mut buf[..n], self.pos)?;
                 self.pos += n as u64;
                 s.demand = self.pos;
@@ -378,11 +515,17 @@ impl Read for Reader {
                 self.shared.changed.notify_all();
                 return Ok(n);
             }
-            if let Some(e) = &s.error { return Err(io::Error::other(e.clone())); }
+            if let Some(e) = &s.error {
+                return Err(io::Error::other(e.clone()));
+            }
             s.demand = self.pos;
             s.waiting += 1;
             self.shared.changed.notify_all();
-            s = self.shared.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
+            s = self
+                .shared
+                .changed
+                .wait(s)
+                .unwrap_or_else(PoisonError::into_inner);
             s.waiting -= 1;
         }
     }
@@ -397,22 +540,34 @@ impl Seek for Reader {
                 let mut s = self.shared.state.locked();
                 let len = loop {
                     if s.cancelled {
-                        return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "загрузка отменена"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionAborted,
+                            "загрузка отменена",
+                        ));
                     }
-                    if let Some(t) = s.total { break t; }
-                    if let Some(e) = &s.error { return Err(io::Error::other(e.clone())); }
+                    if let Some(t) = s.total {
+                        break t;
+                    }
+                    if let Some(e) = &s.error {
+                        return Err(io::Error::other(e.clone()));
+                    }
                     // With unknown length, discover EOF sequentially instead of waiting forever
                     // at the end of the ordinary prefetch window.
                     let pos = s.demand.min(MAX_FILE);
                     s.demand = pos + s.available(pos);
                     s.waiting += 1;
                     self.shared.changed.notify_all();
-                    s = self.shared.changed.wait(s).unwrap_or_else(PoisonError::into_inner);
+                    s = self
+                        .shared
+                        .changed
+                        .wait(s)
+                        .unwrap_or_else(PoisonError::into_inner);
                     s.waiting -= 1;
                 };
                 len.checked_add_signed(d)
             }
-        }.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "позиция за границами файла"))?;
+        }
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "позиция за границами файла"))?;
         self.pos = target;
         self.shared.update(|s| s.demand = target);
         Ok(target)
@@ -420,9 +575,13 @@ impl Seek for Reader {
 }
 
 impl symphonia::core::io::MediaSource for Reader {
-    fn is_seekable(&self) -> bool { true }
+    fn is_seekable(&self) -> bool {
+        true
+    }
 
-    fn byte_len(&self) -> Option<u64> { self.shared.state.locked().total }
+    fn byte_len(&self) -> Option<u64> {
+        self.shared.state.locked().total
+    }
 }
 
 #[cfg(test)]
@@ -437,13 +596,27 @@ pub(crate) mod tests {
 
     pub fn tls() -> Arc<rustls::ClientConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        Arc::new(rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions().unwrap()
-            .with_root_certificates(rustls::RootCertStore::empty()).with_no_client_auth())
+        Arc::new(
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_no_client_auth(),
+        )
     }
 
     #[derive(Clone, Copy)]
-    enum Mode { Ranges, Ignore, Truncate, Short, Unknown, UnknownRanges, Oversize, Invalid, Stall }
+    enum Mode {
+        Ranges,
+        Ignore,
+        Truncate,
+        Short,
+        Unknown,
+        UnknownRanges,
+        Oversize,
+        Invalid,
+        Stall,
+    }
 
     struct Server {
         url: String,
@@ -524,22 +697,35 @@ pub(crate) mod tests {
                         }
                     }));
                 }
-                for connection in connections { let _ = connection.join(); }
+                for connection in connections {
+                    let _ = connection.join();
+                }
             });
-            Self { url, requests, stop, thread: Some(thread) }
+            Self {
+                url,
+                requests,
+                stop,
+                thread: Some(thread),
+            }
         }
 
-        fn download(&self) -> Download { Download::start_with(&self.url, &tls(), Duration::from_millis(200)) }
+        fn download(&self) -> Download {
+            Download::start_with(&self.url, &tls(), Duration::from_millis(200))
+        }
     }
 
     impl Drop for Server {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
-            if let Some(thread) = self.thread.take() { thread.join().unwrap(); }
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
         }
     }
 
-    fn bytes(len: usize) -> Vec<u8> { (0..len).map(|i| (i % 251 + 1) as u8).collect() }
+    fn bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251 + 1) as u8).collect()
+    }
 
     #[test]
     fn far_read_backward_read_and_unfilled_holes() {
@@ -555,7 +741,11 @@ pub(crate) mod tests {
         reader.read_exact(&mut got).unwrap();
         assert_eq!(got, body[tail as usize..]);
         let hole = 2 * PREFETCH + 19;
-        assert_eq!(d.0.state.locked().available(hole), 0, "prefix prefetch filled a remote hole");
+        assert_eq!(
+            d.0.state.locked().available(hole),
+            0,
+            "prefix prefetch filled a remote hole"
+        );
         reader.seek(SeekFrom::Start(hole)).unwrap();
         reader.read_exact(&mut got).unwrap();
         assert_eq!(got, body[hole as usize..hole as usize + 37]);
@@ -579,7 +769,9 @@ pub(crate) mod tests {
                 len => len as usize,
             };
             assert!(len >= 8 && pos + len <= body.len());
-            if &body[pos + 4..pos + 8] == b"moov" { break pos..pos + len; }
+            if &body[pos + 4..pos + 8] == b"moov" {
+                break pos..pos + len;
+            }
             pos += len;
         };
         let moov = body[movie.clone()].to_vec();
@@ -599,7 +791,13 @@ pub(crate) mod tests {
         assert!(decoder.next_chunk().unwrap().is_some());
         assert!((decoder.seek(1.).unwrap() - 1.).abs() < 0.01);
         assert!(decoder.next_chunk().unwrap().is_some());
-        assert!(server.requests.locked().iter().any(|r| r.end > tail && r.start > tail - PREFETCH));
+        assert!(
+            server
+                .requests
+                .locked()
+                .iter()
+                .any(|r| r.end > tail && r.start > tail - PREFETCH)
+        );
         assert_eq!(d.0.state.locked().available(tail - PREFETCH / 2), 0);
         d.cancel();
     }
@@ -637,13 +835,20 @@ pub(crate) mod tests {
             let mut state = d.0.state.locked();
             while state.available(offset as u64) < PREFETCH {
                 let remaining = until.saturating_duration_since(Instant::now());
-                assert!(!remaining.is_zero(), "prefetch did not reach the next window");
+                assert!(
+                    !remaining.is_zero(),
+                    "prefetch did not reach the next window"
+                );
                 state = d.0.changed.wait_timeout(state, remaining).unwrap().0;
             }
             drop(state);
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(server.requests.locked().len(), 1, "healthy sequential body was restarted");
+        assert_eq!(
+            server.requests.locked().len(),
+            1,
+            "healthy sequential body was restarted"
+        );
         d.cancel();
     }
 
@@ -654,25 +859,49 @@ pub(crate) mod tests {
         let (done, completed) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let body = bytes(3 * PREFETCH as usize);
-            let result = receive(&shared, &body[..], &(0..BLOCK), 0, Some(body.len() as u64), true, &mut false);
+            let result = receive(
+                &shared,
+                &body[..],
+                &(0..BLOCK),
+                0,
+                Some(body.len() as u64),
+                true,
+                &mut false,
+            );
             done.send(matches!(result, Received::Interrupted)).unwrap();
         });
         let until = Instant::now() + Duration::from_secs(2);
         let mut state = d.0.state.locked();
         while state.available(0) < PREFETCH {
             let remaining = until.saturating_duration_since(Instant::now());
-            assert!(!remaining.is_zero(), "sequential response did not fill its lookahead");
+            assert!(
+                !remaining.is_zero(),
+                "sequential response did not fill its lookahead"
+            );
             state = d.0.changed.wait_timeout(state, remaining).unwrap().0;
         }
-        assert_eq!(state.valid, vec![0..PREFETCH], "paused download exceeded its lookahead");
+        assert_eq!(
+            state.valid,
+            vec![0..PREFETCH],
+            "paused download exceeded its lookahead"
+        );
         drop(state);
         // A full lookahead is neither EOF nor an interruption. The body stays owned until
         // reader progress or cancellation, rather than being discarded for the next window.
-        assert!(matches!(completed.recv_timeout(Duration::from_millis(100)), Err(mpsc::RecvTimeoutError::Timeout)));
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
         d.cancel();
-        assert!(completed.recv_timeout(Duration::from_millis(200)).unwrap(), "paused receive did not cancel");
+        assert!(
+            completed.recv_timeout(Duration::from_millis(200)).unwrap(),
+            "paused receive did not cancel"
+        );
         worker.join().unwrap();
-        assert_eq!(d.reader().read(&mut [0; 1]).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            d.reader().read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
     }
 
     #[test]
@@ -683,7 +912,13 @@ pub(crate) mod tests {
         let mut got = Vec::new();
         d.reader().read_to_end(&mut got).unwrap();
         assert_eq!(got, body);
-        assert!(server.requests.locked().iter().any(|r| r.start == CHUNK as u64 + 7));
+        assert!(
+            server
+                .requests
+                .locked()
+                .iter()
+                .any(|r| r.start == CHUNK as u64 + 7)
+        );
         d.cancel();
     }
 
@@ -704,7 +939,10 @@ pub(crate) mod tests {
         let server = Server::new(body.clone(), Mode::Unknown);
         let d = server.download();
         let mut reader = d.reader();
-        assert_eq!(reader.seek(SeekFrom::End(-19)).unwrap(), body.len() as u64 - 19);
+        assert_eq!(
+            reader.seek(SeekFrom::End(-19)).unwrap(),
+            body.len() as u64 - 19
+        );
         assert_eq!(reader.byte_len(), Some(body.len() as u64));
         let mut got = Vec::new();
         reader.read_to_end(&mut got).unwrap();
@@ -718,12 +956,21 @@ pub(crate) mod tests {
         let server = Server::new(body.clone(), Mode::UnknownRanges);
         let d = server.download();
         let mut reader = d.reader();
-        assert_eq!(reader.seek(SeekFrom::End(-19)).unwrap(), body.len() as u64 - 19);
+        assert_eq!(
+            reader.seek(SeekFrom::End(-19)).unwrap(),
+            body.len() as u64 - 19
+        );
         let mut got = Vec::new();
         reader.read_to_end(&mut got).unwrap();
         assert_eq!(got, body[body.len() - 19..]);
         assert_eq!(reader.byte_len(), Some(body.len() as u64));
-        assert!(server.requests.locked().iter().any(|r| r.start == body.len() as u64));
+        assert!(
+            server
+                .requests
+                .locked()
+                .iter()
+                .any(|r| r.start == body.len() as u64)
+        );
         d.cancel();
     }
 
@@ -768,14 +1015,20 @@ pub(crate) mod tests {
         let mut reader = d.reader();
         reader.read_exact(&mut [0; 16]).unwrap();
         let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || tx.send(reader.read(&mut [0; 1]).unwrap_err().kind()).unwrap());
+        std::thread::spawn(move || {
+            tx.send(reader.read(&mut [0; 1]).unwrap_err().kind())
+                .unwrap()
+        });
         let began = Instant::now();
         while !d.waiting() {
             assert!(began.elapsed() < Duration::from_secs(1));
             std::thread::yield_now();
         }
         d.cancel();
-        assert_eq!(rx.recv_timeout(Duration::from_millis(200)).unwrap(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(200)).unwrap(),
+            io::ErrorKind::ConnectionAborted
+        );
     }
 
     #[test]
@@ -789,11 +1042,16 @@ pub(crate) mod tests {
         reader.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"bcd");
         d.cancel();
-        assert_eq!(reader.read(&mut got).unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        assert_eq!(
+            reader.read(&mut got).unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
         let d = Download::for_test(b"", false);
         d.0.state.locked().file = Some(std::fs::File::open("Cargo.toml").unwrap());
         let result = receive(&d.0, &b"data"[..], &(0..4), 0, Some(4), false, &mut false);
-        let Received::Fatal(error) = result else { panic!("storage failure was not fatal"); };
+        let Received::Fatal(error) = result else {
+            panic!("storage failure was not fatal");
+        };
         d.0.update(|s| s.error = Some(error));
         assert!(d.reader().read(&mut [0; 4]).is_err());
         assert!(!d.failed());
@@ -801,8 +1059,20 @@ pub(crate) mod tests {
 
     #[test]
     fn content_ranges_and_size_cap_are_strict() {
-        assert_eq!(content_range("bytes 17-20/100"), Some(ContentRange { start: 17, end: 21, total: Some(100) }));
-        for invalid in ["bytes 9-8/100", "bytes 0-100/100", "bytes 0-18446744073709551615/*", "bytes */12"] {
+        assert_eq!(
+            content_range("bytes 17-20/100"),
+            Some(ContentRange {
+                start: 17,
+                end: 21,
+                total: Some(100)
+            })
+        );
+        for invalid in [
+            "bytes 9-8/100",
+            "bytes 0-100/100",
+            "bytes 0-18446744073709551615/*",
+            "bytes */12",
+        ] {
             assert!(content_range(invalid).is_none(), "{invalid}");
         }
         let mut s = State::default();

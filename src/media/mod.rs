@@ -82,7 +82,10 @@ pub(crate) struct Clock {
 
 impl Default for Clock {
     fn default() -> Clock {
-        Clock { pos: 0.0, at: Instant::now() }
+        Clock {
+            pos: 0.0,
+            at: Instant::now(),
+        }
     }
 }
 
@@ -92,8 +95,14 @@ impl Clock {
         if position == self.pos {
             return false;
         }
-        let expected = if was_playing { self.pos + self.at.elapsed().as_secs_f64() } else { self.pos };
-        let seek = same_track && (position - expected).abs() > SEEK_JUMP && (position - self.pos).abs() > SEEK_JUMP;
+        let expected = if was_playing {
+            self.pos + self.at.elapsed().as_secs_f64()
+        } else {
+            self.pos
+        };
+        let seek = same_track
+            && (position - expected).abs() > SEEK_JUMP
+            && (position - self.pos).abs() > SEEK_JUMP;
         self.pos = position;
         self.at = Instant::now();
         seek

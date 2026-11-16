@@ -1,6 +1,6 @@
-use crate::api::{quality_index, Quality, QUALITIES};
+use crate::api::{QUALITIES, Quality, quality_index};
 use crate::app::{Art, LastfmSession, Output, PendingPodcastProgress, PendingScrobbles};
-use crate::eq::{index as eq_index, Preset, PRESETS};
+use crate::eq::{PRESETS, Preset, index as eq_index};
 use crate::queue::Repeat;
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -27,8 +27,11 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Config {
         Config {
-            token: None, settings: Settings::default(), covers: true,
-            lastfm_queue: PendingScrobbles::default(), podcast_progress: PendingPodcastProgress::default(),
+            token: None,
+            settings: Settings::default(),
+            covers: true,
+            lastfm_queue: PendingScrobbles::default(),
+            podcast_progress: PendingPodcastProgress::default(),
         }
     }
 }
@@ -66,6 +69,9 @@ pub struct Settings {
     /// The progress bar shows the time left instead of the track's length.
     pub remaining_time: bool,
     pub show_audio_info: bool,
+    pub ynison: bool,
+    pub autoplay: bool,
+    pub ynison_device_id: String,
     /// The connected Last.fm account; its session key is a secret like the token.
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub lastfm: Option<LastfmSession>,
@@ -88,6 +94,9 @@ impl Default for Settings {
             hide_account: false,
             remaining_time: false,
             show_audio_info: false,
+            ynison: false,
+            autoplay: false,
+            ynison_device_id: String::new(),
             lastfm: None,
         }
     }
@@ -116,7 +125,10 @@ fn by_id<S: Serializer>(v: &impl Id, s: S) -> Result<S::Ok, S::Error> {
 
 /// The id as a string; anything else is no id (and gets the default).
 fn id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    Ok(serde_json::Value::deserialize(d)?.as_str().unwrap_or_default().to_string())
+    Ok(serde_json::Value::deserialize(d)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// An unknown preset is the flat one.
@@ -176,15 +188,23 @@ impl Config {
     }
 
     fn load_from(path: &Path) -> Config {
-        let Ok(s) = std::fs::read_to_string(path) else { return Config::default() };
+        let Ok(s) = std::fs::read_to_string(path) else {
+            return Config::default();
+        };
         match serde_json::from_str(&s) {
             Ok(cfg) => cfg,
             Err(e) => {
                 let bak = path.with_extension("json.bak");
                 eprintln!("ymusic: не удалось прочитать {}: {e}", path.display());
                 match std::fs::rename(path, &bak) {
-                    Ok(()) => eprintln!("ymusic: файл сохранён как {}, используются настройки по умолчанию", bak.display()),
-                    Err(e) => eprintln!("ymusic: не удалось переименовать его в {}: {e}", bak.display()),
+                    Ok(()) => eprintln!(
+                        "ymusic: файл сохранён как {}, используются настройки по умолчанию",
+                        bak.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "ymusic: не удалось переименовать его в {}: {e}",
+                        bak.display()
+                    ),
                 }
                 Config::default()
             }
@@ -205,7 +225,11 @@ impl Config {
         let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let tmp = target.with_extension("json.tmp");
         let _ = std::fs::remove_file(&tmp);
-        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
         f.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
         f.sync_all()?;
         std::fs::rename(&tmp, &target)?;
@@ -224,7 +248,12 @@ pub struct SaveState {
 
 impl SaveState {
     pub fn new(saved: &Settings) -> Self {
-        Self { desired: saved.clone(), queue_revision: 0, due: None, failed: false }
+        Self {
+            desired: saved.clone(),
+            queue_revision: 0,
+            due: None,
+            failed: false,
+        }
     }
     pub fn observe(&mut self, settings: Settings, queue_revision: u64, now: std::time::Instant) {
         if settings != self.desired || queue_revision != self.queue_revision {
@@ -298,17 +327,38 @@ mod tests {
         assert!(!cfg.settings.show_audio_info);
         let audio: Settings = serde_json::from_str(r#"{"show_audio_info":true}"#).unwrap();
         assert!(audio.show_audio_info);
-        assert_eq!(serde_json::to_value(&audio).unwrap()["show_audio_info"], true);
-        assert!(cfg.settings.podcast_all, "older configs default to the whole episode list");
+        assert_eq!(
+            serde_json::to_value(&audio).unwrap()["show_audio_info"],
+            true
+        );
+        assert!(
+            cfg.settings.podcast_all,
+            "older configs default to the whole episode list"
+        );
         let single: Settings = serde_json::from_str(r#"{"podcast_all":false}"#).unwrap();
         assert!(!single.podcast_all);
         assert_eq!(serde_json::to_value(&single).unwrap()["podcast_all"], false);
         let s = &cfg.settings;
-        assert_eq!((s.volume, s.art, s.eq.id, s.quality.id, s.repeat), (40, Some(Art::Spectrum), "laptop", "lq", Repeat::One));
-        assert!(s.finish_track && s.web_api && !s.icons && s.crossfade == 5 && s.hide_account && s.remaining_time);
-        assert!(s.lastfm.as_ref().is_some_and(|l| l.name == "me" && l.key == "sk"));
+        assert_eq!(
+            (s.volume, s.art, s.eq.id, s.quality.id, s.repeat),
+            (40, Some(Art::Spectrum), "laptop", "lq", Repeat::One)
+        );
+        assert!(
+            s.finish_track
+                && s.web_api
+                && !s.icons
+                && s.crossfade == 5
+                && s.hide_account
+                && s.remaining_time
+        );
+        assert!(
+            s.lastfm
+                .as_ref()
+                .is_some_and(|l| l.name == "me" && l.key == "sk")
+        );
         assert_eq!(s.output, crate::app::Output::Pulse);
-        let back: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(back["art"], "spectrum");
         assert_eq!(back["eq"], "laptop");
         assert_eq!(back["quality"], "lq");
@@ -318,7 +368,10 @@ mod tests {
 
         let lossless: Settings = serde_json::from_str(r#"{"quality":"lossless"}"#).unwrap();
         assert_eq!(lossless.quality.id, "lossless");
-        assert_eq!(serde_json::to_value(&lossless).unwrap()["quality"], "lossless");
+        assert_eq!(
+            serde_json::to_value(&lossless).unwrap()["quality"],
+            "lossless"
+        );
 
         // Stale or empty values, as older versions wrote them: defaults, the token stays.
         let cfg: Config =
@@ -326,7 +379,10 @@ mod tests {
         assert_eq!(cfg.token.as_deref(), Some("t"));
         assert!(cfg.settings == Settings::default());
         assert!(!cfg.covers, "the old switch is still read");
-        assert!(!serde_json::to_string(&cfg).unwrap().contains("covers"), "and not written back");
+        assert!(
+            !serde_json::to_string(&cfg).unwrap().contains("covers"),
+            "and not written back"
+        );
         // A missing file: covers are on.
         assert!(Config::default().covers);
     }
@@ -353,12 +409,30 @@ mod tests {
         let link = d.join("config.json");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let cfg = Config { token: Some("t".into()), settings: Settings { volume: 120, ..Settings::default() }, ..Config::default() };
+        let cfg = Config {
+            token: Some("t".into()),
+            settings: Settings {
+                volume: 120,
+                ..Settings::default()
+            },
+            ..Config::default()
+        };
         cfg.save_to(&link).unwrap();
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::metadata(&real).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let back = Config::load_from(&link);
-        assert_eq!((back.token.as_deref(), back.settings.volume), (Some("t"), 120));
+        assert_eq!(
+            (back.token.as_deref(), back.settings.volume),
+            (Some("t"), 120)
+        );
         assert!(!d.join("real.json.tmp").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -373,17 +447,28 @@ mod save_tests {
         let dir = std::env::temp_dir().join(format!("ymusic-outbox-{}", crate::api::random_uuid()));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("config.json");
-        let cfg = Config { lastfm_queue: PendingScrobbles {
-            account: "me".into(),
-            tracks: vec![crate::api::lastfm::Scrobble {
-                artist: "a".into(), track: "t".into(), album: String::new(), duration: 100, timestamp: 1,
-            }],
-        }, ..Config::default() };
+        let cfg = Config {
+            lastfm_queue: PendingScrobbles {
+                account: "me".into(),
+                tracks: vec![crate::api::lastfm::Scrobble {
+                    artist: "a".into(),
+                    track: "t".into(),
+                    album: String::new(),
+                    duration: 100,
+                    timestamp: 1,
+                }],
+            },
+            ..Config::default()
+        };
         cfg.save_to(&path).unwrap();
         assert!(Config::load_from(&path).lastfm_queue == cfg.lastfm_queue);
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        let malformed: Config = serde_json::from_str(r#"{"token":"t","lastfm_queue":"bad"}"#).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let malformed: Config =
+            serde_json::from_str(r#"{"token":"t","lastfm_queue":"bad"}"#).unwrap();
         assert_eq!(malformed.token.as_deref(), Some("t"));
         assert!(malformed.lastfm_queue.tracks.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
@@ -394,31 +479,50 @@ mod save_tests {
         let mut cfg = Config::default();
         let mut app = crate::app::App::for_test();
         app.volume = f64::from(cfg.settings.volume);
-        let run = crate::RunOnly { icons: None, output: None };
+        let run = crate::RunOnly {
+            icons: None,
+            output: None,
+        };
         let now = Instant::now();
         let mut saving = SaveState::new(&cfg.settings);
         app.on_msg(crate::app::Msg::Remote(crate::media::Remote::Volume(25.)));
-        app.on_msg(crate::app::Msg::Remote(crate::media::Remote::Repeat(crate::queue::Repeat::One)));
+        app.on_msg(crate::app::Msg::Remote(crate::media::Remote::Repeat(
+            crate::queue::Repeat::One,
+        )));
         saving.observe(crate::settings_of(&app, &cfg.settings, run), 0, now);
         assert!(!saving.ready(now));
         assert!(saving.ready(now + Duration::from_secs(2)));
         assert!(
             saving
-                .flush(&mut cfg, PendingScrobbles::default(), PendingPodcastProgress::default(), now + Duration::from_secs(2), |_| anyhow::bail!(
-                    "disk full"
-                ))
+                .flush(
+                    &mut cfg,
+                    PendingScrobbles::default(),
+                    PendingPodcastProgress::default(),
+                    now + Duration::from_secs(2),
+                    |_| anyhow::bail!("disk full")
+                )
                 .is_err()
         );
         assert_eq!(cfg.settings.volume, 70);
-        saving.observe(crate::settings_of(&app, &cfg.settings, run), 0, now + Duration::from_secs(3));
+        saving.observe(
+            crate::settings_of(&app, &cfg.settings, run),
+            0,
+            now + Duration::from_secs(3),
+        );
         assert!(!saving.ready(now + Duration::from_secs(6)));
         assert!(saving.ready(now + Duration::from_secs(7)));
         saving
-            .flush(&mut cfg, PendingScrobbles::default(), PendingPodcastProgress::default(), now + Duration::from_secs(7), |c| {
-                assert_eq!(c.settings.volume, 25);
-                assert_eq!(c.settings.repeat, crate::queue::Repeat::One);
-                Ok(())
-            })
+            .flush(
+                &mut cfg,
+                PendingScrobbles::default(),
+                PendingPodcastProgress::default(),
+                now + Duration::from_secs(7),
+                |c| {
+                    assert_eq!(c.settings.volume, 25);
+                    assert_eq!(c.settings.repeat, crate::queue::Repeat::One);
+                    Ok(())
+                },
+            )
             .unwrap();
         assert!(saving.wait(now + Duration::from_secs(8)).is_none());
     }

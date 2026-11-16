@@ -4,11 +4,11 @@ pub mod lastfm;
 mod podcast;
 pub use podcast::{Podcast, PodcastProgress, StreamProgress, TrackKind};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Sha256;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,10 +31,21 @@ fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Result<R> + Sync) -
         let f = &f;
         let handles: Vec<_> = (0..workers)
             .map(|w| {
-                s.spawn(move || items.iter().enumerate().skip(w).step_by(workers).map(|(i, it)| (i, f(it))).collect::<Vec<_>>())
+                s.spawn(move || {
+                    items
+                        .iter()
+                        .enumerate()
+                        .skip(w)
+                        .step_by(workers)
+                        .map(|(i, it)| (i, f(it)))
+                        .collect::<Vec<_>>()
+                })
             })
             .collect();
-        handles.into_iter().flat_map(|h| h.join().expect("поток запроса упал")).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("поток запроса упал"))
+            .collect()
     });
     done.sort_by_key(|(i, _)| *i);
     done.into_iter().map(|(_, r)| r).collect()
@@ -64,9 +75,21 @@ pub struct Quality {
 }
 
 pub const QUALITIES: &[Quality] = &[
-    Quality { id: "lq", name: "Экономия трафика", note: "≈64 кбит/с" },
-    Quality { id: "nq", name: "Обычное качество", note: "≈192 кбит/с" },
-    Quality { id: "lossless", name: "Без потерь", note: "FLAC, если доступен" },
+    Quality {
+        id: "lq",
+        name: "Экономия трафика",
+        note: "≈64 кбит/с",
+    },
+    Quality {
+        id: "nq",
+        name: "Обычное качество",
+        note: "≈192 кбит/с",
+    },
+    Quality {
+        id: "lossless",
+        name: "Без потерь",
+        note: "FLAC, если доступен",
+    },
 ];
 
 /// Index of the quality with this id (normal quality if unknown).
@@ -147,7 +170,8 @@ impl Track {
             } else {
                 "Неизвестный исполнитель".into()
             },
-            main_artist: id_str(&first["id"]).map(|id| (id, first["name"].as_str().unwrap_or("").to_string())),
+            main_artist: id_str(&first["id"])
+                .map(|id| (id, first["name"].as_str().unwrap_or("").to_string())),
             album: album["title"].as_str().unwrap_or("").to_string(),
             duration_ms: v["durationMs"].as_u64().unwrap_or(0),
             available: v["available"].as_bool().unwrap_or(true),
@@ -165,7 +189,13 @@ impl Track {
 }
 
 /// Yandex Music domains a track link may point to.
-const MUSIC_HOSTS: [&str; 5] = ["music.yandex.ru", "music.yandex.com", "music.yandex.by", "music.yandex.kz", "music.yandex.uz"];
+const MUSIC_HOSTS: [&str; 5] = [
+    "music.yandex.ru",
+    "music.yandex.com",
+    "music.yandex.by",
+    "music.yandex.kz",
+    "music.yandex.uz",
+];
 
 /// What a Yandex Music link points to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,7 +204,10 @@ pub enum Link {
     Track(String),
     Album(String),
     /// `/users/<owner>/playlists/<kind>`; the owner may be a login or a uid.
-    Playlist { owner: String, kind: String },
+    Playlist {
+        owner: String,
+        kind: String,
+    },
     /// `/playlists/<uuid>` (newer links, optionally with a `lk.` style prefix).
     PlaylistUuid(String),
 }
@@ -185,27 +218,47 @@ pub enum Link {
 pub fn parse_link(url: &str) -> Result<Link, &'static str> {
     let url = url.trim();
     let url = url.split(['?', '#']).next().unwrap_or("");
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
     let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     if !MUSIC_HOSTS.contains(&host.to_ascii_lowercase().as_str()) {
         return Err("Это не ссылка на Яндекс Музыку");
     }
     let num = |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    let login = |s: &&str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b));
-    let uuid = |s: &str| {
-        let s = s.split_once('.').filter(|(p, _)| p.bytes().all(|b| b.is_ascii_alphabetic())).map_or(s, |(_, u)| u);
-        (s.len() >= 32 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then(|| s.to_string())
+    let login = |s: &&str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
     };
-    match path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>()[..] {
+    let uuid = |s: &str| {
+        let s = s
+            .split_once('.')
+            .filter(|(p, _)| p.bytes().all(|b| b.is_ascii_alphabetic()))
+            .map_or(s, |(_, u)| u);
+        (s.len() >= 32 && s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+            .then(|| s.to_string())
+    };
+    match path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()[..]
+    {
         ["album", a, "track", t] if num(&a) && num(&t) => Ok(Link::Track(format!("{t}:{a}"))),
         ["track", t] if num(&t) => Ok(Link::Track(t.to_string())),
         // An uploaded (UGC) track.
-        ["track", t] => uuid(t).map(Link::Track).ok_or("Ссылка не на трек, альбом или плейлист"),
+        ["track", t] => uuid(t)
+            .map(Link::Track)
+            .ok_or("Ссылка не на трек, альбом или плейлист"),
         ["album", a] if num(&a) => Ok(Link::Album(a.to_string())),
-        ["users", o, "playlists", k] if login(&o) && num(&k) => {
-            Ok(Link::Playlist { owner: o.to_string(), kind: k.to_string() })
-        }
-        ["playlists", u] => uuid(u).map(Link::PlaylistUuid).ok_or("Ссылка не на трек, альбом или плейлист"),
+        ["users", o, "playlists", k] if login(&o) && num(&k) => Ok(Link::Playlist {
+            owner: o.to_string(),
+            kind: k.to_string(),
+        }),
+        ["playlists", u] => uuid(u)
+            .map(Link::PlaylistUuid)
+            .ok_or("Ссылка не на трек, альбом или плейлист"),
         _ => Err("Ссылка не на трек, альбом или плейлист"),
     }
 }
@@ -213,7 +266,11 @@ pub fn parse_link(url: &str) -> Result<Link, &'static str> {
 /// `avatars.yandex.net/get-music-content/…/%%` → full https URL of a 400x400 image.
 pub fn cover_url(uri: &str) -> String {
     let uri = uri.replace("%%", "400x400");
-    if uri.starts_with("http") { uri } else { format!("https://{uri}") }
+    if uri.starts_with("http") {
+        uri
+    } else {
+        format!("https://{uri}")
+    }
 }
 
 fn id_str(v: &Value) -> Option<String> {
@@ -292,7 +349,9 @@ pub fn tls_config() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
-            let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            let mut roots = rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
             // Unreadable or broken system certificates are skipped: the built-in ones remain.
             roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
             let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -329,7 +388,10 @@ pub struct ApiError {
 
 impl ApiError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> ApiError {
-        ApiError { kind, message: message.into() }
+        ApiError {
+            kind,
+            message: message.into(),
+        }
     }
 
     /// Tells the kind of an error from a request (`handle`, ureq) or anything else.
@@ -355,7 +417,10 @@ impl ApiError {
 
     /// The server could not be reached or could not answer now: worth trying again later.
     pub fn is_network(&self) -> bool {
-        matches!(self.kind, ErrorKind::Network | ErrorKind::RateLimited | ErrorKind::Http(500..=599))
+        matches!(
+            self.kind,
+            ErrorKind::Network | ErrorKind::RateLimited | ErrorKind::Http(500..=599)
+        )
     }
 }
 
@@ -405,7 +470,10 @@ fn handle(r: Sent) -> Result<Value> {
                 })
                 .unwrap_or_else(|| body.chars().take(200).collect());
             Err(match code {
-                401 => ApiError::new(ErrorKind::Unauthorized, format!("HTTP 401: токен недействителен, выполните `ymusic login` ({msg})")),
+                401 => ApiError::new(
+                    ErrorKind::Unauthorized,
+                    format!("HTTP 401: токен недействителен, выполните `ymusic login` ({msg})"),
+                ),
                 429 => ApiError::new(ErrorKind::RateLimited, format!("HTTP 429: {msg}")),
                 _ => ApiError::new(ErrorKind::Http(code), format!("HTTP {code}: {msg}")),
             }
@@ -423,13 +491,22 @@ impl Api {
             .user_agent("Yandex-Music-API")
             .tls_config(tls_config())
             .build();
-        Api { agent, token: token.to_string(), uid: String::new(), web: false, less_ai: false }
+        Api {
+            agent,
+            token: token.to_string(),
+            uid: String::new(),
+            web: false,
+            less_ai: false,
+        }
     }
 
     fn req(&self, method: &str, path: &str, query: &[(&str, &str)]) -> ureq::Request {
         let mut r = self
             .agent
-            .request(method, &format!("{}{path}", if self.web { WEB_BASE } else { BASE }))
+            .request(
+                method,
+                &format!("{}{path}", if self.web { WEB_BASE } else { BASE }),
+            )
             .set("Authorization", &format!("OAuth {}", self.token))
             .set("Accept-Language", "ru");
         if self.web {
@@ -470,7 +547,11 @@ impl Api {
     }
 
     fn post_form(&self, path: &str, form: &[(&str, &str)]) -> Result<Value> {
-        self.result(|| self.req("POST", path, &[]).send_form(form).map_err(Box::new))
+        self.result(|| {
+            self.req("POST", path, &[])
+                .send_form(form)
+                .map_err(Box::new)
+        })
     }
 
     /// POST with the parameters in the query and no body, as the website sends most changes.
@@ -488,7 +569,11 @@ impl Api {
     }
 
     fn post_json(&self, path: &str, query: &[(&str, &str)], body: Value) -> Result<Value> {
-        self.result(|| self.req("POST", path, query).send_json(body.clone()).map_err(Box::new))
+        self.result(|| {
+            self.req("POST", path, query)
+                .send_json(body.clone())
+                .map_err(Box::new)
+        })
     }
 
     // ---------------------------------------------------------------- account
@@ -496,7 +581,9 @@ impl Api {
     pub fn account_status(&mut self) -> Result<Account> {
         if self.web {
             let r = self.get("/account/about", &[])?;
-            let uid = id_str(&r["uid"]).ok_or_else(|| anyhow!("не удалось получить uid аккаунта (токен недействителен?)"))?;
+            let uid = id_str(&r["uid"]).ok_or_else(|| {
+                anyhow!("не удалось получить uid аккаунта (токен недействителен?)")
+            })?;
             self.uid = uid.clone();
             return Ok(Account {
                 uid,
@@ -507,12 +594,17 @@ impl Api {
         }
         let r = self.get("/account/status", &[])?;
         let acc = &r["account"];
-        let uid = id_str(&acc["uid"]).ok_or_else(|| anyhow!("не удалось получить uid аккаунта (токен недействителен?)"))?;
+        let uid = id_str(&acc["uid"])
+            .ok_or_else(|| anyhow!("не удалось получить uid аккаунта (токен недействителен?)"))?;
         self.uid = uid.clone();
         Ok(Account {
             uid,
             login: acc["login"].as_str().unwrap_or("").to_string(),
-            name: acc["displayName"].as_str().or(acc["fullName"].as_str()).unwrap_or("").to_string(),
+            name: acc["displayName"]
+                .as_str()
+                .or(acc["fullName"].as_str())
+                .unwrap_or("")
+                .to_string(),
             has_plus: r["plus"]["hasPlus"].as_bool().unwrap_or(false),
         })
     }
@@ -520,11 +612,19 @@ impl Api {
     /// «Меньше ИИ-музыки»: an account setting, recommendations mix in fewer AI-generated tracks.
     pub fn ai_reduction(&self) -> Result<bool> {
         let r = self.get("/account/settings", &[])?;
-        r["aiContentReductionEnabled"].as_bool().ok_or_else(|| anyhow!("нет aiContentReductionEnabled"))
+        r["aiContentReductionEnabled"]
+            .as_bool()
+            .ok_or_else(|| anyhow!("нет aiContentReductionEnabled"))
     }
 
     pub fn set_ai_reduction(&self, on: bool) -> Result<()> {
-        self.post_change("/account/settings", &[("aiContentReductionEnabled", if on { "true" } else { "false" })])?;
+        self.post_change(
+            "/account/settings",
+            &[(
+                "aiContentReductionEnabled",
+                if on { "true" } else { "false" },
+            )],
+        )?;
         Ok(())
     }
 
@@ -535,11 +635,21 @@ impl Api {
         let parts = parallel(&chunks, |chunk| {
             let joined = chunk.join(",");
             let r = if self.web {
-                self.post_form("/tracks", &[("trackIds", &joined), ("removeDuplicates", "false")])?
+                self.post_form(
+                    "/tracks",
+                    &[("trackIds", &joined), ("removeDuplicates", "false")],
+                )?
             } else {
-                self.post_form("/tracks", &[("track-ids", &joined), ("with-positions", "false")])?
+                self.post_form(
+                    "/tracks",
+                    &[("track-ids", &joined), ("with-positions", "false")],
+                )?
             };
-            Ok(r.as_array().into_iter().flatten().filter_map(Track::from_json).collect::<Vec<_>>())
+            Ok(r.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Track::from_json)
+                .collect::<Vec<_>>())
         })?;
         Ok(parts.into_iter().flatten().collect())
     }
@@ -552,20 +662,44 @@ impl Api {
         if self.web {
             let r = self.get(
                 "/search/instant/mixed",
-                &[("text", text), ("type", "track"), ("page", &page), ("pageSize", &size), ("nocorrect", "false")],
+                &[
+                    ("text", text),
+                    ("type", "track"),
+                    ("page", &page),
+                    ("pageSize", &size),
+                    ("nocorrect", "false"),
+                ],
             )?;
-            let tracks: Vec<Track> =
-                r["results"].as_array().into_iter().flatten().filter_map(|it| Track::from_json(&it["track"])).collect();
+            let tracks: Vec<Track> = r["results"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|it| Track::from_json(&it["track"]))
+                .collect();
             let last = r["lastPage"].as_bool().unwrap_or(true) || tracks.is_empty();
             let total = last.then(|| n * SEARCH_PAGE + tracks.len());
             return Ok((tracks, total));
         }
         let r = self.get(
             "/search",
-            &[("text", text), ("type", "track"), ("page", &page), ("page-size", &size), ("nocorrect", "false")],
+            &[
+                ("text", text),
+                ("type", "track"),
+                ("page", &page),
+                ("page-size", &size),
+                ("nocorrect", "false"),
+            ],
         )?;
-        let tracks = r["tracks"]["results"].as_array().into_iter().flatten().filter_map(Track::from_json).collect();
-        Ok((tracks, Some(r["tracks"]["total"].as_u64().unwrap_or(0) as usize)))
+        let tracks = r["tracks"]["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Track::from_json)
+            .collect();
+        Ok((
+            tracks,
+            Some(r["tracks"]["total"].as_u64().unwrap_or(0) as usize),
+        ))
     }
 
     /// Tracks of an artist, most popular first.
@@ -576,15 +710,27 @@ impl Api {
         let page = |n: usize| -> Result<(Vec<Track>, usize)> {
             let (page, size) = (n.to_string(), PAGE.to_string());
             let size_key = if self.web { "pageSize" } else { "page-size" };
-            let r = self.get(&format!("/artists/{artist_id}/tracks"), &[("page", &page), (size_key, &size)])?;
-            let tracks = r["tracks"].as_array().into_iter().flatten().filter_map(Track::from_json).collect();
+            let r = self.get(
+                &format!("/artists/{artist_id}/tracks"),
+                &[("page", &page), (size_key, &size)],
+            )?;
+            let tracks = r["tracks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Track::from_json)
+                .collect();
             Ok((tracks, r["pager"]["total"].as_u64().unwrap_or(0) as usize))
         };
         // The first page tells how many there are; the rest are fetched together.
         let (mut out, total) = page(0)?;
         if out.len() == PAGE {
             let rest: Vec<usize> = (1..total.min(MAX).div_ceil(PAGE)).collect();
-            out.extend(parallel(&rest, |&n| page(n).map(|(t, _)| t))?.into_iter().flatten());
+            out.extend(
+                parallel(&rest, |&n| page(n).map(|(t, _)| t))?
+                    .into_iter()
+                    .flatten(),
+            );
         }
         out.truncate(MAX);
         Ok(out)
@@ -614,7 +760,9 @@ impl Api {
             .flatten()
             .filter_map(|p| {
                 Some(Playlist {
-                    owner: id_str(&p["owner"]["uid"]).or_else(|| id_str(&p["uid"])).unwrap_or_else(|| self.uid.clone()),
+                    owner: id_str(&p["owner"]["uid"])
+                        .or_else(|| id_str(&p["uid"]))
+                        .unwrap_or_else(|| self.uid.clone()),
                     kind: id_str(&p["kind"])?,
                     title: p["title"].as_str().unwrap_or("Без названия").to_string(),
                     track_count: p["trackCount"].as_u64().unwrap_or(0),
@@ -635,7 +783,9 @@ impl Api {
     /// Playlist from a link: title and tracks in playlist order.
     pub fn linked_playlist(&self, link: &Link) -> Result<(String, Vec<Track>)> {
         match link {
-            Link::Playlist { owner, kind } => self.playlist_at(&format!("/users/{owner}/playlists/{kind}")),
+            Link::Playlist { owner, kind } => {
+                self.playlist_at(&format!("/users/{owner}/playlists/{kind}"))
+            }
             Link::PlaylistUuid(uuid) => self.playlist_at(&format!("/playlist/{uuid}")),
             _ => anyhow::bail!("ссылка не на плейлист"),
         }
@@ -645,8 +795,14 @@ impl Api {
     fn playlist_at(&self, path: &str) -> Result<(String, Vec<Track>)> {
         let r = self.get(path, &[])?;
         let title = r["title"].as_str().unwrap_or("").to_string();
-        let items = r["tracks"].as_array().map(Vec::as_slice).unwrap_or_default();
-        let full: Option<Vec<Track>> = items.iter().map(|t| Track::from_json(&t["track"])).collect();
+        let items = r["tracks"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let full: Option<Vec<Track>> = items
+            .iter()
+            .map(|t| Track::from_json(&t["track"]))
+            .collect();
         if let Some(tracks) = full {
             return Ok((title, tracks));
         }
@@ -657,13 +813,24 @@ impl Api {
 
     /// Creates an empty private playlist of the current user.
     pub fn create_playlist(&self, title: &str) -> Result<Playlist> {
-        let r = self.post_change(&format!("/users/{}/playlists/create", self.uid), &[("title", title), ("visibility", "private")])?;
+        let r = self.post_change(
+            &format!("/users/{}/playlists/create", self.uid),
+            &[("title", title), ("visibility", "private")],
+        )?;
         let kind = id_str(&r["kind"]).context("сервер не сообщил номер плейлиста")?;
-        Ok(Playlist { owner: self.uid.clone(), kind, title: title.to_string(), track_count: 0 })
+        Ok(Playlist {
+            owner: self.uid.clone(),
+            kind,
+            title: title.to_string(),
+            track_count: 0,
+        })
     }
 
     pub fn rename_playlist(&self, pl: &Playlist, title: &str) -> Result<()> {
-        self.post_change(&format!("{}/name", Self::playlist_path(pl)), &[("value", title)])?;
+        self.post_change(
+            &format!("{}/name", Self::playlist_path(pl)),
+            &[("value", title)],
+        )?;
         Ok(())
     }
 
@@ -676,7 +843,10 @@ impl Api {
     fn change_playlist(&self, pl: &Playlist, revision: u64, diff: Value) -> Result<()> {
         let revision = revision.to_string();
         let diff = diff.to_string();
-        self.post_form(&format!("{}/change-relative", Self::playlist_path(pl)), &[("revision", &revision), ("diff", &diff)])?;
+        self.post_form(
+            &format!("{}/change-relative", Self::playlist_path(pl)),
+            &[("revision", &revision), ("diff", &diff)],
+        )?;
         Ok(())
     }
 
@@ -691,7 +861,11 @@ impl Api {
         if let Some(a) = &track.album_id {
             t["albumId"] = json!(a);
         }
-        self.change_playlist(pl, revision, json!([{"op": "insert", "at": at, "tracks": [t]}]))
+        self.change_playlist(
+            pl,
+            revision,
+            json!([{"op": "insert", "at": at, "tracks": [t]}]),
+        )
     }
 
     /// Removes the track at `index`, after checking it is still `track_id` (the playlist may have changed).
@@ -703,7 +877,11 @@ impl Api {
         if found.as_deref() != Some(track_id) {
             bail!("плейлист изменился, обновите его (R)");
         }
-        self.change_playlist(pl, revision, json!([{"op": "delete", "from": index, "to": index + 1}]))
+        self.change_playlist(
+            pl,
+            revision,
+            json!([{"op": "delete", "from": index, "to": index + 1}]),
+        )
     }
 
     // ---------------------------------------------------------------- likes
@@ -712,7 +890,9 @@ impl Api {
     /// The music-only view is filtered by the caller; playlist 3 does not expose every episode like.
     pub fn liked(&self) -> Result<Vec<String>> {
         let r = self.get(&format!("/users/{}/likes/tracks", self.uid), &[])?;
-        let tracks = r["library"]["tracks"].as_array().context("нет списка лайков в ответе")?;
+        let tracks = r["library"]["tracks"]
+            .as_array()
+            .context("нет списка лайков в ответе")?;
         Ok(tracks.iter().filter_map(item_full_id).collect())
     }
 
@@ -731,7 +911,9 @@ impl Api {
         match (self.web, on) {
             (true, true) => self.post_query(&format!("{base}/add"), &[("track-id", &id)])?,
             (true, false) => self.post_query(&format!("{base}/{id}/remove"), &[])?,
-            (false, true) => self.post_form(&format!("{base}/add-multiple"), &[("track-ids", &id)])?,
+            (false, true) => {
+                self.post_form(&format!("{base}/add-multiple"), &[("track-ids", &id)])?
+            }
             (false, false) => self.post_form(&format!("{base}/remove"), &[("track-ids", &id)])?,
         };
         Ok(())
@@ -790,7 +972,11 @@ impl Api {
                 t
             })
             .collect();
-        WaveBatch { session_id: session, batch_id, tracks }
+        WaveBatch {
+            session_id: session,
+            batch_id,
+            tracks,
+        }
     }
 
     /// Starts a station. My Wave takes its settings (mood, character; `None` — the defaults): the
@@ -812,9 +998,16 @@ impl Api {
         }
         let body = json!({"seeds": seeds, "includeTracksInResponse": true, "includeWaveModel": false, "interactive": true});
         let session = self
-            .result(|| self.rotor_req("/rotor/session/new").send_json(body.clone()).map_err(Box::new))
+            .result(|| {
+                self.rotor_req("/rotor/session/new")
+                    .send_json(body.clone())
+                    .map_err(Box::new)
+            })
             .and_then(|r| {
-                let id = r["radioSessionId"].as_str().ok_or_else(|| anyhow!("нет radioSessionId"))?.to_string();
+                let id = r["radioSessionId"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("нет radioSessionId"))?
+                    .to_string();
                 let b = Self::parse_batch(&r, Some(id));
                 if b.tracks.is_empty() {
                     bail!("волна вернула пустой список");
@@ -823,15 +1016,24 @@ impl Api {
             });
         match session {
             Ok(b) => Ok(b),
-            Err(e) => self.station_tracks(station, None).map_err(|e2| anyhow!("{e:#}; legacy: {e2:#}")),
+            Err(e) => self
+                .station_tracks(station, None)
+                .map_err(|e2| anyhow!("{e:#}; legacy: {e2:#}")),
         }
     }
 
-    pub fn wave_more(&self, station: &str, session: Option<&str>, queue: &[String]) -> Result<WaveBatch> {
+    pub fn wave_more(
+        &self,
+        station: &str,
+        session: Option<&str>,
+        queue: &[String],
+    ) -> Result<WaveBatch> {
         match session {
             Some(id) => {
                 let r = self.result(|| {
-                    self.rotor_req(&format!("/rotor/session/{id}/tracks")).send_json(json!({"queue": queue})).map_err(Box::new)
+                    self.rotor_req(&format!("/rotor/session/{id}/tracks"))
+                        .send_json(json!({"queue": queue}))
+                        .map_err(Box::new)
                 })?;
                 Ok(Self::parse_batch(&r, Some(id.to_string())))
             }
@@ -849,17 +1051,34 @@ impl Api {
     }
 
     /// Sends a wave feedback event (`radioStarted`, `trackStarted`, `trackFinished`, `skip`, `like`, `dislike`...).
-    pub fn wave_feedback(&self, station: &str, session: Option<&str>, batch: &str, event: Value) -> Result<()> {
+    pub fn wave_feedback(
+        &self,
+        station: &str,
+        session: Option<&str>,
+        batch: &str,
+        event: Value,
+    ) -> Result<()> {
         match session {
             Some(id) => {
                 // The website's path ends with a slash.
                 let slash = if self.web { "/" } else { "" };
-                self.post_json(&format!("/rotor/session/{id}/feedback{slash}"), &[], json!({"event": event, "batchId": batch}))?;
+                self.post_json(
+                    &format!("/rotor/session/{id}/feedback{slash}"),
+                    &[],
+                    json!({"event": event, "batchId": batch}),
+                )?;
             }
             None => {
                 let ty = event["type"].as_str().unwrap_or("");
-                if matches!(ty, "radioStarted" | "trackStarted" | "trackFinished" | "skip") {
-                    let q: Vec<(&str, &str)> = if batch.is_empty() { vec![] } else { vec![("batch-id", batch)] };
+                if matches!(
+                    ty,
+                    "radioStarted" | "trackStarted" | "trackFinished" | "skip"
+                ) {
+                    let q: Vec<(&str, &str)> = if batch.is_empty() {
+                        vec![]
+                    } else {
+                        vec![("batch-id", batch)]
+                    };
                     self.post_json(&format!("/rotor/station/{station}/feedback"), &q, event)?;
                 }
             }
@@ -914,7 +1133,12 @@ impl Api {
     pub fn fetch_image(&self, url: &str) -> Result<image::DynamicImage> {
         use std::io::Read;
         let mut bytes = Vec::new();
-        self.agent.get(url).call()?.into_reader().take(10 << 20).read_to_end(&mut bytes)?;
+        self.agent
+            .get(url)
+            .call()?
+            .into_reader()
+            .take(10 << 20)
+            .read_to_end(&mut bytes)?;
         Ok(image::load_from_memory(&bytes)?)
     }
 
@@ -929,14 +1153,20 @@ impl Api {
         match self.file_info(track_id, quality) {
             // Uploaded tracks: here the server falls back to 192 kbit/s, the low quality (AAC 64)
             // is listed only by download-info.
-            Ok(info) if low && info.quality != "lq" => Ok(self.download_info(track_id, true).unwrap_or(info)),
+            Ok(info) if low && info.quality != "lq" => {
+                Ok(self.download_info(track_id, true).unwrap_or(info))
+            }
             Ok(info) => Ok(info),
             // A refused token is told as it is: the other method is refused too.
             Err(e) if ApiError::from_anyhow(&e).is_unauthorized() => Err(e),
             Err(e) => self.download_info(track_id, low).map_err(|e2| {
                 // Both messages, and the kind that tells whether to try again later.
                 let (first, second) = (ApiError::from_anyhow(&e), ApiError::from_anyhow(&e2));
-                let kind = if first.is_network() { first.kind } else { second.kind };
+                let kind = if first.is_network() {
+                    first.kind
+                } else {
+                    second.kind
+                };
                 ApiError::new(kind, format!("{e:#}; {e2:#}")).into()
             }),
         }
@@ -945,22 +1175,34 @@ impl Api {
     /// A stream from the older download-info: the best one, or with `low` the smallest AAC.
     fn download_info(&self, track_id: &str, low: bool) -> Result<FileInfo> {
         let r = self.get(&format!("/tracks/{track_id}/download-info"), &[])?;
-        let infos = r.as_array().ok_or_else(|| anyhow!("пустой download-info"))?;
+        let infos = r
+            .as_array()
+            .ok_or_else(|| anyhow!("пустой download-info"))?;
         let kbps = |i: &&Value| i["bitrateInKbps"].as_u64().unwrap_or(0);
-        let formats = infos.iter().filter(|i| matches!(i["codec"].as_str(), Some("mp3") | Some("aac")));
+        let formats = infos
+            .iter()
+            .filter(|i| matches!(i["codec"].as_str(), Some("mp3") | Some("aac")));
         let chosen = if low {
             formats.min_by_key(|i| (i["codec"] != "aac", kbps(i)))
         } else {
             formats.max_by_key(|i| (i["codec"] == "mp3", kbps(i)))
         };
         let best = chosen.ok_or_else(|| anyhow!("нет доступных форматов"))?;
-        let info_url = best["downloadInfoUrl"].as_str().ok_or_else(|| anyhow!("нет downloadInfoUrl"))?;
+        let info_url = best["downloadInfoUrl"]
+            .as_str()
+            .ok_or_else(|| anyhow!("нет downloadInfoUrl"))?;
         let xml = self.agent.get(info_url).call()?.into_string()?;
         let tag = |name: &str| -> Result<String> {
             let open = format!("<{name}>");
             let close = format!("</{name}>");
-            let s = xml.find(&open).ok_or_else(|| anyhow!("нет <{name}> в download-info"))? + open.len();
-            let e = xml[s..].find(&close).ok_or_else(|| anyhow!("битый download-info"))? + s;
+            let s = xml
+                .find(&open)
+                .ok_or_else(|| anyhow!("нет <{name}> в download-info"))?
+                + open.len();
+            let e = xml[s..]
+                .find(&close)
+                .ok_or_else(|| anyhow!("битый download-info"))?
+                + s;
             Ok(xml[s..e].to_string())
         };
         let (host, path, ts, s) = (tag("host")?, tag("path")?, tag("ts")?, tag("s")?);
@@ -976,20 +1218,37 @@ impl Api {
 
     fn file_info(&self, track_id: &str, quality: &str) -> Result<FileInfo> {
         let id = track_id.split(':').next().unwrap_or(track_id);
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)?
+            .as_secs()
+            .to_string();
         // Low quality exists only in mp4 containers: without `*-mp4` codecs the server falls back to 192 kbit/s.
         let (codecs, transports) = ("flac,flac-mp4,aac,he-aac,mp3,aac-mp4,he-aac-mp4", "raw");
-        let key = if self.web { WEB_FILE_INFO_KEY } else { FILE_INFO_KEY };
+        let key = if self.web {
+            WEB_FILE_INFO_KEY
+        } else {
+            FILE_INFO_KEY
+        };
         let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes())?;
         mac.update(format!("{ts}{id}{quality}{}{transports}", codecs.replace(',', "")).as_bytes());
         let sign = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
         let sign = sign.trim_end_matches('=');
         let r = self.get(
             "/get-file-info",
-            &[("ts", &ts), ("trackId", id), ("quality", quality), ("codecs", codecs), ("transports", transports), ("sign", sign)],
+            &[
+                ("ts", &ts),
+                ("trackId", id),
+                ("quality", quality),
+                ("codecs", codecs),
+                ("transports", transports),
+                ("sign", sign),
+            ],
         )?;
         let di = &r["downloadInfo"];
-        let url = di["url"].as_str().or(di["urls"][0].as_str()).context("get-file-info не вернул ссылку")?;
+        let url = di["url"]
+            .as_str()
+            .or(di["urls"][0].as_str())
+            .context("get-file-info не вернул ссылку")?;
         Ok(FileInfo {
             url: url.to_string(),
             quality: di["quality"].as_str().unwrap_or_default().to_string(),
@@ -1025,7 +1284,12 @@ pub fn category_name(ty: &str) -> &str {
 /// Built-in stations shown before (or instead of) the list from the API.
 /// «Моя волна» with the default settings.
 pub fn my_wave() -> Station {
-    Station { id: MY_WAVE.into(), name: "Моя волна".into(), category: "Моя волна".into(), settings: None }
+    Station {
+        id: MY_WAVE.into(),
+        name: "Моя волна".into(),
+        category: "Моя волна".into(),
+        settings: None,
+    }
 }
 
 pub fn default_stations() -> Vec<Station> {
@@ -1087,7 +1351,12 @@ pub fn default_stations() -> Vec<Station> {
     ];
     for (id, name) in items {
         let ty = id.split(':').next().unwrap();
-        v.push(Station { id: (*id).into(), name: (*name).into(), category: category_name(ty).into(), settings: None });
+        v.push(Station {
+            id: (*id).into(),
+            name: (*name).into(),
+            category: category_name(ty).into(),
+            settings: None,
+        });
     }
     v
 }
@@ -1109,7 +1378,10 @@ pub struct PlayContext {
 
 impl PlayContext {
     pub fn new(kind: &'static str, item: impl Into<String>) -> PlayContext {
-        PlayContext { kind, item: item.into() }
+        PlayContext {
+            kind,
+            item: item.into(),
+        }
     }
 }
 
@@ -1143,7 +1415,14 @@ pub fn random_uuid() -> String {
     bytes[6] = (bytes[6] & 0x0F) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3F) | 0x80; // RFC 4122 variant
     let h: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 /// A random number, not for cryptography. The standard library seeds `RandomState` from the
@@ -1151,7 +1430,9 @@ pub fn random_uuid() -> String {
 /// hashes nothing with a key nobody can guess.
 pub fn random_u64() -> u64 {
     use std::hash::{BuildHasher, Hasher};
-    std::collections::hash_map::RandomState::new().build_hasher().finish()
+    std::collections::hash_map::RandomState::new()
+        .build_hasher()
+        .finish()
 }
 
 /// A random number below `n` (> 0), without the bias of `% n`.
@@ -1160,7 +1441,9 @@ pub fn random_below(n: usize) -> usize {
 }
 
 pub fn iso_now() -> String {
-    let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = d.as_secs() as i64;
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     let z = days + 719_468;
@@ -1205,9 +1488,15 @@ mod tests {
         assert_eq!(t.artists, "A, B");
         assert_eq!(t.main_artist, None);
         let v = json!({"id": 1, "artists": [{"id": 42, "name": "A"}, {"id": 7, "name": "B"}]});
-        assert_eq!(Track::from_json(&v).unwrap().main_artist, Some(("42".into(), "A".into())));
+        assert_eq!(
+            Track::from_json(&v).unwrap().main_artist,
+            Some(("42".into(), "A".into()))
+        );
         assert_eq!(t.cover, None);
-        assert_eq!(cover_url("avatars.yandex.net/x/%%"), "https://avatars.yandex.net/x/400x400");
+        assert_eq!(
+            cover_url("avatars.yandex.net/x/%%"),
+            "https://avatars.yandex.net/x/400x400"
+        );
     }
 
     #[test]
@@ -1221,7 +1510,10 @@ mod tests {
         for _ in 0..60_000 {
             buckets[random_below(6)] += 1;
         }
-        assert!(buckets.iter().all(|&n| (9_000..11_000).contains(&n)), "{buckets:?}");
+        assert!(
+            buckets.iter().all(|&n| (9_000..11_000).contains(&n)),
+            "{buckets:?}"
+        );
         let id = random_uuid();
         assert_eq!((id.len(), &id[14..15]), (36, "4"));
         assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
@@ -1230,17 +1522,32 @@ mod tests {
 
     #[test]
     fn error_kinds() {
-        let refused = ureq::Response::new(401, "Unauthorized", r#"{"error": {"name": "session-expired"}}"#).unwrap();
+        let refused = ureq::Response::new(
+            401,
+            "Unauthorized",
+            r#"{"error": {"name": "session-expired"}}"#,
+        )
+        .unwrap();
         let e = handle(Err(Box::new(ureq::Error::Status(401, refused)))).unwrap_err();
         let a = ApiError::from_anyhow(&e);
         assert!(a.is_unauthorized());
-        assert_eq!(a.to_string(), "HTTP 401: токен недействителен, выполните `ymusic login` (session-expired)");
+        assert_eq!(
+            a.to_string(),
+            "HTTP 401: токен недействителен, выполните `ymusic login` (session-expired)"
+        );
         // With what it happened in: the kind stays, the message tells both.
         let a = ApiError::from_anyhow(&e.context("плейлисты"));
         assert!(a.is_unauthorized() && a.to_string().starts_with("плейлисты: HTTP 401"));
-        let e = handle(Err(Box::new(ureq::Error::Status(500, ureq::Response::new(500, "Oops", "boom").unwrap())))).unwrap_err();
+        let e = handle(Err(Box::new(ureq::Error::Status(
+            500,
+            ureq::Response::new(500, "Oops", "boom").unwrap(),
+        ))))
+        .unwrap_err();
         assert_eq!(ApiError::from_anyhow(&e).kind, ErrorKind::Http(500));
-        assert_eq!(ApiError::from_anyhow(&anyhow!("что-то")).kind, ErrorKind::Other);
+        assert_eq!(
+            ApiError::from_anyhow(&anyhow!("что-то")).kind,
+            ErrorKind::Other
+        );
         assert_eq!(ApiError::from("текст").to_string(), "текст");
     }
 
@@ -1253,10 +1560,13 @@ mod tests {
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|d| !d.is_empty())
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+            })
             .expect("HOME")
             .join("ymusic/config.json");
-        let v: Value = serde_json::from_str(&std::fs::read_to_string(config).expect("config")).expect("config");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(config).expect("config"))
+            .expect("config");
         v["token"].as_str().expect("token").to_string()
     }
 
@@ -1301,21 +1611,41 @@ mod tests {
     #[ignore]
     fn like_edit() {
         let ids = |api: &Api, kind: &str| -> Vec<String> {
-            let r = api.get(&format!("/users/{}/{kind}/tracks", api.uid), &[]).unwrap();
-            r["library"]["tracks"].as_array().unwrap().iter().filter_map(|t| id_str(&t["id"])).collect()
+            let r = api
+                .get(&format!("/users/{}/{kind}/tracks", api.uid), &[])
+                .unwrap();
+            r["library"]["tracks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| id_str(&t["id"]))
+                .collect()
         };
         for api in apis() {
             // A catalog track that is neither liked nor disliked.
-            let t = Track::from_json(&json!({"id": "39089632", "albums": [{"id": 60058}]})).unwrap();
-            assert!(!ids(&api, "likes").contains(&t.id) && !ids(&api, "dislikes").contains(&t.id), "{} отмечен", t.id);
+            let t =
+                Track::from_json(&json!({"id": "39089632", "albums": [{"id": 60058}]})).unwrap();
+            assert!(
+                !ids(&api, "likes").contains(&t.id) && !ids(&api, "dislikes").contains(&t.id),
+                "{} отмечен",
+                t.id
+            );
             api.set_like(&t, true).unwrap();
             let liked = ids(&api, "likes").contains(&t.id);
             api.set_like(&t, false).unwrap();
-            assert!(liked && !ids(&api, "likes").contains(&t.id), "web={}", api.web);
+            assert!(
+                liked && !ids(&api, "likes").contains(&t.id),
+                "web={}",
+                api.web
+            );
             api.set_dislike(&t, true).unwrap();
             let disliked = ids(&api, "dislikes").contains(&t.id);
             api.set_dislike(&t, false).unwrap();
-            assert!(disliked && !ids(&api, "dislikes").contains(&t.id), "web={}", api.web);
+            assert!(
+                disliked && !ids(&api, "dislikes").contains(&t.id),
+                "web={}",
+                api.web
+            );
         }
     }
 
@@ -1325,11 +1655,22 @@ mod tests {
     fn waves() {
         for api in apis() {
             let b = api.wave_start(MY_WAVE, Some(("calm", "favorite"))).unwrap();
-            assert!(b.session_id.is_some() && !b.tracks.is_empty(), "web={}", api.web);
+            assert!(
+                b.session_id.is_some() && !b.tracks.is_empty(),
+                "web={}",
+                api.web
+            );
             let queue: Vec<String> = b.tracks.iter().map(Track::full_id).collect();
-            let more = api.wave_more(MY_WAVE, b.session_id.as_deref(), &queue).unwrap();
+            let more = api
+                .wave_more(MY_WAVE, b.session_id.as_deref(), &queue)
+                .unwrap();
             assert!(!more.tracks.is_empty(), "web={}", api.web);
-            assert!(!api.wave_start("genre:rock", None).unwrap().tracks.is_empty());
+            assert!(
+                !api.wave_start("genre:rock", None)
+                    .unwrap()
+                    .tracks
+                    .is_empty()
+            );
             assert!(api.stations().unwrap().len() > 10);
         }
         // Back to the default settings of My Wave in the account (the mobile API keeps them there).
@@ -1351,9 +1692,18 @@ mod tests {
         assert_eq!(out, items.iter().map(|i| i * 10).collect::<Vec<_>>());
         assert!(peak.load(Ordering::SeqCst) <= super::PARALLEL);
 
-        let err = super::parallel(&items, |&i| if i == 5 || i == 17 { Err(anyhow!("bad {i}")) } else { Ok(i) });
+        let err = super::parallel(&items, |&i| {
+            if i == 5 || i == 17 {
+                Err(anyhow!("bad {i}"))
+            } else {
+                Ok(i)
+            }
+        });
         assert_eq!(err.unwrap_err().to_string(), "bad 5");
-        assert_eq!(super::parallel(&[] as &[usize], |&i| Ok(i)).unwrap(), Vec::<usize>::new());
+        assert_eq!(
+            super::parallel(&[] as &[usize], |&i| Ok(i)).unwrap(),
+            Vec::<usize>::new()
+        );
         assert_eq!(super::parallel(&[7], |&i| Ok(i)).unwrap(), [7]);
     }
 
@@ -1361,27 +1711,63 @@ mod tests {
     fn links() {
         let not_ym = Err("Это не ссылка на Яндекс Музыку");
         let other = Err("Ссылка не на трек, альбом или плейлист");
-        assert_eq!(parse_link("https://music.yandex.ru/album/9/track/123?utm_source=x&utm_medium=y"), Ok(Link::Track("123:9".into())));
-        assert_eq!(parse_link("  music.yandex.com/track/123/#top "), Ok(Link::Track("123".into())));
-        assert_eq!(parse_link("http://MUSIC.yandex.kz/album/9/track/123"), Ok(Link::Track("123:9".into())));
-        assert_eq!(parse_link("https://music.yandex.ru/album/9?activeTab=about"), Ok(Link::Album("9".into())));
+        assert_eq!(
+            parse_link("https://music.yandex.ru/album/9/track/123?utm_source=x&utm_medium=y"),
+            Ok(Link::Track("123:9".into()))
+        );
+        assert_eq!(
+            parse_link("  music.yandex.com/track/123/#top "),
+            Ok(Link::Track("123".into()))
+        );
+        assert_eq!(
+            parse_link("http://MUSIC.yandex.kz/album/9/track/123"),
+            Ok(Link::Track("123:9".into()))
+        );
+        assert_eq!(
+            parse_link("https://music.yandex.ru/album/9?activeTab=about"),
+            Ok(Link::Album("9".into()))
+        );
         assert_eq!(
             parse_link("https://music.yandex.ru/users/some.user-1/playlists/1002?utm_source=x"),
-            Ok(Link::Playlist { owner: "some.user-1".into(), kind: "1002".into() })
+            Ok(Link::Playlist {
+                owner: "some.user-1".into(),
+                kind: "1002".into()
+            })
         );
         let uuid = "e46028ae-ce60-430d-bf2c-7e7c78e2c682";
-        assert_eq!(parse_link(&format!("https://music.yandex.ru/playlists/{uuid}")), Ok(Link::PlaylistUuid(uuid.into())));
-        assert_eq!(parse_link(&format!("https://music.yandex.ru/playlists/lk.{uuid}?x=1")), Ok(Link::PlaylistUuid(uuid.into())));
-        assert_eq!(parse_link(&format!("https://music.yandex.ru/track/{uuid}")), Ok(Link::Track(uuid.into())));
-        assert_eq!(parse_link("https://music.yandex.ru.evil.com/track/1"), not_ym);
-        assert_eq!(parse_link("https://evil.com/?r=music.yandex.ru/track/1"), not_ym);
+        assert_eq!(
+            parse_link(&format!("https://music.yandex.ru/playlists/{uuid}")),
+            Ok(Link::PlaylistUuid(uuid.into()))
+        );
+        assert_eq!(
+            parse_link(&format!("https://music.yandex.ru/playlists/lk.{uuid}?x=1")),
+            Ok(Link::PlaylistUuid(uuid.into()))
+        );
+        assert_eq!(
+            parse_link(&format!("https://music.yandex.ru/track/{uuid}")),
+            Ok(Link::Track(uuid.into()))
+        );
+        assert_eq!(
+            parse_link("https://music.yandex.ru.evil.com/track/1"),
+            not_ym
+        );
+        assert_eq!(
+            parse_link("https://evil.com/?r=music.yandex.ru/track/1"),
+            not_ym
+        );
         assert_eq!(parse_link("https://user@music.yandex.ru/track/1"), not_ym);
         assert_eq!(parse_link("https://yandex.ru/track/1"), not_ym);
         assert_eq!(parse_link(""), not_ym);
         assert_eq!(parse_link("https://music.yandex.ru/artist/9"), other);
         assert_eq!(parse_link("https://music.yandex.ru/track/12a"), other);
-        assert_eq!(parse_link("https://music.yandex.ru/users/a/playlists/x"), other);
-        assert_eq!(parse_link("https://music.yandex.ru/playlists/../../x"), other);
+        assert_eq!(
+            parse_link("https://music.yandex.ru/users/a/playlists/x"),
+            other
+        );
+        assert_eq!(
+            parse_link("https://music.yandex.ru/playlists/../../x"),
+            other
+        );
     }
 
     /// Network test: needs a token (see `test_token`). Reads a playlist of the token's account.
@@ -1394,10 +1780,20 @@ mod tests {
     }
 
     fn linked_playlists_with(api: &Api) {
-        let r = api.get(&format!("/users/{}/playlists/list", api.uid), &[]).unwrap();
-        let p = r.as_array().unwrap().iter().find(|p| p["trackCount"].as_u64() > Some(0)).expect("non-empty playlist");
+        let r = api
+            .get(&format!("/users/{}/playlists/list", api.uid), &[])
+            .unwrap();
+        let p = r
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["trackCount"].as_u64() > Some(0))
+            .expect("non-empty playlist");
         let login = r[0]["owner"]["login"].as_str().unwrap().to_string();
-        let by_login = Link::Playlist { owner: login, kind: id_str(&p["kind"]).unwrap() };
+        let by_login = Link::Playlist {
+            owner: login,
+            kind: id_str(&p["kind"]).unwrap(),
+        };
         let by_uuid = Link::PlaylistUuid(p["playlistUuid"].as_str().unwrap().into());
         let (t1, a) = api.linked_playlist(&by_login).unwrap();
         let (t2, b) = api.linked_playlist(&by_uuid).unwrap();
@@ -1415,7 +1811,11 @@ mod tests {
             let (title, tracks) = api.album_tracks("3782599").unwrap();
             assert!(!title.is_empty());
             assert!(tracks.len() > 1, "{}", tracks.len());
-            assert!(tracks.iter().all(|t| t.album_id.as_deref() == Some("3782599")));
+            assert!(
+                tracks
+                    .iter()
+                    .all(|t| t.album_id.as_deref() == Some("3782599"))
+            );
         }
     }
 
@@ -1435,7 +1835,14 @@ mod tests {
             let (first, total) = api.search("сплин", 0).unwrap();
             assert_eq!(first.len(), SEARCH_PAGE);
             // The website API does not count the results.
-            assert!(if api.web { total.is_none() } else { total > Some(2 * SEARCH_PAGE) }, "{total:?}");
+            assert!(
+                if api.web {
+                    total.is_none()
+                } else {
+                    total > Some(2 * SEARCH_PAGE)
+                },
+                "{total:?}"
+            );
             let (second, _) = api.search("сплин", 1).unwrap();
             assert!(!second.is_empty());
             assert_ne!(first[0].id, second[0].id);
@@ -1452,8 +1859,14 @@ mod tests {
         for api in apis() {
             let lists = api.playlists().unwrap();
             assert!(!lists.is_empty());
-            let pl = lists.iter().find(|p| p.track_count > 0).expect("non-empty playlist");
-            assert_eq!(api.playlist_tracks(pl).unwrap().len() as u64, pl.track_count);
+            let pl = lists
+                .iter()
+                .find(|p| p.track_count > 0)
+                .expect("non-empty playlist");
+            assert_eq!(
+                api.playlist_tracks(pl).unwrap().len() as u64,
+                pl.track_count
+            );
         }
     }
 
@@ -1473,7 +1886,11 @@ mod tests {
         struct Cleanup<'a>(&'a Api, Playlist);
         impl Drop for Cleanup<'_> {
             fn drop(&mut self) {
-                if self.0.playlists().is_ok_and(|l| l.iter().any(|p| p.key() == self.1.key())) {
+                if self
+                    .0
+                    .playlists()
+                    .is_ok_and(|l| l.iter().any(|p| p.key() == self.1.key()))
+                {
                     let _ = self.0.delete_playlist(&self.1);
                 }
             }
@@ -1481,14 +1898,29 @@ mod tests {
         let _cleanup = Cleanup(api, pl.clone());
 
         api.rename_playlist(&pl, "ymusic-test 2").unwrap();
-        assert!(api.playlists().unwrap().iter().any(|p| p.key() == pl.key() && p.title == "ymusic-test 2"));
+        assert!(
+            api.playlists()
+                .unwrap()
+                .iter()
+                .any(|p| p.key() == pl.key() && p.title == "ymusic-test 2")
+        );
 
-        let catalog = Track::from_json(&json!({"id": "39089632", "albums": [{"id": 60058}]})).unwrap();
+        let catalog =
+            Track::from_json(&json!({"id": "39089632", "albums": [{"id": 60058}]})).unwrap();
         let ugc = Track::from_json(&json!({"id": "bfc384d6-bd20-47e0-89d7-7a8657a2236a"})).unwrap();
         api.add_to_playlist(&pl, &catalog).unwrap();
         api.add_to_playlist(&pl, &ugc).unwrap();
-        let ids = |api: &Api| api.playlist_tracks(&pl).unwrap().into_iter().map(|t| t.id).collect::<Vec<_>>();
-        assert_eq!(ids(api), ["39089632", "bfc384d6-bd20-47e0-89d7-7a8657a2236a"]);
+        let ids = |api: &Api| {
+            api.playlist_tracks(&pl)
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(api),
+            ["39089632", "bfc384d6-bd20-47e0-89d7-7a8657a2236a"]
+        );
 
         // A stale view (wrong track at the position) is refused and nothing changes.
         assert!(api.remove_from_playlist(&pl, 0, &ugc.id).is_err());
@@ -1512,7 +1944,12 @@ mod tests {
     fn qualities_with(api: &Api) {
         let lq = api.file_info("39089632", "lq").unwrap();
         let nq = api.file_info("39089632", "nq").unwrap();
-        assert!(lq.bitrate > 0 && lq.bitrate < nq.bitrate, "{} {}", lq.bitrate, nq.bitrate);
+        assert!(
+            lq.bitrate > 0 && lq.bitrate < nq.bitrate,
+            "{} {}",
+            lq.bitrate,
+            nq.bitrate
+        );
         let stream = api.stream_info("39089632:60058", "lq").unwrap();
         assert!(stream.url.starts_with("https://"));
         assert!(stream.bitrate > 0 && !stream.codec.is_empty());
@@ -1521,14 +1958,29 @@ mod tests {
         let stream = api.stream_info(ugc, "lq").unwrap();
         assert!(stream.url.starts_with("https://"));
         assert_eq!((stream.codec.as_str(), stream.bitrate), ("aac", 64));
-        assert_eq!(api.file_info(ugc, "lq").unwrap().quality, "nq", "the server still falls back");
+        assert_eq!(
+            api.file_info(ugc, "lq").unwrap().quality,
+            "nq",
+            "the server still falls back"
+        );
         let low = api.download_info(ugc, true).unwrap();
         assert!(low.bitrate > 0 && low.bitrate < 192, "{}", low.bitrate);
         let normal = api.download_info(ugc, false).unwrap();
-        assert!(normal.bitrate > low.bitrate, "{} {}", low.bitrate, normal.bitrate);
+        assert!(
+            normal.bitrate > low.bitrate,
+            "{} {}",
+            low.bitrate,
+            normal.bitrate
+        );
         let size = |q: &str| -> u64 {
-            let r = api.agent.get(&api.track_url(ugc, q).unwrap()).call().unwrap();
-            r.header("Content-Length").and_then(|l| l.parse().ok()).unwrap_or(0)
+            let r = api
+                .agent
+                .get(&api.track_url(ugc, q).unwrap())
+                .call()
+                .unwrap();
+            r.header("Content-Length")
+                .and_then(|l| l.parse().ok())
+                .unwrap_or(0)
         };
         let (lq, nq) = (size("lq"), size("nq"));
         assert!(lq > 0 && lq * 2 < nq, "{lq} {nq}");
@@ -1540,7 +1992,10 @@ mod tests {
     #[ignore]
     fn send_plays() {
         for api in apis() {
-            let track = api.tracks(&["39089632:60058".to_string()]).unwrap().remove(0);
+            let track = api
+                .tracks(&["39089632:60058".to_string()])
+                .unwrap()
+                .remove(0);
             let report = PlayReport {
                 play_id: random_uuid(),
                 track,
@@ -1571,7 +2026,11 @@ mod tests {
     #[test]
     #[ignore]
     fn cover_download() {
-        let img = Api::new("x").fetch_image(&cover_url("avatars.yandex.net/get-music-misc/34161/rotor-genre-pop-icon/%%")).unwrap();
+        let img = Api::new("x")
+            .fetch_image(&cover_url(
+                "avatars.yandex.net/get-music-misc/34161/rotor-genre-pop-icon/%%",
+            ))
+            .unwrap();
         assert!(img.width() > 0);
     }
 }

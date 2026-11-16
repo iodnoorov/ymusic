@@ -21,17 +21,54 @@ enum Shape {
 }
 
 pub const PRESETS: &[Preset] = &[
-    Preset { id: "flat", name: "Обычный", bands: &[], shape: Shape::Octave },
-    Preset { id: "bass", name: "Больше баса", bands: &[(60, 6.0), (150, 4.0), (400, -1.0)], shape: Shape::Octave },
-    Preset { id: "vocal", name: "Вокал", bands: &[(150, -2.0), (1000, 2.0), (3000, 4.0), (6000, 2.0)], shape: Shape::Octave },
-    Preset { id: "rock", name: "Рок", bands: &[(80, 4.0), (250, 1.0), (1000, -2.0), (4000, 3.0), (10000, 4.0)], shape: Shape::Octave },
+    Preset {
+        id: "flat",
+        name: "Обычный",
+        bands: &[],
+        shape: Shape::Octave,
+    },
+    Preset {
+        id: "bass",
+        name: "Больше баса",
+        bands: &[(60, 6.0), (150, 4.0), (400, -1.0)],
+        shape: Shape::Octave,
+    },
+    Preset {
+        id: "vocal",
+        name: "Вокал",
+        bands: &[(150, -2.0), (1000, 2.0), (3000, 4.0), (6000, 2.0)],
+        shape: Shape::Octave,
+    },
+    Preset {
+        id: "rock",
+        name: "Рок",
+        bands: &[
+            (80, 4.0),
+            (250, 1.0),
+            (1000, -2.0),
+            (4000, 3.0),
+            (10000, 4.0),
+        ],
+        shape: Shape::Octave,
+    },
     Preset {
         id: "electronic",
         name: "Электроника",
-        bands: &[(60, 5.0), (200, 2.0), (1000, -1.0), (6000, 3.0), (12000, 4.0)],
+        bands: &[
+            (60, 5.0),
+            (200, 2.0),
+            (1000, -1.0),
+            (6000, 3.0),
+            (12000, 4.0),
+        ],
         shape: Shape::Octave,
     },
-    Preset { id: "soft", name: "Мягкий", bands: &[(4000, -3.0), (10000, -5.0)], shape: Shape::Octave },
+    Preset {
+        id: "soft",
+        name: "Мягкий",
+        bands: &[(4000, -3.0), (10000, -5.0)],
+        shape: Shape::Octave,
+    },
     // The «SPEAKERS» preset of the music.yandex.ru player (preamp 1).
     Preset {
         id: "laptop",
@@ -99,13 +136,25 @@ mod tests {
         assert!(PRESETS[0].is_flat() && PRESETS[0].biquads(44100.0).is_empty());
         // The response of a preset at a frequency, dB: the bands in a row.
         let db = |id: &str, f: f64| -> f64 {
-            PRESETS[index(id)].biquads(44100.0).iter().map(|b| 20.0 * b.response(f, 44100.0).log10()).sum()
+            PRESETS[index(id)]
+                .biquads(44100.0)
+                .iter()
+                .map(|b| 20.0 * b.response(f, 44100.0).log10())
+                .sum()
         };
         assert!((db("soft", 10000.0) + 5.0).abs() < 0.6 && db("soft", 100.0).abs() < 0.1);
         // «Колонки ноутбука»: low shelf of +2 dB below 60 Hz, high shelf up to +7 dB.
         assert_eq!(PRESETS[index("laptop")].biquads(44100.0).len(), 10);
-        assert!((db("laptop", 10.0) - 2.0).abs() < 0.3, "{}", db("laptop", 10.0));
-        assert!((7.0..8.0).contains(&db("laptop", 20000.0)), "{}", db("laptop", 20000.0));
+        assert!(
+            (db("laptop", 10.0) - 2.0).abs() < 0.3,
+            "{}",
+            db("laptop", 10.0)
+        );
+        assert!(
+            (7.0..8.0).contains(&db("laptop", 20000.0)),
+            "{}",
+            db("laptop", 20000.0)
+        );
         let ids: std::collections::HashSet<_> = PRESETS.iter().map(|p| p.id).collect();
         assert_eq!(ids.len(), PRESETS.len());
     }

@@ -4,15 +4,15 @@
 //! the format and the rate are whatever it supports, converted here.
 
 use super::dsp::Resampler;
-use super::output::{Sink, RATE};
+use super::output::{RATE, Sink};
 use super::ring::{Ring, Wake};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -117,7 +117,11 @@ impl HwParams {
     }
 
     fn set_exact(&mut self, param: usize, v: u32) {
-        *self.interval(param) = Interval { min: v, max: v, flags: INTEGER };
+        *self.interval(param) = Interval {
+            min: v,
+            max: v,
+            flags: INTEGER,
+        };
     }
 
     fn set_range(&mut self, param: usize, min: u32, max: u32) {
@@ -160,7 +164,9 @@ impl Format {
         for &s in samples {
             match self {
                 Format::F32 => out.extend(s.to_le_bytes()),
-                Format::S32 => out.extend(((f64::from(s.clamp(-1.0, 1.0)) * 2147483647.0).round() as i32).to_le_bytes()),
+                Format::S32 => out.extend(
+                    ((f64::from(s.clamp(-1.0, 1.0)) * 2147483647.0).round() as i32).to_le_bytes(),
+                ),
                 Format::S24In3 => out.extend(&int(s, 8388607.0).to_le_bytes()[..3]),
                 Format::S16 => out.extend((int(s, 32767.0) as i16).to_le_bytes()),
             }
@@ -204,7 +210,10 @@ fn configure(dev: &File) -> Result<Setup> {
             continue;
         }
         let rates = *p.interval(RATE_PARAM);
-        let rate = [RATE, 48000].into_iter().find(|r| (rates.min..=rates.max).contains(r)).unwrap_or(rates.min.max(8000));
+        let rate = [RATE, 48000]
+            .into_iter()
+            .find(|r| (rates.min..=rates.max).contains(r))
+            .unwrap_or(rates.min.max(8000));
         p.set_exact(RATE_PARAM, rate);
         let mut timed = p;
         timed.set_range(PERIOD_TIME, 20_000, 50_000);
@@ -214,7 +223,11 @@ fn configure(dev: &File) -> Result<Setup> {
             q.rmask = !0;
             if ioctl(dev, HW_PARAMS, &mut q).is_ok() {
                 let period = q.interval(PERIOD_SIZE).min as usize;
-                return Ok(Setup { format, rate: q.interval(RATE_PARAM).min, period: period.max(64) });
+                return Ok(Setup {
+                    format,
+                    rate: q.interval(RATE_PARAM).min,
+                    period: period.max(64),
+                });
             }
         }
     }
@@ -234,8 +247,15 @@ fn devices(device: Option<&str>) -> Vec<String> {
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            let (card, dev) = name.strip_prefix("pcmC")?.strip_suffix('p')?.split_once('D')?;
-            Some((card.parse().ok()?, dev.parse().ok()?, e.path().to_string_lossy().into_owned()))
+            let (card, dev) = name
+                .strip_prefix("pcmC")?
+                .strip_suffix('p')?
+                .split_once('D')?;
+            Some((
+                card.parse().ok()?,
+                dev.parse().ok()?,
+                e.path().to_string_lossy().into_owned(),
+            ))
         })
         .collect();
     found.sort();
@@ -260,7 +280,11 @@ impl Alsa {
         let mut errors = Vec::new();
         for path in devices(device) {
             // Opened non-blocking so that a busy device fails at once; writes block later.
-            let dev = match OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC).open(&path) {
+            let dev = match OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&path)
+            {
                 Ok(d) => d,
                 Err(e) => {
                     errors.push(format!("{path}: {e}"));
@@ -279,20 +303,33 @@ impl Alsa {
                     let thread = std::thread::Builder::new()
                         .name("player-output".into())
                         .spawn(move || serve(&dev, &setup, &ring, &rx, &w))?;
-                    return Ok(Alsa { requests: Some(tx), wake, thread: Some(thread) });
+                    return Ok(Alsa {
+                        requests: Some(tx),
+                        wake,
+                        thread: Some(thread),
+                    });
                 }
                 Err(e) => errors.push(format!("{path}: {e:#}")),
             }
         }
-        Err(anyhow!("нет подходящего устройства ALSA ({})", errors.join("; ")))
+        Err(anyhow!(
+            "нет подходящего устройства ALSA ({})",
+            errors.join("; ")
+        ))
     }
 
     fn call(&self, req: Request) -> Result<u64> {
         let lost = || anyhow!("звуковое устройство не отвечает");
         let (tx, rx) = mpsc::channel();
-        self.requests.as_ref().ok_or_else(lost)?.send((req, tx)).map_err(|_| lost())?;
+        self.requests
+            .as_ref()
+            .ok_or_else(lost)?
+            .send((req, tx))
+            .map_err(|_| lost())?;
         self.wake.signal();
-        Ok(rx.recv_timeout(Duration::from_secs(3)).map_err(|_| lost())??)
+        Ok(rx
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|_| lost())??)
     }
 }
 
@@ -324,10 +361,17 @@ impl Drop for Alsa {
 /// Writes all of `data` (frames of `bytes` each), recovering from underruns.
 fn write_all(dev: &File, mut data: &[u8], frame_bytes: usize) -> io::Result<()> {
     while !data.is_empty() {
-        let mut x = XferI { result: 0, buf: data.as_ptr(), frames: (data.len() / frame_bytes) as u64 };
+        let mut x = XferI {
+            result: 0,
+            buf: data.as_ptr(),
+            frames: (data.len() / frame_bytes) as u64,
+        };
         match ioctl(dev, WRITEI_FRAMES, &mut x) {
             Ok(_) => data = &data[x.result.max(0) as usize * frame_bytes..],
-            Err(e) if e.raw_os_error() == Some(libc::EPIPE) || e.raw_os_error() == Some(libc::ESTRPIPE) => {
+            Err(e)
+                if e.raw_os_error() == Some(libc::EPIPE)
+                    || e.raw_os_error() == Some(libc::ESTRPIPE) =>
+            {
                 ioctl_none(dev, PREPARE)?;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -338,13 +382,23 @@ fn write_all(dev: &File, mut data: &[u8], frame_bytes: usize) -> io::Result<()> 
 }
 
 fn wait(wake: &Wake) {
-    let mut fd = libc::pollfd { fd: wake.fd(), events: libc::POLLIN, revents: 0 };
+    let mut fd = libc::pollfd {
+        fd: wake.fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     // SAFETY: one valid pollfd.
     unsafe { libc::poll(&mut fd, 1, -1) };
     wake.reset();
 }
 
-fn serve(dev: &File, setup: &Setup, ring: &Ring, requests: &Receiver<(Request, Sender<io::Result<u64>>)>, wake: &Wake) {
+fn serve(
+    dev: &File,
+    setup: &Setup,
+    ring: &Ring,
+    requests: &Receiver<(Request, Sender<io::Result<u64>>)>,
+    wake: &Wake,
+) {
     let frame_bytes = setup.format.bytes() * 2;
     let mut resampler = (setup.rate != RATE).then(|| Resampler::to(RATE, setup.rate));
     let (mut samples, mut resampled, mut out) = (Vec::new(), Vec::new(), Vec::new());
@@ -370,7 +424,12 @@ fn serve(dev: &File, setup: &Setup, ring: &Ring, requests: &Receiver<(Request, S
                         Ok(0)
                     } else {
                         hw_pause = false;
-                        if p { ioctl_none(dev, DROP) } else { ioctl_none(dev, PREPARE) }.map(|_| 0)
+                        if p {
+                            ioctl_none(dev, DROP)
+                        } else {
+                            ioctl_none(dev, PREPARE)
+                        }
+                        .map(|_| 0)
                     }
                 }
                 Request::Pause(_) => Ok(0),
@@ -378,7 +437,9 @@ fn serve(dev: &File, setup: &Setup, ring: &Ring, requests: &Receiver<(Request, S
                     if let Some(r) = &mut resampler {
                         r.reset();
                     }
-                    ioctl_none(dev, DROP).and_then(|_| ioctl_none(dev, PREPARE)).map(|_| 0)
+                    ioctl_none(dev, DROP)
+                        .and_then(|_| ioctl_none(dev, PREPARE))
+                        .map(|_| 0)
                 }
                 Request::Delay => {
                     let mut d: i64 = 0;
@@ -423,11 +484,21 @@ mod tests {
         let s = [0.0, 1.0, -1.0, 0.5, 2.0];
         let mut out = Vec::new();
         Format::S16.encode(&s, &mut out);
-        let v: Vec<i16> = out.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b)).collect();
+        let v: Vec<i16> = out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
+            .collect();
         assert_eq!(v, [0, 32767, -32767, 16384, 32767]);
         out.clear();
         Format::S24In3.encode(&s[..4], &mut out);
-        assert_eq!(out, [0, 0, 0, 0xFF, 0xFF, 0x7F, 0x01, 0x00, 0x80, 0x00, 0x00, 0x40]);
+        assert_eq!(
+            out,
+            [
+                0, 0, 0, 0xFF, 0xFF, 0x7F, 0x01, 0x00, 0x80, 0x00, 0x00, 0x40
+            ]
+        );
         out.clear();
         Format::S32.encode(&[1.0, -0.5], &mut out);
         assert_eq!(out, [0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x00, 0x00, 0xC0]);

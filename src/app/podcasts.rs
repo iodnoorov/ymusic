@@ -58,24 +58,78 @@ pub struct Podcasts {
 
 #[derive(Debug)]
 pub enum PodcastTask {
-    Favorites { req: u64 },
-    Shows { generation: u64, section: PodcastSection, query: String, page: usize },
-    Episodes { req: u64, id: String, page: usize },
-    Play { intent: u64, id: String, from_start: bool, checkpoint: Option<PodcastProgress> },
-    Description { req: u64, id: String, title: String },
-    Favorite { show: Podcast, like: bool },
+    Favorites {
+        req: u64,
+    },
+    Shows {
+        generation: u64,
+        section: PodcastSection,
+        query: String,
+        page: usize,
+    },
+    Episodes {
+        req: u64,
+        id: String,
+        page: usize,
+    },
+    Play {
+        intent: u64,
+        id: String,
+        from_start: bool,
+        checkpoint: Option<PodcastProgress>,
+    },
+    Description {
+        req: u64,
+        id: String,
+        title: String,
+    },
+    Favorite {
+        show: Podcast,
+        like: bool,
+    },
     Save(PodcastProgress),
 }
 
 pub enum PodcastMsg {
-    Favorites { req: u64, result: Result<Vec<Podcast>, ApiError> },
-    Shows { generation: u64, page: usize, result: Result<(Vec<Podcast>, Option<usize>), ApiError> },
-    Episodes { req: u64, id: String, page: usize, result: Result<(Podcast, Vec<Track>, usize), ApiError> },
-    Play { intent: u64, from_start: bool, checkpoint: Option<PodcastProgress>, result: Result<Vec<Track>, ApiError> },
-    Linked { intent: u64, id: String },
-    Description { req: u64, title: String, result: Result<String, ApiError> },
-    Favorite { show: Podcast, like: bool, result: Result<(), ApiError> },
-    Saved { report: PodcastProgress, result: Result<StreamProgress, ApiError> },
+    Favorites {
+        req: u64,
+        result: Result<Vec<Podcast>, ApiError>,
+    },
+    Shows {
+        generation: u64,
+        page: usize,
+        result: Result<(Vec<Podcast>, Option<usize>), ApiError>,
+    },
+    Episodes {
+        req: u64,
+        id: String,
+        page: usize,
+        result: Result<(Podcast, Vec<Track>, usize), ApiError>,
+    },
+    Play {
+        intent: u64,
+        from_start: bool,
+        checkpoint: Option<PodcastProgress>,
+        result: Result<Vec<Track>, ApiError>,
+    },
+    Linked {
+        intent: u64,
+        id: String,
+    },
+    Description {
+        req: u64,
+        title: String,
+        result: Result<String, ApiError>,
+    },
+    Favorite {
+        show: Podcast,
+        like: bool,
+        result: Result<(), ApiError>,
+    },
+    Saved {
+        report: PodcastProgress,
+        result: Result<StreamProgress, ApiError>,
+    },
 }
 
 impl PodcastMsg {
@@ -95,35 +149,80 @@ impl PodcastMsg {
 
 impl PodcastTask {
     pub(crate) fn urgent(&self) -> bool {
-        matches!(self, Self::Play { .. } | Self::Shows { section: PodcastSection::Search, .. })
+        matches!(
+            self,
+            Self::Play { .. }
+                | Self::Shows {
+                    section: PodcastSection::Search,
+                    ..
+                }
+        )
     }
 
     pub(crate) fn run(self, api: &Api) -> PodcastMsg {
         let error = |e: anyhow::Error| ApiError::from_anyhow(&e);
         match self {
-            Self::Favorites { req } => PodcastMsg::Favorites { req, result: api.podcast_liked().map_err(error) },
-            Self::Shows { generation, section, query, page } => {
+            Self::Favorites { req } => PodcastMsg::Favorites {
+                req,
+                result: api.podcast_liked().map_err(error),
+            },
+            Self::Shows {
+                generation,
+                section,
+                query,
+                page,
+            } => {
                 let result = match section {
-                    PodcastSection::New => api.podcast_new().map(|shows| { let n = shows.len(); (shows, Some(n)) }),
+                    PodcastSection::New => api.podcast_new().map(|shows| {
+                        let n = shows.len();
+                        (shows, Some(n))
+                    }),
                     PodcastSection::Search => api.podcast_search(&query, page),
-                    PodcastSection::Mine => api.podcast_liked().map(|shows| { let n = shows.len(); (shows, Some(n)) }),
+                    PodcastSection::Mine => api.podcast_liked().map(|shows| {
+                        let n = shows.len();
+                        (shows, Some(n))
+                    }),
                 };
-                PodcastMsg::Shows { generation, page, result: result.map_err(error) }
+                PodcastMsg::Shows {
+                    generation,
+                    page,
+                    result: result.map_err(error),
+                }
             }
             Self::Episodes { req, id, page } => {
                 let result = api.podcast_episodes(&id, page).map_err(error);
-                PodcastMsg::Episodes { req, id, page, result }
+                PodcastMsg::Episodes {
+                    req,
+                    id,
+                    page,
+                    result,
+                }
             }
-            Self::Play { intent, id, from_start, checkpoint } => {
+            Self::Play {
+                intent,
+                id,
+                from_start,
+                checkpoint,
+            } => {
                 let result = (|| {
-                    if let Some(report) = &checkpoint { api.podcast_save_progress(report)?; }
+                    if let Some(report) = &checkpoint {
+                        api.podcast_save_progress(report)?;
+                    }
                     api.podcast_episode(&id).map(|track| vec![track])
-                })().map_err(error);
-                PodcastMsg::Play { intent, from_start, checkpoint, result }
+                })()
+                .map_err(error);
+                PodcastMsg::Play {
+                    intent,
+                    from_start,
+                    checkpoint,
+                    result,
+                }
             }
-            Self::Description { req, id, title } => {
-                PodcastMsg::Description { req, title, result: api.podcast_description(&id).map_err(error) }
-            }
+            Self::Description { req, id, title } => PodcastMsg::Description {
+                req,
+                title,
+                result: api.podcast_description(&id).map_err(error),
+            },
             Self::Favorite { show, like } => {
                 let result = api.podcast_set_liked(&show.id, like).map_err(error);
                 PodcastMsg::Favorite { show, like, result }
@@ -137,15 +236,48 @@ impl PodcastTask {
 
     pub(crate) fn rejected(&self, error: ApiError) -> PodcastMsg {
         match self {
-            Self::Favorites { req } => PodcastMsg::Favorites { req: *req, result: Err(error) },
-            Self::Shows { generation, page, .. } => PodcastMsg::Shows { generation: *generation, page: *page, result: Err(error) },
-            Self::Episodes { req, id, page } => PodcastMsg::Episodes { req: *req, id: id.clone(), page: *page, result: Err(error) },
-            Self::Play { intent, from_start, checkpoint, .. } => PodcastMsg::Play {
-                intent: *intent, from_start: *from_start, checkpoint: checkpoint.clone(), result: Err(error),
+            Self::Favorites { req } => PodcastMsg::Favorites {
+                req: *req,
+                result: Err(error),
             },
-            Self::Description { req, title, .. } => PodcastMsg::Description { req: *req, title: title.clone(), result: Err(error) },
-            Self::Favorite { show, like } => PodcastMsg::Favorite { show: show.clone(), like: *like, result: Err(error) },
-            Self::Save(report) => PodcastMsg::Saved { report: report.clone(), result: Err(error) },
+            Self::Shows {
+                generation, page, ..
+            } => PodcastMsg::Shows {
+                generation: *generation,
+                page: *page,
+                result: Err(error),
+            },
+            Self::Episodes { req, id, page } => PodcastMsg::Episodes {
+                req: *req,
+                id: id.clone(),
+                page: *page,
+                result: Err(error),
+            },
+            Self::Play {
+                intent,
+                from_start,
+                checkpoint,
+                ..
+            } => PodcastMsg::Play {
+                intent: *intent,
+                from_start: *from_start,
+                checkpoint: checkpoint.clone(),
+                result: Err(error),
+            },
+            Self::Description { req, title, .. } => PodcastMsg::Description {
+                req: *req,
+                title: title.clone(),
+                result: Err(error),
+            },
+            Self::Favorite { show, like } => PodcastMsg::Favorite {
+                show: show.clone(),
+                like: *like,
+                result: Err(error),
+            },
+            Self::Save(report) => PodcastMsg::Saved {
+                report: report.clone(),
+                result: Err(error),
+            },
         }
     }
 }
@@ -167,8 +299,15 @@ pub(super) struct ProgressOutbox {
 
 impl ProgressOutbox {
     fn push(&mut self, report: PodcastProgress) {
-        match self.pending.items.iter_mut().find(|p| p.track_id == report.track_id) {
-            Some(old) if old.position == report.position && old.finished == report.finished => return,
+        match self
+            .pending
+            .items
+            .iter_mut()
+            .find(|p| p.track_id == report.track_id)
+        {
+            Some(old) if old.position == report.position && old.finished == report.finished => {
+                return;
+            }
             Some(old) => *old = report,
             None => self.pending.items.push(report),
         }
@@ -176,14 +315,18 @@ impl ProgressOutbox {
     }
 
     fn next(&mut self) -> Option<PodcastProgress> {
-        if self.in_flight.is_some() || self.retry_at.is_some_and(|at| Instant::now() < at) { return None; }
+        if self.in_flight.is_some() || self.retry_at.is_some_and(|at| Instant::now() < at) {
+            return None;
+        }
         let report = self.pending.items.first()?.clone();
         self.in_flight = Some(report.clone());
         Some(report)
     }
 
     fn complete(&mut self, report: &PodcastProgress, ok: bool) {
-        if self.in_flight.as_ref() == Some(report) { self.in_flight = None; }
+        if self.in_flight.as_ref() == Some(report) {
+            self.in_flight = None;
+        }
         if ok {
             if let Some(index) = self.pending.items.iter().position(|p| p == report) {
                 self.pending.items.remove(index);
@@ -198,7 +341,9 @@ impl ProgressOutbox {
 
 impl App {
     pub(super) fn ensure_podcasts(&mut self) {
-        if !self.podcasts.favorites_ready && !self.podcasts.favorites_loading { self.reload_podcast_favorites(); }
+        if !self.podcasts.favorites_ready && !self.podcasts.favorites_loading {
+            self.reload_podcast_favorites();
+        }
         if self.podcasts.section == PodcastSection::Mine {
             self.podcasts.loading = self.podcasts.favorites_loading;
         }
@@ -207,8 +352,12 @@ impl App {
     fn reload_podcast_favorites(&mut self) {
         self.podcasts.favorites_req += 1;
         self.podcasts.favorites_loading = true;
-        if self.podcasts.section == PodcastSection::Mine { self.podcasts.loading = true; }
-        self.task(Task::Podcast(PodcastTask::Favorites { req: self.podcasts.favorites_req }));
+        if self.podcasts.section == PodcastSection::Mine {
+            self.podcasts.loading = true;
+        }
+        self.task(Task::Podcast(PodcastTask::Favorites {
+            req: self.podcasts.favorites_req,
+        }));
     }
 
     pub(super) fn podcast_section(&mut self, direction: i32) {
@@ -238,44 +387,75 @@ impl App {
                 self.reload_podcast_favorites();
             }
             PodcastSection::New => self.load_podcast_show_page(),
-            PodcastSection::Search if !self.podcasts.query.is_empty() => self.load_podcast_show_page(),
-            PodcastSection::Search => { self.podcasts.shows.clear(); self.podcasts.editing = true; }
+            PodcastSection::Search if !self.podcasts.query.is_empty() => {
+                self.load_podcast_show_page()
+            }
+            PodcastSection::Search => {
+                self.podcasts.shows.clear();
+                self.podcasts.editing = true;
+            }
         }
     }
 
     fn load_podcast_show_page(&mut self) {
-        if self.podcasts.loading { return; }
+        if self.podcasts.loading {
+            return;
+        }
         self.podcasts.loading = true;
         self.task(Task::Podcast(PodcastTask::Shows {
-            generation: self.podcasts.generation, section: self.podcasts.section,
-            query: self.podcasts.query.clone(), page: self.podcasts.pages,
+            generation: self.podcasts.generation,
+            section: self.podcasts.section,
+            query: self.podcasts.query.clone(),
+            page: self.podcasts.pages,
         }));
     }
 
     fn load_podcast_episode_page(&mut self) {
-        let Some(open) = &mut self.podcasts.open else { return };
-        if open.loading { return; }
+        let Some(open) = &mut self.podcasts.open else {
+            return;
+        };
+        if open.loading {
+            return;
+        }
         self.podcasts.open_req += 1;
         open.req = self.podcasts.open_req;
         open.loading = true;
-        let task = PodcastTask::Episodes { req: open.req, id: open.show.id.clone(), page: open.pages };
+        let task = PodcastTask::Episodes {
+            req: open.req,
+            id: open.show.id.clone(),
+            page: open.pages,
+        };
         self.task(Task::Podcast(task));
     }
 
     pub(super) fn podcast_selected_track(&self) -> Option<&Track> {
-        self.podcasts.episode_state.selected().and_then(|i| self.podcasts.open.as_ref()?.tracks.get(i))
+        self.podcasts
+            .episode_state
+            .selected()
+            .and_then(|i| self.podcasts.open.as_ref()?.tracks.get(i))
     }
 
     fn selected_podcast_show(&self) -> Option<&Podcast> {
-        self.podcasts.open.as_ref().map(|o| &o.show)
-            .or_else(|| self.podcasts.state.selected().and_then(|i| self.podcasts.shows.get(i)))
+        self.podcasts.open.as_ref().map(|o| &o.show).or_else(|| {
+            self.podcasts
+                .state
+                .selected()
+                .and_then(|i| self.podcasts.shows.get(i))
+        })
     }
 
     pub(super) fn activate_podcast(&mut self, from_start: bool) {
         if let Some(track) = self.podcast_selected_track().cloned() {
             self.request_podcast_play(&track.id, from_start);
         } else if let Some(show) = self.selected_podcast_show().cloned() {
-            self.podcasts.open = Some(OpenPodcast { show, tracks: Vec::new(), loading: false, total: usize::MAX, req: 0, pages: 0 });
+            self.podcasts.open = Some(OpenPodcast {
+                show,
+                tracks: Vec::new(),
+                loading: false,
+                total: usize::MAX,
+                req: 0,
+                pages: 0,
+            });
             self.podcasts.episode_state = TableState::default();
             self.load_podcast_episode_page();
         }
@@ -290,30 +470,72 @@ impl App {
                 Tab::Playlists => self.playlists.open.as_ref().map(|o| o.tracks.as_slice()),
                 _ => None,
             }
-        } else { None };
-        self.podcasts.play_list = tracks.filter(|tracks| tracks.iter().any(|t| t.id == id))
+        } else {
+            None
+        };
+        self.podcasts.play_list = tracks
+            .filter(|tracks| tracks.iter().any(|t| t.id == id))
             .map(|tracks| (intent, tracks.to_vec()));
         self.set_status("Чтение позиции подкаста…");
         self.checkpoint_podcast(false);
-        let checkpoint = self.podcast_progress.pending.items.iter().find(|p| p.track_id == id).cloned();
-        self.task(Task::Podcast(PodcastTask::Play { intent, id: id.to_string(), from_start, checkpoint }));
+        let checkpoint = self
+            .podcast_progress
+            .pending
+            .items
+            .iter()
+            .find(|p| p.track_id == id)
+            .cloned();
+        self.task(Task::Podcast(PodcastTask::Play {
+            intent,
+            id: id.to_string(),
+            from_start,
+            checkpoint,
+        }));
     }
 
     pub(super) fn move_podcast_selection(&mut self, direction: i32) {
         let step = |current: Option<usize>, len: usize| {
-            (len > 0).then(|| (current.unwrap_or(0) as i64 + i64::from(direction)).clamp(0, len as i64 - 1) as usize)
+            (len > 0).then(|| {
+                (current.unwrap_or(0) as i64 + i64::from(direction)).clamp(0, len as i64 - 1)
+                    as usize
+            })
         };
         if let Some(open) = &self.podcasts.open {
-            self.podcasts.episode_state.select(step(self.podcasts.episode_state.selected(), open.tracks.len()));
-            if self.podcasts.episode_state.selected().unwrap_or(0).saturating_add(10) >= open.tracks.len()
-                && open.tracks.len() < open.total && !open.loading {
+            self.podcasts.episode_state.select(step(
+                self.podcasts.episode_state.selected(),
+                open.tracks.len(),
+            ));
+            if self
+                .podcasts
+                .episode_state
+                .selected()
+                .unwrap_or(0)
+                .saturating_add(10)
+                >= open.tracks.len()
+                && open.tracks.len() < open.total
+                && !open.loading
+            {
                 self.load_podcast_episode_page();
             }
         } else {
-            self.podcasts.state.select(step(self.podcasts.state.selected(), self.podcasts.shows.len()));
-            if self.podcasts.section == PodcastSection::Search && self.podcasts.pages > 0
-                && self.podcasts.state.selected().unwrap_or(0).saturating_add(10) >= self.podcasts.shows.len()
-                && self.podcasts.total.is_none_or(|n| self.podcasts.shows.len() < n) {
+            self.podcasts.state.select(step(
+                self.podcasts.state.selected(),
+                self.podcasts.shows.len(),
+            ));
+            if self.podcasts.section == PodcastSection::Search
+                && self.podcasts.pages > 0
+                && self
+                    .podcasts
+                    .state
+                    .selected()
+                    .unwrap_or(0)
+                    .saturating_add(10)
+                    >= self.podcasts.shows.len()
+                && self
+                    .podcasts
+                    .total
+                    .is_none_or(|n| self.podcasts.shows.len() < n)
+            {
                 self.load_podcast_show_page();
             }
         }
@@ -339,17 +561,31 @@ impl App {
                     self.podcasts.description = None;
                     self.podcasts.description_req += 1;
                 }
-                KeyCode::Down | KeyCode::Char('j') => self.podcasts.description_scroll = self.podcasts.description_scroll.saturating_add(1),
-                KeyCode::Up | KeyCode::Char('k') => self.podcasts.description_scroll = self.podcasts.description_scroll.saturating_sub(1),
-                KeyCode::PageDown => self.podcasts.description_scroll = self.podcasts.description_scroll.saturating_add(10),
-                KeyCode::PageUp => self.podcasts.description_scroll = self.podcasts.description_scroll.saturating_sub(10),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.podcasts.description_scroll =
+                        self.podcasts.description_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.podcasts.description_scroll =
+                        self.podcasts.description_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => {
+                    self.podcasts.description_scroll =
+                        self.podcasts.description_scroll.saturating_add(10)
+                }
+                KeyCode::PageUp => {
+                    self.podcasts.description_scroll =
+                        self.podcasts.description_scroll.saturating_sub(10)
+                }
                 KeyCode::Home | KeyCode::Char('g') => self.podcasts.description_scroll = 0,
                 KeyCode::End | KeyCode::Char('G') => self.podcasts.description_scroll = u16::MAX,
                 _ => {}
             }
             return true;
         }
-        if !self.podcasts.editing { return false; }
+        if !self.podcasts.editing {
+            return false;
+        }
         let key = press.typed;
         match key.code {
             KeyCode::Esc => self.podcasts.editing = false,
@@ -362,7 +598,9 @@ impl App {
                     self.reload_podcasts();
                 }
             }
-            KeyCode::Backspace => { self.podcasts.input.pop(); }
+            KeyCode::Backspace => {
+                self.podcasts.input.pop();
+            }
             _ if is_ctrl(&press.hotkey, 'u') => self.podcasts.input.clear(),
             KeyCode::Char(c) if is_typed(&key) => self.podcasts.input.push(c),
             _ => {}
@@ -376,7 +614,9 @@ impl App {
             self.podcasts.description_req += 1;
             self.podcasts.description = Some((track.title.clone(), "Загрузка описания…".into()));
             self.task(Task::Podcast(PodcastTask::Description {
-                req: self.podcasts.description_req, id: track.id, title: track.title,
+                req: self.podcasts.description_req,
+                id: track.id,
+                title: track.title,
             }));
         } else if let Some(show) = self.selected_podcast_show() {
             self.podcasts.description = Some((show.title.clone(), show.description.clone()));
@@ -384,7 +624,9 @@ impl App {
     }
 
     pub(super) fn toggle_podcast_favorite(&mut self) {
-        let Some(show) = self.selected_podcast_show().cloned() else { return };
+        let Some(show) = self.selected_podcast_show().cloned() else {
+            return;
+        };
         if !self.podcasts.favorites_ready {
             self.podcasts.favorite_after_load = Some(show);
             self.ensure_podcasts();
@@ -394,7 +636,9 @@ impl App {
     }
 
     fn set_podcast_favorite(&mut self, show: Podcast) {
-        if self.podcasts.favorite_pending.is_some() { return; }
+        if self.podcasts.favorite_pending.is_some() {
+            return;
+        }
         let like = !self.podcasts.liked.contains(&show.id);
         self.podcasts.favorite_pending = Some(show.id.clone());
         self.task(Task::Podcast(PodcastTask::Favorite { show, like }));
@@ -403,9 +647,13 @@ impl App {
     pub(super) fn on_podcast_msg(&mut self, msg: PodcastMsg) {
         match msg {
             PodcastMsg::Favorites { req, result } => {
-                if req != self.podcasts.favorites_req { return; }
+                if req != self.podcasts.favorites_req {
+                    return;
+                }
                 self.podcasts.favorites_loading = false;
-                if self.podcasts.section == PodcastSection::Mine { self.podcasts.loading = false; }
+                if self.podcasts.section == PodcastSection::Mine {
+                    self.podcasts.loading = false;
+                }
                 match result {
                     Ok(shows) => {
                         self.podcasts.liked = shows.iter().map(|s| s.id.clone()).collect();
@@ -415,86 +663,167 @@ impl App {
                             self.podcasts.shows = self.podcasts.favorites.clone();
                             let n = self.podcasts.shows.len();
                             let selected = self.podcasts.state.selected().unwrap_or(0);
-                            self.podcasts.state.select((n > 0).then(|| selected.min(n - 1)));
+                            self.podcasts
+                                .state
+                                .select((n > 0).then(|| selected.min(n - 1)));
                         }
-                        if let Some(show) = self.podcasts.favorite_after_load.take() { self.set_podcast_favorite(show); }
+                        if let Some(show) = self.podcasts.favorite_after_load.take() {
+                            self.set_podcast_favorite(show);
+                        }
                     }
-                    Err(e) => { self.podcasts.favorite_after_load = None; self.set_error(format!("Не удалось загрузить подкасты: {e}")); }
+                    Err(e) => {
+                        self.podcasts.favorite_after_load = None;
+                        self.set_error(format!("Не удалось загрузить подкасты: {e}"));
+                    }
                 }
             }
-            PodcastMsg::Shows { generation, page, result } => {
-                if generation != self.podcasts.generation || page != self.podcasts.pages { return; }
+            PodcastMsg::Shows {
+                generation,
+                page,
+                result,
+            } => {
+                if generation != self.podcasts.generation || page != self.podcasts.pages {
+                    return;
+                }
                 self.podcasts.loading = false;
                 match result {
                     Ok((shows, total)) => {
-                        if page == 0 { self.podcasts.shows.clear(); }
+                        if page == 0 {
+                            self.podcasts.shows.clear();
+                        }
                         let old = self.podcasts.shows.len();
-                        let seen: HashSet<_> = self.podcasts.shows.iter().map(|s| s.id.as_str()).collect();
-                        let added: Vec<_> = shows.into_iter().filter(|s| !seen.contains(s.id.as_str())).collect();
+                        let seen: HashSet<_> =
+                            self.podcasts.shows.iter().map(|s| s.id.as_str()).collect();
+                        let added: Vec<_> = shows
+                            .into_iter()
+                            .filter(|s| !seen.contains(s.id.as_str()))
+                            .collect();
                         self.podcasts.shows.extend(added);
-                        self.podcasts.total = if page > 0 && old == self.podcasts.shows.len() { Some(old) } else { total };
+                        self.podcasts.total = if page > 0 && old == self.podcasts.shows.len() {
+                            Some(old)
+                        } else {
+                            total
+                        };
                         self.podcasts.pages += 1;
-                        if page == 0 { self.podcasts.state.select((!self.podcasts.shows.is_empty()).then_some(0)); }
+                        if page == 0 {
+                            self.podcasts
+                                .state
+                                .select((!self.podcasts.shows.is_empty()).then_some(0));
+                        }
                     }
                     Err(e) => self.set_error(format!("Не удалось загрузить подкасты: {e}")),
                 }
             }
-            PodcastMsg::Episodes { req, id, page, result } => {
-                let Some(open) = self.podcasts.open.as_mut().filter(|o| o.req == req && o.show.id == id && o.pages == page) else { return };
+            PodcastMsg::Episodes {
+                req,
+                id,
+                page,
+                result,
+            } => {
+                let Some(open) = self
+                    .podcasts
+                    .open
+                    .as_mut()
+                    .filter(|o| o.req == req && o.show.id == id && o.pages == page)
+                else {
+                    return;
+                };
                 open.loading = false;
                 match result {
                     Ok((show, tracks, total)) => {
                         open.show = show;
-                        if page == 0 { open.tracks.clear(); }
+                        if page == 0 {
+                            open.tracks.clear();
+                        }
                         let old = open.tracks.len();
                         let seen: HashSet<_> = open.tracks.iter().map(|t| t.id.as_str()).collect();
-                        let added: Vec<_> = tracks.into_iter().filter(|t| !seen.contains(t.id.as_str())).collect();
+                        let added: Vec<_> = tracks
+                            .into_iter()
+                            .filter(|t| !seen.contains(t.id.as_str()))
+                            .collect();
                         open.tracks.extend(added);
-                        open.total = if page > 0 && old == open.tracks.len() { old } else { total };
+                        open.total = if page > 0 && old == open.tracks.len() {
+                            old
+                        } else {
+                            total
+                        };
                         open.pages += 1;
                         let selected = self.podcasts.episode_state.selected().unwrap_or(0);
-                        self.podcasts.episode_state.select((!open.tracks.is_empty()).then(|| selected.min(open.tracks.len() - 1)));
+                        self.podcasts.episode_state.select(
+                            (!open.tracks.is_empty()).then(|| selected.min(open.tracks.len() - 1)),
+                        );
                     }
                     Err(e) => self.set_error(format!("Не удалось открыть подкаст: {e}")),
                 }
             }
             PodcastMsg::Linked { intent, id } => {
-                if intent == self.intent { self.request_podcast_play(&id, false); }
+                if intent == self.intent {
+                    self.request_podcast_play(&id, false);
+                }
             }
-            PodcastMsg::Play { intent, from_start, checkpoint, result } => {
-                if result.is_ok() && let Some(report) = &checkpoint {
+            PodcastMsg::Play {
+                intent,
+                from_start,
+                checkpoint,
+                result,
+            } => {
+                if result.is_ok()
+                    && let Some(report) = &checkpoint
+                {
                     self.podcast_progress.complete(report, true);
                 }
-                if intent != self.intent { return; }
+                if intent != self.intent {
+                    return;
+                }
                 match result {
                     Ok(mut tracks) => {
                         let Some(track) = tracks.first_mut().filter(|t| t.is_podcast()) else {
-                            self.set_error("Это не выпуск подкаста"); return;
+                            self.set_error("Это не выпуск подкаста");
+                            return;
                         };
-                        if from_start { track.progress = Some(StreamProgress { position: 0.0, finished: false }); }
+                        if from_start {
+                            track.progress = Some(StreamProgress {
+                                position: 0.0,
+                                finished: false,
+                            });
+                        }
                         let name = format!("Подкаст: {}", track.album);
-                        let context = PlayContext::new("album", track.album_id.clone().unwrap_or_default());
+                        let context =
+                            PlayContext::new("album", track.album_id.clone().unwrap_or_default());
                         let selected = track.clone();
-                        let pending = self.podcasts.play_list.take().filter(|(request, _)| *request == intent);
+                        let pending = self
+                            .podcasts
+                            .play_list
+                            .take()
+                            .filter(|(request, _)| *request == intent);
                         let (tracks, start) = if let Some((_, mut list)) = pending {
                             let start = list.iter().position(|t| t.id == selected.id).unwrap_or(0);
                             list[start] = selected;
                             (list, start)
-                        } else { (tracks, 0) };
+                        } else {
+                            (tracks, 0)
+                        };
                         self.play_list(&name, context, tracks, start);
                     }
                     Err(e) => self.set_error(format!("Не удалось прочитать выпуск: {e}")),
                 }
             }
             PodcastMsg::Description { req, title, result } => {
-                if req != self.podcasts.description_req || self.podcasts.description.is_none() { return; }
+                if req != self.podcasts.description_req || self.podcasts.description.is_none() {
+                    return;
+                }
                 match result {
                     Ok(text) => self.podcasts.description = Some((title, text)),
-                    Err(e) => { self.podcasts.description = None; self.set_error(format!("Не удалось загрузить описание: {e}")); }
+                    Err(e) => {
+                        self.podcasts.description = None;
+                        self.set_error(format!("Не удалось загрузить описание: {e}"));
+                    }
                 }
             }
             PodcastMsg::Favorite { show, like, result } => {
-                if self.podcasts.favorite_pending.as_deref() != Some(show.id.as_str()) { return; }
+                if self.podcasts.favorite_pending.as_deref() != Some(show.id.as_str()) {
+                    return;
+                }
                 self.podcasts.favorite_pending = None;
                 match result {
                     Ok(()) => {
@@ -511,9 +840,19 @@ impl App {
                             self.podcasts.shows = self.podcasts.favorites.clone();
                             let n = self.podcasts.shows.len();
                             let selected = self.podcasts.state.selected().unwrap_or(0);
-                            self.podcasts.state.select((n > 0).then(|| selected.min(n - 1)));
+                            self.podcasts
+                                .state
+                                .select((n > 0).then(|| selected.min(n - 1)));
                         }
-                        self.set_status(format!("{}: {}", if like { "Подкаст добавлен в избранное" } else { "Подкаст удалён из избранного" }, show.title));
+                        self.set_status(format!(
+                            "{}: {}",
+                            if like {
+                                "Подкаст добавлен в избранное"
+                            } else {
+                                "Подкаст удалён из избранного"
+                            },
+                            show.title
+                        ));
                         self.reload_podcast_favorites();
                     }
                     Err(e) => self.set_error(format!("Не удалось изменить избранное: {e}")),
@@ -526,60 +865,117 @@ impl App {
     fn update_podcast_progress(&mut self, id: &str, progress: StreamProgress) {
         self.queue.set_stream_progress(id, progress.clone());
         if let Some(open) = &mut self.podcasts.open
-            && let Some(track) = open.tracks.iter_mut().find(|t| t.id == id) {
+            && let Some(track) = open.tracks.iter_mut().find(|t| t.id == id)
+        {
             track.progress = Some(progress);
         }
     }
 
     pub(super) fn checkpoint_podcast(&mut self, finished: bool) {
-        if !finished && (self.awaiting_start || self.stopped) { return; }
-        let Some(track) = self.current().filter(|t| t.is_podcast()) else { return };
+        if !finished && (self.awaiting_start || self.stopped) {
+            return;
+        }
+        let Some(track) = self.current().filter(|t| t.is_podcast()) else {
+            return;
+        };
         let length = track.duration_ms as f64 / 1000.0;
-        if length <= 0.0 { return; }
-        let position = if finished { length } else {
-            let Some(position) = self.confirmed_time_pos else { return };
+        if length <= 0.0 {
+            return;
+        }
+        let position = if finished {
+            length
+        } else {
+            let Some(position) = self.confirmed_time_pos else {
+                return;
+            };
             position.clamp(0.0, length)
         };
         let id = track.id.clone();
-        let report = PodcastProgress { track_id: id.clone(), position, length, finished, timestamp: iso_now() };
+        let report = PodcastProgress {
+            track_id: id.clone(),
+            position,
+            length,
+            finished,
+            timestamp: iso_now(),
+        };
         self.podcast_progress.pending.account = self.account.uid.clone();
         self.podcast_progress.push(report);
         self.podcasts.checkpoint_at = Some(Instant::now());
-        self.update_podcast_progress(&id, StreamProgress { position: if finished { 0.0 } else { position }, finished });
+        self.update_podcast_progress(
+            &id,
+            StreamProgress {
+                position: if finished { 0.0 } else { position },
+                finished,
+            },
+        );
     }
 
     pub(super) fn tick_podcast_progress(&mut self) {
         if self.current().is_some_and(Track::is_podcast)
-            && !self.paused && self.podcasts.checkpoint_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(30)) {
+            && !self.paused
+            && self
+                .podcasts
+                .checkpoint_at
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(30))
+        {
             self.checkpoint_podcast(false);
         }
-        if !self.unauthorized && let Some(report) = self.podcast_progress.next() {
+        if !self.unauthorized
+            && let Some(report) = self.podcast_progress.next()
+        {
             self.task(Task::Podcast(PodcastTask::Save(report)));
         }
     }
 
-    pub(crate) fn podcast_progress_saved(&mut self, report: &PodcastProgress, result: Result<StreamProgress, ApiError>) {
+    pub(crate) fn podcast_progress_saved(
+        &mut self,
+        report: &PodcastProgress,
+        result: Result<StreamProgress, ApiError>,
+    ) {
         self.podcast_progress.complete(report, result.is_ok());
         match result {
             Ok(progress) => {
-                if !self.podcast_progress.pending.items.iter().any(|p| p.track_id == report.track_id) {
+                if !self
+                    .podcast_progress
+                    .pending
+                    .items
+                    .iter()
+                    .any(|p| p.track_id == report.track_id)
+                {
                     self.update_podcast_progress(&report.track_id, progress);
                 }
             }
-            Err(e) => self.set_error(format!("Позиция подкаста сохранена локально; отправка будет повторена: {e}")),
+            Err(e) => self.set_error(format!(
+                "Позиция подкаста сохранена локально; отправка будет повторена: {e}"
+            )),
         }
     }
 
     pub fn restore_podcast_progress(&mut self, mut pending: PendingPodcastProgress) {
-        if pending.account != self.account.uid { return; }
-        pending.items.retain(|p| !p.track_id.is_empty() && p.length.is_finite() && p.length > 0.0
-            && p.position.is_finite() && p.position >= 0.0 && p.position <= p.length && !p.timestamp.is_empty());
+        if pending.account != self.account.uid {
+            return;
+        }
+        pending.items.retain(|p| {
+            !p.track_id.is_empty()
+                && p.length.is_finite()
+                && p.length > 0.0
+                && p.position.is_finite()
+                && p.position >= 0.0
+                && p.position <= p.length
+                && !p.timestamp.is_empty()
+        });
         self.podcast_progress.pending = pending;
     }
 
-    pub fn pending_podcast_progress(&self) -> PendingPodcastProgress { self.podcast_progress.pending.clone() }
-    pub fn podcast_progress_revision(&self) -> u64 { self.podcast_progress.revision }
-    pub fn capture_podcast_progress(&mut self) { self.checkpoint_podcast(false); }
+    pub fn pending_podcast_progress(&self) -> PendingPodcastProgress {
+        self.podcast_progress.pending.clone()
+    }
+    pub fn podcast_progress_revision(&self) -> u64 {
+        self.podcast_progress.revision
+    }
+    pub fn capture_podcast_progress(&mut self) {
+        self.checkpoint_podcast(false);
+    }
 
     pub(super) fn podcast_track_started(&mut self) {
         self.podcasts.checkpoint_at = Some(Instant::now());
@@ -587,8 +983,13 @@ impl App {
 }
 
 pub(super) fn resume_position(track: &Track) -> f64 {
-    track.progress.as_ref().filter(|p| track.is_podcast() && !p.finished && p.position.is_finite())
-        .map_or(0.0, |p| p.position.clamp(0.0, track.duration_ms as f64 / 1000.0))
+    track
+        .progress
+        .as_ref()
+        .filter(|p| track.is_podcast() && !p.finished && p.position.is_finite())
+        .map_or(0.0, |p| {
+            p.position.clamp(0.0, track.duration_ms as f64 / 1000.0)
+        })
 }
 
 #[cfg(test)]
@@ -600,11 +1001,18 @@ mod tests {
             "id": id, "type": "podcast-episode", "title": id, "durationMs": 600000,
             "albums": [{"id": "show", "type": "podcast", "title": "Show"}],
             "streamProgress": {"endPositionSec": position, "everFinished": false},
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn show(id: &str) -> Podcast {
-        Podcast { id: id.into(), title: id.into(), description: String::new(), cover: None, episodes: 1 }
+        Podcast {
+            id: id.into(),
+            title: id.into(),
+            description: String::new(),
+            cover: None,
+            episodes: 1,
+        }
     }
 
     #[test]
@@ -612,12 +1020,27 @@ mod tests {
         let mut app = App::for_test();
         app.tab = Tab::Podcasts;
         let intent = app.new_intent();
-        app.on_msg(Msg::Podcasts(PodcastMsg::Play { intent, from_start: false, checkpoint: None, result: Ok(vec![episode("e", 240.5)]) }));
+        app.on_msg(Msg::Podcasts(PodcastMsg::Play {
+            intent,
+            from_start: false,
+            checkpoint: None,
+            result: Ok(vec![episode("e", 240.5)]),
+        }));
         assert!(app.tab == Tab::Podcasts);
         let generation = app.generation;
         app.take_player();
-        app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
-        assert!(app.take_player().iter().any(|c| c == "load audio from 240.5"));
+        app.on_msg(Msg::Url {
+            generation,
+            result: Ok(crate::api::FileInfo {
+                url: "audio".into(),
+                ..Default::default()
+            }),
+        });
+        assert!(
+            app.take_player()
+                .iter()
+                .any(|c| c == "load audio from 240.5")
+        );
         app.on_msg(Msg::Player(PlayerEvent::Duration(600.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(241.0)));
         app.set_repeat(Repeat::One);
@@ -625,7 +1048,11 @@ mod tests {
         app.take_tasks();
         app.on_msg(Msg::Player(PlayerEvent::Eof));
         assert!(app.current().is_none());
-        assert_eq!(app.queue.repeat(), Repeat::One, "music preference is retained");
+        assert_eq!(
+            app.queue.repeat(),
+            Repeat::One,
+            "music preference is retained"
+        );
         let pending = app.pending_podcast_progress();
         assert_eq!(pending.items.len(), 1);
         assert!(pending.items[0].finished);
@@ -641,8 +1068,12 @@ mod tests {
                 app.tab = Tab::Podcasts;
                 app.podcast_all = all;
                 app.podcasts.open = Some(OpenPodcast {
-                    show: show("show"), tracks: vec![episode("a", 10.0), episode("b", 20.0), episode("c", 30.0)],
-                    loading: false, total: 3, req: 0, pages: 1,
+                    show: show("show"),
+                    tracks: vec![episode("a", 10.0), episode("b", 20.0), episode("c", 30.0)],
+                    loading: false,
+                    total: 3,
+                    req: 0,
+                    pages: 1,
                 });
                 app.podcasts.episode_state.select(Some(1));
                 app.activate_podcast(from_start);
@@ -651,15 +1082,24 @@ mod tests {
                 app.podcasts.open = None;
                 app.podcast_all = !all;
                 app.on_msg(Msg::Podcasts(PodcastMsg::Play {
-                    intent, from_start, checkpoint: None, result: Ok(vec![episode("b", 240.0)]),
+                    intent,
+                    from_start,
+                    checkpoint: None,
+                    result: Ok(vec![episode("b", 240.0)]),
                 }));
                 let ids: Vec<_> = app.queue.tracks().iter().map(|t| t.id.as_str()).collect();
                 assert_eq!(ids, if all { vec!["a", "b", "c"] } else { vec!["b"] });
                 assert_eq!(app.queue.pos(), Some(usize::from(all)));
-                assert_eq!(resume_position(app.current().unwrap()), if from_start { 0.0 } else { 240.0 });
+                assert_eq!(
+                    resume_position(app.current().unwrap()),
+                    if from_start { 0.0 } else { 240.0 }
+                );
                 app.take_player();
                 app.next(End::Skip);
-                assert_eq!(app.current().map(|t| t.id.as_str()), if all { Some("c") } else { None });
+                assert_eq!(
+                    app.current().map(|t| t.id.as_str()),
+                    if all { Some("c") } else { None }
+                );
             }
         }
     }
@@ -671,7 +1111,9 @@ mod tests {
         app.search.input = "podcast".into();
         app.search.submit();
         app.on_msg(Msg::Search {
-            generation: app.search.generation(), query: "podcast".into(), page: 0,
+            generation: app.search.generation(),
+            query: "podcast".into(),
+            page: 0,
             result: Ok((vec![episode("a", 10.0), episode("b", 20.0)], Some(2))),
         });
         app.search_state.select(Some(0));
@@ -681,11 +1123,17 @@ mod tests {
         app.activate();
         let intent = app.intent;
         app.on_msg(Msg::Podcasts(PodcastMsg::Play {
-            intent: old_intent, from_start: false, checkpoint: None, result: Ok(vec![episode("a", 50.0)]),
+            intent: old_intent,
+            from_start: false,
+            checkpoint: None,
+            result: Ok(vec![episode("a", 50.0)]),
         }));
         assert!(app.current().is_none());
         app.on_msg(Msg::Podcasts(PodcastMsg::Play {
-            intent, from_start: false, checkpoint: None, result: Ok(vec![episode("b", 70.0)]),
+            intent,
+            from_start: false,
+            checkpoint: None,
+            result: Ok(vec![episode("b", 70.0)]),
         }));
         assert_eq!(app.queue.len(), 2);
         assert_eq!(app.queue.pos(), Some(1));
@@ -704,7 +1152,10 @@ mod tests {
         app.podcasts.state.select(Some(1));
         app.activate_podcast(false);
         app.on_msg(Msg::Podcasts(PodcastMsg::Episodes {
-            req: old_req, id: "a".into(), page: 0, result: Ok((show("a"), vec![episode("old", 0.0)], 1)),
+            req: old_req,
+            id: "a".into(),
+            page: 0,
+            result: Ok((show("a"), vec![episode("old", 0.0)], 1)),
         }));
         let open = app.podcasts.open.as_ref().unwrap();
         assert_eq!(open.show.id, "b");
@@ -715,10 +1166,17 @@ mod tests {
     fn progress_ack_does_not_delete_a_newer_checkpoint_and_retry_keeps_time() {
         let mut outbox = ProgressOutbox::default();
         let first = PodcastProgress {
-            track_id: "e".into(), position: 10.0, length: 600.0, finished: false,
+            track_id: "e".into(),
+            position: 10.0,
+            length: 600.0,
+            finished: false,
             timestamp: "2026-10-30T10:00:00.123Z".into(),
         };
-        let later = PodcastProgress { position: 20.0, timestamp: "2026-10-30T10:00:01.123Z".into(), ..first.clone() };
+        let later = PodcastProgress {
+            position: 20.0,
+            timestamp: "2026-10-30T10:00:01.123Z".into(),
+            ..first.clone()
+        };
         outbox.push(first.clone());
         assert_eq!(outbox.next(), Some(first.clone()));
         outbox.push(later.clone());
@@ -734,7 +1192,12 @@ mod tests {
     fn podcast_actions_do_not_start_music_and_finished_episodes_restart_at_zero() {
         let mut app = App::for_test();
         app.tab = Tab::Podcasts;
-        for action in [Action::Shuffle, Action::Dislike, Action::TrackWave, Action::AddToPlaylist] {
+        for action in [
+            Action::Shuffle,
+            Action::Dislike,
+            Action::TrackWave,
+            Action::AddToPlaylist,
+        ] {
             app.act(action);
         }
         assert!(app.take_tasks().is_empty() && app.take_player().is_empty());
@@ -742,11 +1205,23 @@ mod tests {
         track.progress.as_mut().unwrap().finished = true;
         assert_eq!(resume_position(&track), 0.0);
         let intent = app.new_intent();
-        app.on_msg(Msg::Podcasts(PodcastMsg::Play { intent, from_start: true, checkpoint: None, result: Ok(vec![episode("e", 240.0)]) }));
+        app.on_msg(Msg::Podcasts(PodcastMsg::Play {
+            intent,
+            from_start: true,
+            checkpoint: None,
+            result: Ok(vec![episode("e", 240.0)]),
+        }));
         assert_eq!(app.time_pos, 0.0);
-        app.restore_podcast_progress(PendingPodcastProgress { account: "someone-else".into(), items: vec![PodcastProgress {
-            track_id: "private".into(), position: 10.0, length: 600.0, finished: false, timestamp: iso_now(),
-        }] });
+        app.restore_podcast_progress(PendingPodcastProgress {
+            account: "someone-else".into(),
+            items: vec![PodcastProgress {
+                track_id: "private".into(),
+                position: 10.0,
+                length: 600.0,
+                finished: false,
+                timestamp: iso_now(),
+            }],
+        });
         assert!(app.pending_podcast_progress().items.is_empty());
     }
 
@@ -754,13 +1229,27 @@ mod tests {
     fn transport_regression_buffering_keeps_music_preload_and_success_accounting() {
         for initially_buffering in [false, true] {
             let mut app = App::for_test();
-            let music = |id: &str| Track::from_json(&json!({
-                "id": id, "title": id, "type": "music", "durationMs": 120000,
-            })).unwrap();
-            app.play_list("Music", PlayContext::default(), vec![music("a"), music("b")], 0);
+            let music = |id: &str| {
+                Track::from_json(&json!({
+                    "id": id, "title": id, "type": "music", "durationMs": 120000,
+                }))
+                .unwrap()
+            };
+            app.play_list(
+                "Music",
+                PlayContext::default(),
+                vec![music("a"), music("b")],
+                0,
+            );
             let generation = app.generation;
             app.take_player();
-            app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
+            app.on_msg(Msg::Url {
+                generation,
+                result: Ok(crate::api::FileInfo {
+                    url: "audio".into(),
+                    ..Default::default()
+                }),
+            });
             app.take_player();
             app.take_tasks();
             app.errors_in_row = 3;
@@ -769,15 +1258,30 @@ mod tests {
             app.on_msg(Msg::Player(PlayerEvent::Buffering(false)));
             app.on_msg(Msg::Player(PlayerEvent::TimePos(0.5)));
             assert_eq!(app.errors_in_row, 0);
-            assert!(app.take_tasks().iter().any(|task| matches!(task, Task::Preload { idx: 1, .. })));
+            assert!(
+                app.take_tasks()
+                    .iter()
+                    .any(|task| matches!(task, Task::Preload { idx: 1, .. }))
+            );
         }
     }
     fn playing_episode() -> App {
         let mut app = App::for_test();
-        app.play_list("Podcast", PlayContext::default(), vec![episode("e", 240.0)], 0);
+        app.play_list(
+            "Podcast",
+            PlayContext::default(),
+            vec![episode("e", 240.0)],
+            0,
+        );
         let generation = app.generation;
         app.take_player();
-        app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation,
+            result: Ok(crate::api::FileInfo {
+                url: "audio".into(),
+                ..Default::default()
+            }),
+        });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(600.0)));
         app.on_msg(Msg::Player(PlayerEvent::Buffering(false)));
@@ -818,12 +1322,17 @@ mod tests {
         for source in [Source::List("next".into()), Source::Wave] {
             let mut app = playing_episode();
             app.queue.set_repeat(Repeat::One);
-            let music = Track::from_json(&json!({"id":"music", "title":"Music", "type":"music"})).unwrap();
+            let music =
+                Track::from_json(&json!({"id":"music", "title":"Music", "type":"music"})).unwrap();
             app.queue.after_current(source, vec![music]);
             app.on_msg(Msg::Player(PlayerEvent::Eof));
             assert!(app.current().is_none());
             assert_eq!(app.queue.repeat(), Repeat::One);
-            assert!(!app.take_tasks().iter().any(|t| matches!(t, Task::Preload { .. } | Task::WaveMore { .. })));
+            assert!(
+                !app.take_tasks()
+                    .iter()
+                    .any(|t| matches!(t, Task::Preload { .. } | Task::WaveMore { .. }))
+            );
         }
     }
 
@@ -833,7 +1342,11 @@ mod tests {
         app.podcasts.favorites_ready = true;
         app.set_podcast_favorite(show("s"));
         app.take_tasks();
-        app.on_msg(Msg::Podcasts(PodcastMsg::Favorite { show: show("s"), like: true, result: Ok(()) }));
+        app.on_msg(Msg::Podcasts(PodcastMsg::Favorite {
+            show: show("s"),
+            like: true,
+            result: Ok(()),
+        }));
         app.set_podcast_favorite(show("s"));
         assert!(app.take_tasks().iter().any(|t| matches!(
             t, Task::Podcast(PodcastTask::Favorite { show, like: false }) if show.id == "s"
@@ -844,7 +1357,10 @@ mod tests {
     fn linked_episode_reconciles_pending_progress_before_server_resume() {
         let mut app = playing_episode();
         let intent = app.new_intent();
-        app.on_msg(Msg::Podcasts(PodcastMsg::Linked { intent, id: "e".into() }));
+        app.on_msg(Msg::Podcasts(PodcastMsg::Linked {
+            intent,
+            id: "e".into(),
+        }));
         assert!(app.take_tasks().iter().any(|t| matches!(
             t, Task::Podcast(PodcastTask::Play { checkpoint: Some(report), .. })
                 if report.track_id == "e" && report.position == 241.0
@@ -854,22 +1370,33 @@ mod tests {
     #[test]
     fn enabled_lastfm_excludes_podcasts_but_still_reports_music() {
         let mut app = playing_episode();
-        app.lastfm = Lastfm::On(LastfmSession { name: "test".into(), key: "test-session".into() });
+        app.lastfm = Lastfm::On(LastfmSession {
+            name: "test".into(),
+            key: "test-session".into(),
+        });
         for position in 242..487 {
             app.on_msg(Msg::Player(PlayerEvent::TimePos(position as f64)));
         }
         assert!(app.play.as_ref().unwrap().report.played >= 240.0);
         assert!(!app.take_tasks().iter().any(|task| matches!(
-            task, Task::LastfmNowPlaying { .. } | Task::LastfmScrobble { .. }
+            task,
+            Task::LastfmNowPlaying { .. } | Task::LastfmScrobble { .. }
         )));
         let music = Track::from_json(&json!({
             "id":"music", "type":"music", "title":"Music", "durationMs":600000,
             "artists":[{"id":"artist", "name":"Artist"}],
-        })).unwrap();
+        }))
+        .unwrap();
         app.play_list("Music", PlayContext::default(), vec![music], 0);
         let generation = app.generation;
         app.take_player();
-        app.on_msg(Msg::Url { generation, result: Ok(crate::api::FileInfo { url: "audio".into(), ..Default::default() }) });
+        app.on_msg(Msg::Url {
+            generation,
+            result: Ok(crate::api::FileInfo {
+                url: "audio".into(),
+                ..Default::default()
+            }),
+        });
         app.take_player();
         app.on_msg(Msg::Player(PlayerEvent::Duration(600.0)));
         app.on_msg(Msg::Player(PlayerEvent::TimePos(1.0)));
@@ -885,30 +1412,64 @@ mod tests {
         app.queue.set_source(Source::Wave);
         let selected = episode("selected", 0.0);
         app.podcasts.open = Some(OpenPodcast {
-            show: show("show"), tracks: vec![selected.clone()], loading: false, total: 1, req: 0, pages: 1,
+            show: show("show"),
+            tracks: vec![selected.clone()],
+            loading: false,
+            total: 1,
+            req: 0,
+            pages: 1,
         });
         app.podcasts.episode_state.select(Some(0));
         app.act(Action::LikeSelected);
         assert!(app.is_liked(&selected));
-        assert!(!app.is_liked(app.current().unwrap()), "L must not rate the playing episode");
-        assert!(app.likes.tracks().is_empty(), "podcast must not enter the music list");
+        assert!(
+            !app.is_liked(app.current().unwrap()),
+            "L must not rate the playing episode"
+        );
+        assert!(
+            app.likes.tracks().is_empty(),
+            "podcast must not enter the music list"
+        );
         let tasks = app.take_tasks();
-        let [Task::SetLike { track, like: true, req }] = tasks.as_slice() else { panic!("{tasks:?}") };
+        let [
+            Task::SetLike {
+                track,
+                like: true,
+                req,
+            },
+        ] = tasks.as_slice()
+        else {
+            panic!("{tasks:?}")
+        };
         assert_eq!(track.id, selected.id);
         let selected_req = *req;
         app.act(Action::LikeCurrent);
         assert!(app.is_liked(app.current().unwrap()));
         let tasks = app.take_tasks();
         assert!(!tasks.iter().any(|t| matches!(t, Task::WaveFeedback { .. })));
-        assert!(tasks.iter().any(|t| matches!(t, Task::SetLike { track, like: true, .. } if track.id == "e")));
+        assert!(
+            tasks
+                .iter()
+                .any(|t| matches!(t, Task::SetLike { track, like: true, .. } if track.id == "e"))
+        );
         app.on_msg(Msg::LikeSet {
-            id: selected.id.clone(), req: selected_req,
+            id: selected.id.clone(),
+            req: selected_req,
             result: Err(ApiError::from_anyhow(&anyhow::anyhow!("write failed"))),
         });
-        assert!(!app.is_liked(&selected), "failed write restores the selected episode's mark");
-        assert!(app.is_liked(app.current().unwrap()), "other episode's pending like is unchanged");
+        assert!(
+            !app.is_liked(&selected),
+            "failed write restores the selected episode's mark"
+        );
+        assert!(
+            app.is_liked(app.current().unwrap()),
+            "other episode's pending like is unchanged"
+        );
         assert!(app.likes.tracks().is_empty());
-        assert!(app.take_player().is_empty(), "liking must not start or move playback");
+        assert!(
+            app.take_player().is_empty(),
+            "liking must not start or move playback"
+        );
     }
 
     #[test]
@@ -926,10 +1487,16 @@ mod tests {
         app.load_liked();
         app.on_msg(Msg::LikedIds(vec![track.full_id()]));
         app.on_msg(Msg::Liked(Ok(vec![track.clone()])));
-        assert!(!app.is_liked(&track), "stale reload cannot undo a pending unlike");
-        app.on_msg(Msg::LikeSet { id: track.id.clone(), req, result: Ok(()) });
+        assert!(
+            !app.is_liked(&track),
+            "stale reload cannot undo a pending unlike"
+        );
+        app.on_msg(Msg::LikeSet {
+            id: track.id.clone(),
+            req,
+            result: Ok(()),
+        });
         assert!(!app.is_liked(&track));
         assert!(app.likes.tracks().is_empty());
     }
-
 }
