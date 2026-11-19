@@ -160,6 +160,7 @@ fn main() -> Result<()> {
     // unless icons are switched in the settings window.
     let no_icons = cli.no_icons || config::env("NO_ICONS").is_some();
     app.set_icons(s.icons && !no_icons);
+    app.theme = s.theme;
     let run = RunOnly {
         icons: no_icons.then_some(false),
         output: output_env,
@@ -461,6 +462,7 @@ fn settings_of(app: &app::App, saved: &config::Settings, run: RunOnly) -> config
     config::Settings {
         volume: app.save_volume(),
         icons: own(app.icons, run.icons, saved.icons),
+        theme: app.theme,
         art: Some(app.art),
         eq: &eq::PRESETS[app.eq],
         quality: &api::QUALITIES[app.quality],

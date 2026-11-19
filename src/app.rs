@@ -290,6 +290,14 @@ pub enum Modal {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
 /// Rows of the settings window.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Setting {
@@ -304,6 +312,7 @@ pub enum Setting {
     Api,
     Art,
     Icons,
+    Theme,
     RemainingTime,
     AudioInfo,
     Ynison,
@@ -315,7 +324,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 19] = [
+    pub const ALL: [Setting; 20] = [
         Setting::Quality,
         Setting::Equalizer,
         Setting::Crossfade,
@@ -327,6 +336,7 @@ impl Setting {
         Setting::Api,
         Setting::Art,
         Setting::Icons,
+        Setting::Theme,
         Setting::RemainingTime,
         Setting::AudioInfo,
         Setting::HideAccount,
@@ -524,6 +534,7 @@ pub struct App {
     pub podcast_all: bool,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
+    pub theme: Theme,
     /// What «Сейчас играет» shows above the track; covers are downloaded only for `Art::Cover`.
     pub art: Art,
     pub output: Output,
@@ -641,6 +652,7 @@ impl App {
             finish_track: false,
             podcast_all: true,
             icons: true,
+            theme: Theme::default(),
             art: Art::Cover,
             output: Output::Auto,
             hide_account: false,
@@ -2366,6 +2378,11 @@ impl App {
             }
             .to_string(),
             Setting::Art => self.art.name().to_string(),
+            Setting::Theme => match self.theme {
+                Theme::Dark => "тёмная",
+                Theme::Light => "светлая",
+            }
+            .into(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
             Setting::Output => self.output.name().to_string(),
             Setting::HideAccount => if self.hide_account {
@@ -2472,6 +2489,12 @@ impl App {
                 self.set_art(Art::ALL[cycle(i, Art::ALL.len())]);
             }
             Setting::Icons => self.set_icons(!self.icons),
+            Setting::Theme => {
+                self.theme = match self.theme {
+                    Theme::Dark => Theme::Light,
+                    Theme::Light => Theme::Dark,
+                }
+            }
             Setting::Output => {
                 let i = Output::ALL
                     .iter()
@@ -3316,6 +3339,12 @@ mod tests {
         assert!(!app.icons);
         app.on_key(key(KeyCode::Right));
         assert!(app.icons);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.theme, Theme::Dark);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.theme, Theme::Light);
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.theme, Theme::Dark);
         // «Обратный отсчёт».
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Enter));

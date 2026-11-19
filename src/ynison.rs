@@ -66,7 +66,6 @@ pub enum Event {
     SelectedLocally {
         claim: u64,
         restored: Restored,
-        paused: bool,
     },
     Takeover {
         request: u64,
@@ -308,11 +307,13 @@ impl RemoteVersions {
         ) else {
             return false;
         };
-        if timestamp <= *previous {
+        // Local reports and remote commands may come from clocks that disagree.
+        // A local echo cannot make a new command from the phone stale.
+        if author.is_empty() || author == device || timestamp <= *previous {
             return false;
         }
         *previous = timestamp;
-        !author.is_empty() && author != device
+        true
     }
 
     fn volume_event(&mut self, frame: &Value, device: &str) -> Option<Event> {
@@ -836,18 +837,16 @@ fn worker(
                     }
                     let active_here =
                         v["active_device_id_optional"].as_str() == Some(id.device.as_str());
-                    let status = &v["player_state"]["status"];
                     switched_here = active_here
                         && (switched_here
                             || snapshot.as_ref().is_some_and(|previous| {
-                                previous["active_device_id_optional"]
-                                    .as_str()
-                                    .is_some_and(|prior| prior != id.device)
+                                previous["active_device_id_optional"].as_str()
+                                    != Some(id.device.as_str())
                             }));
                     if switched_here
                         && current.player.is_none()
                         && current.takeover.is_none()
-                        && let Some(paused) = status["paused"].as_bool()
+                        && current_id(&v["player_state"]["player_queue"]).is_some()
                     {
                         switched_here = false;
                         if let Some(loaded) = restore_live(&v, &api) {
@@ -857,7 +856,6 @@ fn worker(
                                 event: Event::SelectedLocally {
                                     claim: current.claim,
                                     restored: loaded,
-                                    paused,
                                 },
                             });
                         }
@@ -1016,12 +1014,20 @@ mod tests {
                 .events(&frame, "local", &desired, &Api::new("unused"))
                 .is_empty()
         );
-        frame["player_state"]["status"]["version"] = json!({"device_id":"local","timestamp_ms":11});
+        frame["player_state"]["status"]["version"] = json!({"device_id":"local","timestamp_ms":50});
         assert!(
             versions
                 .events(&frame, "local", &desired, &Api::new("unused"))
                 .is_empty()
         );
+        frame["player_state"]["status"]["version"] = json!({"device_id":"phone","timestamp_ms":11});
+        frame["player_state"]["status"]["paused"] = json!(false);
+        assert!(matches!(
+            versions
+                .events(&frame, "local", &desired, &Api::new("unused"))
+                .as_slice(),
+            [Event::RemotePlayback { paused: false, .. }]
+        ));
     }
     #[test]
     fn invalid_indices_and_number_formats() {

@@ -1,5 +1,5 @@
 use crate::api::{QUALITIES, Quality, quality_index};
-use crate::app::{Art, LastfmSession, Output, PendingPodcastProgress, PendingScrobbles};
+use crate::app::{Art, LastfmSession, Output, PendingPodcastProgress, PendingScrobbles, Theme};
 use crate::eq::{PRESETS, Preset, index as eq_index};
 use crate::queue::Repeat;
 use anyhow::{Context, Result};
@@ -43,6 +43,8 @@ pub struct Settings {
     pub volume: u8,
     /// Nerd Font icons (false — plain Unicode symbols).
     pub icons: bool,
+    #[serde(deserialize_with = "lenient")]
+    pub theme: Theme,
     /// What «Сейчас играет» shows above the track; not set in older configs (see `Config::covers`).
     #[serde(deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub art: Option<Art>,
@@ -82,6 +84,7 @@ impl Default for Settings {
         Settings {
             volume: 70,
             icons: true,
+            theme: Theme::default(),
             art: None,
             eq: &PRESETS[0],
             quality: &QUALITIES[quality_index("")],
@@ -316,7 +319,7 @@ mod tests {
     /// (not a broken config), and the settings are written under the same names.
     #[test]
     fn settings_format() {
-        use crate::app::Art;
+        use crate::app::{Art, Theme};
         use crate::queue::Repeat;
         let cfg: Config = serde_json::from_str(
             r#"{"token": "t", "volume": 40, "art": "spectrum", "eq": "laptop", "quality": "lq", "repeat": "one",
@@ -325,6 +328,10 @@ mod tests {
         )
         .unwrap();
         assert!(!cfg.settings.show_audio_info);
+        assert_eq!(cfg.settings.theme, Theme::Dark);
+        let light: Settings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
+        assert_eq!(light.theme, Theme::Light);
+        assert_eq!(serde_json::to_value(&light).unwrap()["theme"], "light");
         let audio: Settings = serde_json::from_str(r#"{"show_audio_info":true}"#).unwrap();
         assert!(audio.show_audio_info);
         assert_eq!(

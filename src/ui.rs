@@ -2,7 +2,7 @@
 
 use crate::api::Track;
 use crate::app::{
-    App, Art, Lastfm, Modal, PodcastSection, Repeat, Setting, Source, StationRow, Tab,
+    App, Art, Lastfm, Modal, PodcastSection, Repeat, Setting, Source, StationRow, Tab, Theme,
 };
 use crate::keymap::{self, Action, Action as A, Section};
 use ratatui::Frame;
@@ -18,14 +18,54 @@ use ratatui_image::{FilterType, Resize, StatefulImage};
 
 // ---------------------------------------------------------------- theme
 
-const ACCENT: Color = Color::Rgb(255, 219, 77);
-const HEART: Color = Color::Rgb(255, 77, 106);
-const ERROR: Color = Color::Rgb(255, 99, 99);
-const SUB: Color = Color::Rgb(160, 160, 176);
-const MUTED: Color = Color::Rgb(98, 98, 116);
-const BORDER: Color = Color::Rgb(62, 62, 78);
-const SEL_BG: Color = Color::Rgb(42, 42, 56);
-const ON_ACCENT: Color = Color::Rgb(20, 20, 24);
+#[derive(Clone, Copy)]
+struct Palette {
+    background: Color,
+    text: Color,
+    accent: Color,
+    heart: Color,
+    error: Color,
+    sub: Color,
+    muted: Color,
+    border: Color,
+    selection: Color,
+    on_accent: Color,
+}
+
+impl Palette {
+    fn for_theme(theme: Theme) -> Self {
+        match theme {
+            Theme::Dark => Self {
+                background: Color::Rgb(20, 20, 24),
+                text: Color::Rgb(235, 235, 242),
+                accent: Color::Rgb(255, 219, 77),
+                heart: Color::Rgb(255, 77, 106),
+                error: Color::Rgb(255, 99, 99),
+                sub: Color::Rgb(160, 160, 176),
+                muted: Color::Rgb(146, 146, 162),
+                border: Color::Rgb(80, 80, 96),
+                selection: Color::Rgb(42, 42, 56),
+                on_accent: Color::Rgb(20, 20, 24),
+            },
+            Theme::Light => Self {
+                background: Color::Rgb(248, 247, 242),
+                text: Color::Rgb(33, 32, 39),
+                accent: Color::Rgb(122, 77, 0),
+                heart: Color::Rgb(164, 23, 68),
+                error: Color::Rgb(173, 31, 42),
+                sub: Color::Rgb(81, 76, 86),
+                muted: Color::Rgb(101, 94, 106),
+                border: Color::Rgb(153, 145, 159),
+                selection: Color::Rgb(230, 224, 210),
+                on_accent: Color::Rgb(255, 251, 238),
+            },
+        }
+    }
+
+    fn surface(self) -> Style {
+        Style::new().fg(self.text).bg(self.background)
+    }
+}
 
 // ---------------------------------------------------------------- icons
 
@@ -158,31 +198,35 @@ fn spinner(tick: u64) -> &'static str {
     FRAMES[tick as usize % FRAMES.len()]
 }
 
-fn panel<'a>(icon: &'a str, title: impl Into<String>) -> Block<'a> {
+fn panel<'a>(palette: Palette, icon: &'a str, title: impl Into<String>) -> Block<'a> {
     Block::bordered()
+        .style(palette.surface())
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(BORDER))
+        .border_style(Style::new().fg(palette.border))
         .title(Line::from(vec![
             Span::raw(" "),
-            Span::styled(icon, Style::new().fg(ACCENT)),
+            Span::styled(icon, Style::new().fg(palette.accent)),
             Span::styled(
                 format!(" {} ", title.into()),
-                Style::new().fg(Color::Reset).bold(),
+                Style::new().fg(palette.text).bold(),
             ),
         ]))
         .padding(Padding::horizontal(1))
 }
 
-fn key_hint(k: &str, d: &str) -> [Span<'static>; 2] {
+fn key_hint(palette: Palette, k: &str, d: &str) -> [Span<'static>; 2] {
     [
-        Span::styled(k.to_string(), Style::new().fg(ACCENT).bold()),
-        Span::styled(format!(" {d}   "), Style::new().fg(MUTED)),
+        Span::styled(k.to_string(), Style::new().fg(palette.accent).bold()),
+        Span::styled(format!(" {d}   "), Style::new().fg(palette.muted)),
     ]
 }
 
 // ---------------------------------------------------------------- root
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let palette = Palette::for_theme(app.theme);
+    let area = f.area();
+    f.buffer_mut().set_style(area, palette.surface());
     app.tick = app.tick.wrapping_add(1);
     let [top, _, body, player, hints] = Layout::vertical([
         Constraint::Length(1),
@@ -219,12 +263,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_help(f, app);
     }
     if app.show_about {
-        draw_about(f, ic(app));
+        draw_about(palette, f, ic(app));
     }
     draw_modal(f, app);
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let tabs = [
         (i.wave, "Волна"),
@@ -236,20 +281,26 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     ];
     let mut spans = vec![Span::styled(
         format!(" {} ", i.logo),
-        Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+        Style::new().fg(palette.on_accent).bg(palette.accent).bold(),
     )];
     if area.width >= 76 {
-        spans.push(Span::styled(" ymusic  ", Style::new().fg(ACCENT).bold()));
+        spans.push(Span::styled(
+            " ymusic  ",
+            Style::new().fg(palette.accent).bold(),
+        ));
     }
     let compact = area.width < 130;
     for (n, (icon, name)) in tabs.iter().enumerate() {
         if n == app.tab.index() {
             spans.push(Span::styled(
                 format!(" {} {name} ", n + 1),
-                Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+                Style::new().fg(palette.on_accent).bg(palette.accent).bold(),
             ));
         } else {
-            spans.push(Span::styled(format!(" {}", n + 1), Style::new().fg(MUTED)));
+            spans.push(Span::styled(
+                format!(" {}", n + 1),
+                Style::new().fg(palette.muted),
+            ));
             let label = if area.width < 76 {
                 String::new()
             } else if compact {
@@ -257,7 +308,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!(" {icon} {name} ")
             };
-            spans.push(Span::styled(label, Style::new().fg(SUB)));
+            spans.push(Span::styled(label, Style::new().fg(palette.sub)));
         }
         spans.push(Span::raw(" "));
     }
@@ -272,7 +323,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut right = vec![Span::styled(
         format!("{} {who}", i.user),
-        Style::new().fg(SUB),
+        Style::new().fg(palette.sub),
     )];
     if app.account.has_plus {
         let plus = if compact {
@@ -280,7 +331,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         } else {
             format!("  {} Плюс ", i.plus)
         };
-        right.push(Span::styled(plus, Style::new().fg(ACCENT).bold()));
+        right.push(Span::styled(plus, Style::new().fg(palette.accent).bold()));
     }
     let right = Line::from(right);
     let [l, r] = Layout::horizontal([
@@ -346,17 +397,21 @@ fn draw_cover(buf: &mut Buffer, area: Rect, seed: &str, note: &str) {
 }
 
 fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
-    let block = panel(i.note, "Сейчас играет");
+    let block = panel(palette, i.note, "Сейчас играет");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if app.current().is_none() {
         let lines = vec![
             Line::from(""),
-            Line::from(Span::styled("Ничего не играет", Style::new().fg(SUB))),
+            Line::from(Span::styled(
+                "Ничего не играет",
+                Style::new().fg(palette.sub),
+            )),
             Line::from(""),
-            Line::from(key_hint("w", "Моя волна").to_vec()),
-            Line::from(key_hint("2", "станции").to_vec()),
+            Line::from(key_hint(palette, "w", "Моя волна").to_vec()),
+            Line::from(key_hint(palette, "2", "станции").to_vec()),
         ];
         f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
         return;
@@ -368,7 +423,7 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
             let (art_area, info) = art_layout(app, inner);
             if art_area.height >= 3 {
                 if art == Art::Spectrum {
-                    draw_spectrum(f.buffer_mut(), art_area, &app.spectrum);
+                    draw_spectrum(palette, f.buffer_mut(), art_area, &app.spectrum);
                 } else {
                     draw_now_cover(f, app, art_area);
                 }
@@ -382,14 +437,17 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             t.title.as_str(),
-            Style::new().fg(Color::Reset).bold(),
+            Style::new().fg(palette.text).bold(),
         )),
-        Line::from(Span::styled(t.artists.as_str(), Style::new().fg(SUB))),
+        Line::from(Span::styled(
+            t.artists.as_str(),
+            Style::new().fg(palette.sub),
+        )),
     ];
     if !t.album.is_empty() {
         lines.push(Line::from(Span::styled(
             format!("{} {}", i.album, t.album),
-            Style::new().fg(MUTED),
+            Style::new().fg(palette.muted),
         )));
     }
     lines.push(Line::from(""));
@@ -398,13 +456,13 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
         let icon = if app.queue.is_wave() { i.wave } else { i.queue };
         lines.push(Line::from(Span::styled(
             format!("{icon} {src}"),
-            Style::new().fg(ACCENT),
+            Style::new().fg(palette.accent),
         )));
     }
     if t.is_podcast() {
         lines.push(Line::from(Span::styled(
             podcast_progress(t),
-            Style::new().fg(SUB),
+            Style::new().fg(palette.sub),
         )));
     }
     if t.is_music() || t.is_podcast() {
@@ -416,18 +474,18 @@ fn draw_now_playing(f: &mut Frame, app: &mut App, area: Rect) {
             };
             lines.push(Line::from(Span::styled(
                 format!("{} {label}", i.heart),
-                Style::new().fg(HEART),
+                Style::new().fg(palette.heart),
             )));
         } else {
             lines.push(Line::from(vec![
-                Span::styled("l", Style::new().fg(ACCENT).bold()),
+                Span::styled("l", Style::new().fg(palette.accent).bold()),
                 Span::styled(
                     if t.is_podcast() {
                         " — лайк выпуску"
                     } else {
                         " — добавить в любимые"
                     },
-                    Style::new().fg(MUTED),
+                    Style::new().fg(palette.muted),
                 ),
             ]));
         }
@@ -484,7 +542,7 @@ fn draw_now_cover(f: &mut Frame, app: &mut App, area: Rect) {
 
 /// Spectrum bars (`levels`: 0..1, low to high frequencies) across `area`, with gaps between
 /// them when there is room; heights in eighths of a cell, colored from the accent to the heart.
-fn draw_spectrum(buf: &mut Buffer, area: Rect, levels: &[f32]) {
+fn draw_spectrum(palette: Palette, buf: &mut Buffer, area: Rect, levels: &[f32]) {
     const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
     let n = levels.len() as u16;
     if n == 0 || area.width == 0 {
@@ -496,7 +554,7 @@ fn draw_spectrum(buf: &mut Buffer, area: Rect, levels: &[f32]) {
     let used = n.min(area.width) * bar_w;
     let left = area.x + (area.width.saturating_sub(used)) / 2;
     let mix = |t: f32| {
-        let (a, b) = (rgb(ACCENT), rgb(HEART));
+        let (a, b) = (rgb(palette.accent), rgb(palette.heart));
         let m = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
         Color::Rgb(m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
     };
@@ -610,6 +668,7 @@ fn track_table<'a>(
     playing: Option<usize>,
     history: bool,
 ) -> Table<'a> {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let rows: Vec<Row> = tracks
         .iter()
@@ -625,24 +684,30 @@ fn track_table<'a>(
                 } else {
                     equalizer(app.tick)
                 };
-                Span::styled(s, Style::new().fg(ACCENT).bold())
+                Span::styled(s, Style::new().fg(palette.accent).bold())
             } else {
-                Span::styled(format!("{}", n + 1), Style::new().fg(MUTED))
+                Span::styled(format!("{}", n + 1), Style::new().fg(palette.muted))
             };
             let heart = if app.is_liked(t) {
-                Span::styled(format!("{} ", i.heart), Style::new().fg(HEART))
+                Span::styled(format!("{} ", i.heart), Style::new().fg(palette.heart))
             } else {
                 Span::raw("  ")
             };
             let past = history && playing.is_some_and(|p| n < p);
             let (title_style, artist_style) = if !t.available {
-                (Style::new().fg(MUTED).crossed_out(), Style::new().fg(MUTED))
+                (
+                    Style::new().fg(palette.muted).crossed_out(),
+                    Style::new().fg(palette.muted),
+                )
             } else if is_playing {
-                (Style::new().fg(ACCENT).bold(), Style::new().fg(ACCENT))
+                (
+                    Style::new().fg(palette.accent).bold(),
+                    Style::new().fg(palette.accent),
+                )
             } else if past {
-                (Style::new().fg(SUB), Style::new().fg(MUTED))
+                (Style::new().fg(palette.sub), Style::new().fg(palette.muted))
             } else {
-                (Style::new().fg(Color::Reset), Style::new().fg(SUB))
+                (Style::new().fg(palette.text), Style::new().fg(palette.sub))
             };
             Row::new(vec![
                 Cell::from(Line::from(num).alignment(Alignment::Right)),
@@ -654,7 +719,7 @@ fn track_table<'a>(
                 Cell::from(
                     Line::from(Span::styled(
                         fmt_time(t.duration_ms as f64 / 1000.0),
-                        Style::new().fg(MUTED),
+                        Style::new().fg(palette.muted),
                     ))
                     .alignment(Alignment::Right),
                 ),
@@ -667,7 +732,7 @@ fn track_table<'a>(
         Cell::from("Исполнитель"),
         Cell::from(Line::from(i.clock).alignment(Alignment::Right)),
     ])
-    .style(Style::new().fg(MUTED))
+    .style(Style::new().fg(palette.muted))
     .bottom_margin(1);
     Table::new(
         rows,
@@ -680,15 +745,23 @@ fn track_table<'a>(
     )
     .header(header)
     .column_spacing(2)
-    .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
-    .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+    .row_highlight_style(
+        Style::new()
+            .bg(palette.selection)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(Line::from(Span::styled(
+        "▌",
+        Style::new().fg(palette.accent),
+    )))
     .highlight_spacing(HighlightSpacing::Always)
 }
 
 fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     if app.queue.is_empty() {
-        let block = panel(i.wave, "Моя волна");
+        let block = panel(palette, i.wave, "Моя волна");
         let inner = block.inner(area);
         f.render_widget(block, area);
         let rows: [(&str, &str); 6] = [
@@ -702,11 +775,11 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
         let mut lines = vec![
             Line::from(Span::styled(
                 format!("{}  ymusic", i.logo),
-                Style::new().fg(ACCENT).bold(),
+                Style::new().fg(palette.accent).bold(),
             )),
             Line::from(Span::styled(
                 "Яндекс Музыка в терминале",
-                Style::new().fg(SUB),
+                Style::new().fg(palette.sub),
             )),
             Line::from(""),
         ];
@@ -714,9 +787,9 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {k} "),
-                    Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+                    Style::new().fg(palette.on_accent).bg(palette.accent).bold(),
                 ),
-                Span::styled(format!("  {d:<36}"), Style::new().fg(SUB)),
+                Span::styled(format!("  {d:<36}"), Style::new().fg(palette.sub)),
             ]));
             lines.push(Line::from(""));
         }
@@ -747,12 +820,13 @@ fn draw_wave(f: &mut Frame, app: &mut App, area: Rect) {
         &mut st,
         app.queue.pos(),
         true,
-        panel(icon, title),
+        panel(palette, icon, title),
     );
     app.queue_state = st;
 }
 
 fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let title = if app.likes.loading() && app.likes.tracks().is_empty() {
         format!("Мне нравится · {}", spinner(app.tick))
     } else {
@@ -771,12 +845,13 @@ fn draw_liked(f: &mut Frame, app: &mut App, area: Rect) {
         &mut st,
         playing,
         false,
-        panel(ic(app).liked, title),
+        panel(palette, ic(app).liked, title),
     );
     app.liked_state = st;
 }
 
 fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     if let Some(open) = &app.playlists.open {
         let title = if open.loading && open.tracks.is_empty() {
@@ -797,7 +872,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
             &mut st,
             playing,
             false,
-            panel(i.queue, title),
+            panel(palette, i.queue, title),
         );
         app.open_state = st;
         return;
@@ -807,7 +882,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         format!("Плейлисты · {}", app.playlists.list().len())
     };
-    let block = panel(i.queue, title);
+    let block = panel(palette, i.queue, title);
     if app.playlists.list().is_empty() && !app.playlists.loading() {
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -815,7 +890,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
             .flex(Flex::Center)
             .areas(inner);
         f.render_widget(
-            Paragraph::new(Span::styled("Плейлистов нет", Style::new().fg(SUB)))
+            Paragraph::new(Span::styled("Плейлистов нет", Style::new().fg(palette.sub)))
                 .alignment(Alignment::Center),
             v,
         );
@@ -839,14 +914,14 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     equalizer(app.tick)
                 };
-                Span::styled(s, Style::new().fg(ACCENT).bold())
+                Span::styled(s, Style::new().fg(palette.accent).bold())
             } else {
-                Span::styled(format!("{}", n + 1), Style::new().fg(MUTED))
+                Span::styled(format!("{}", n + 1), Style::new().fg(palette.muted))
             };
             let title_style = if on {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(palette.accent).bold()
             } else {
-                Style::new().fg(Color::Reset)
+                Style::new().fg(palette.text)
             };
             Row::new(vec![
                 Cell::from(Line::from(num).alignment(Alignment::Right)),
@@ -854,7 +929,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(
                     Line::from(Span::styled(
                         format!("{} {}", p.track_count, i.note),
-                        Style::new().fg(MUTED),
+                        Style::new().fg(palette.muted),
                     ))
                     .alignment(Alignment::Right),
                 ),
@@ -866,7 +941,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Название"),
         Cell::from(Line::from("Треков").alignment(Alignment::Right)),
     ])
-    .style(Style::new().fg(MUTED))
+    .style(Style::new().fg(palette.muted))
     .bottom_margin(1);
     let table = Table::new(
         rows,
@@ -879,39 +954,51 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
     .header(header)
     .column_spacing(2)
     .block(block)
-    .row_highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
-    .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+    .row_highlight_style(
+        Style::new()
+            .bg(palette.selection)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(Line::from(Span::styled(
+        "▌",
+        Style::new().fg(palette.accent),
+    )))
     .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(table, area, &mut app.playlists_state);
 }
 
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let [input, results] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(3)]).areas(area);
     let mut spans = vec![Span::styled(
         format!("{}  ", i.search),
-        Style::new().fg(ACCENT),
+        Style::new().fg(palette.accent),
     )];
     if app.search.input.is_empty() && !app.search.editing {
         spans.push(Span::styled(
             "Трек или исполнитель…  (/ или i — ввод)",
-            Style::new().fg(MUTED),
+            Style::new().fg(palette.muted),
         ));
     } else {
         spans.push(Span::styled(
             app.search.input.clone(),
-            Style::new().fg(Color::Reset).bold(),
+            Style::new().fg(palette.text).bold(),
         ));
     }
     if app.search.editing && (app.tick / 2).is_multiple_of(2) {
-        spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+        spans.push(Span::styled("▎", Style::new().fg(palette.accent)));
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(if app.search.editing { ACCENT } else { BORDER }))
+                .border_style(Style::new().fg(if app.search.editing {
+                    palette.accent
+                } else {
+                    palette.border
+                }))
                 .padding(Padding::horizontal(1)),
         ),
         input,
@@ -939,7 +1026,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
         &mut st,
         playing,
         false,
-        panel(i.search, title),
+        panel(palette, i.search, title),
     );
     app.search_state = st;
 }
@@ -947,6 +1034,7 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- podcasts
 
 fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let [sections, mut content] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     let mut tabs = Vec::new();
@@ -956,9 +1044,9 @@ fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
         (PodcastSection::Search, "Поиск"),
     ] {
         let style = if app.podcasts.section == section {
-            Style::new().fg(ON_ACCENT).bg(ACCENT).bold()
+            Style::new().fg(palette.on_accent).bg(palette.accent).bold()
         } else {
-            Style::new().fg(SUB)
+            Style::new().fg(palette.sub)
         };
         tabs.push(Span::styled(format!(" {title} "), style));
     }
@@ -970,28 +1058,32 @@ fn draw_podcasts(f: &mut Frame, app: &mut App, area: Rect) {
         let podcasts = &app.podcasts;
         let mut spans = vec![Span::styled(
             format!("{}  ", ic(app).search),
-            Style::new().fg(ACCENT),
+            Style::new().fg(palette.accent),
         )];
         if podcasts.input.is_empty() && !podcasts.editing {
             spans.push(Span::styled(
                 "Название подкаста…  (/ или i — ввод)",
-                Style::new().fg(MUTED),
+                Style::new().fg(palette.muted),
             ));
         } else {
             // Keep the end and the cursor visible while editing a long query.
             let room = input.width.saturating_sub(8) as usize;
             let skip = podcasts.input.chars().count().saturating_sub(room);
             let text: String = podcasts.input.chars().skip(skip).collect();
-            spans.push(Span::styled(text, Style::new().fg(Color::Reset).bold()));
+            spans.push(Span::styled(text, Style::new().fg(palette.text).bold()));
         }
         if podcasts.editing && (app.tick / 2).is_multiple_of(2) {
-            spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+            spans.push(Span::styled("▎", Style::new().fg(palette.accent)));
         }
         f.render_widget(
             Paragraph::new(Line::from(spans)).block(
                 Block::bordered()
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(if podcasts.editing { ACCENT } else { BORDER }))
+                    .border_style(Style::new().fg(if podcasts.editing {
+                        palette.accent
+                    } else {
+                        palette.border
+                    }))
                     .padding(Padding::horizontal(1)),
             ),
             input,
@@ -1030,6 +1122,7 @@ fn podcast_window(
 }
 
 fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let podcasts = &app.podcasts;
     let shown = podcasts.shows.len();
     let of = match podcasts.total {
@@ -1044,7 +1137,11 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         String::new()
     };
-    let block = panel(ic(app).info, format!("Подкасты · {shown}{of}{loading}"));
+    let block = panel(
+        palette,
+        ic(app).info,
+        format!("Подкасты · {shown}{of}{loading}"),
+    );
     if shown == 0 {
         let message = if podcasts.loading {
             "Загрузка подкастов…"
@@ -1060,7 +1157,7 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(block, area);
         f.render_widget(
             Paragraph::new(message)
-                .style(Style::new().fg(SUB))
+                .style(Style::new().fg(palette.sub))
                 .wrap(Wrap { trim: true }),
             inner,
         );
@@ -1075,9 +1172,9 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(n, show)| {
             let on = current.is_some_and(|t| t.album_id.as_deref() == Some(show.id.as_str()));
             let style = if on {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(palette.accent).bold()
             } else {
-                Style::new().fg(Color::Reset)
+                Style::new().fg(palette.text)
             };
             let favorite = if app.podcasts.liked.contains(&show.id) {
                 " · В Моих"
@@ -1097,11 +1194,11 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         (start + n + 1).to_string()
                     },
-                    Style::new().fg(if on { ACCENT } else { MUTED }),
+                    Style::new().fg(if on { palette.accent } else { palette.muted }),
                 )),
                 Cell::from(vec![
                     Line::from(Span::styled(show.title.as_str(), style)),
-                    Line::from(Span::styled(details, Style::new().fg(SUB))),
+                    Line::from(Span::styled(details, Style::new().fg(palette.sub))),
                 ]),
             ])
             .height(2)
@@ -1109,13 +1206,16 @@ fn draw_podcast_shows(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(0)])
         .header(
             Row::new(["#", "Подкаст · выпуски / описание"])
-                .style(Style::new().fg(MUTED))
+                .style(Style::new().fg(palette.muted))
                 .bottom_margin(1),
         )
         .block(block)
         .column_spacing(1)
-        .row_highlight_style(Style::new().bg(SEL_BG).bold())
-        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+        .row_highlight_style(Style::new().bg(palette.selection).bold())
+        .highlight_symbol(Line::from(Span::styled(
+            "▌",
+            Style::new().fg(palette.accent),
+        )))
         .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(
         table,
@@ -1133,6 +1233,7 @@ fn podcast_progress(track: &Track) -> String {
 }
 
 fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let Some(open) = &app.podcasts.open else {
         return;
     };
@@ -1154,7 +1255,7 @@ fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
         open.total,
         loading
     );
-    let block = panel(ic(app).info, title);
+    let block = panel(palette, ic(app).info, title);
     if open.tracks.is_empty() {
         let inner = block.inner(area);
         let message = if open.loading {
@@ -1163,7 +1264,10 @@ fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
             "Выпусков нет"
         };
         f.render_widget(block, area);
-        f.render_widget(Paragraph::new(message).style(Style::new().fg(SUB)), inner);
+        f.render_widget(
+            Paragraph::new(message).style(Style::new().fg(palette.sub)),
+            inner,
+        );
         return;
     }
     let len = open.tracks.len();
@@ -1180,11 +1284,11 @@ fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
         .map(|(n, track)| {
             let on = current == Some(track.id.as_str());
             let style = if !track.available {
-                Style::new().fg(MUTED).crossed_out()
+                Style::new().fg(palette.muted).crossed_out()
             } else if on {
-                Style::new().fg(ACCENT).bold()
+                Style::new().fg(palette.accent).bold()
             } else {
-                Style::new().fg(Color::Reset)
+                Style::new().fg(palette.text)
             };
             let marker = if on {
                 if app.loading_track {
@@ -1233,7 +1337,10 @@ fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
             let title = Span::styled(track.title.as_str(), style);
             let title = if app.is_liked(track) {
                 Line::from(vec![
-                    Span::styled(format!("{} ", ic(app).heart), Style::new().fg(HEART)),
+                    Span::styled(
+                        format!("{} ", ic(app).heart),
+                        Style::new().fg(palette.heart),
+                    ),
                     title,
                 ])
             } else {
@@ -1242,11 +1349,11 @@ fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
             Row::new(vec![
                 Cell::from(Span::styled(
                     number,
-                    Style::new().fg(if on { ACCENT } else { MUTED }),
+                    Style::new().fg(if on { palette.accent } else { palette.muted }),
                 )),
                 Cell::from(vec![
                     title,
-                    Line::from(Span::styled(details, Style::new().fg(SUB))),
+                    Line::from(Span::styled(details, Style::new().fg(palette.sub))),
                 ]),
             ])
             .height(2)
@@ -1254,13 +1361,16 @@ fn draw_podcast_episodes(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(rows, [Constraint::Length(3), Constraint::Min(0)])
         .header(
             Row::new(["#", "Выпуск · дата / длительность / прогресс"])
-                .style(Style::new().fg(MUTED))
+                .style(Style::new().fg(palette.muted))
                 .bottom_margin(1),
         )
         .block(block)
         .column_spacing(1)
-        .row_highlight_style(Style::new().bg(SEL_BG).bold())
-        .highlight_symbol(Line::from(Span::styled("▌", Style::new().fg(ACCENT))))
+        .row_highlight_style(Style::new().bg(palette.selection).bold())
+        .highlight_symbol(Line::from(Span::styled(
+            "▌",
+            Style::new().fg(palette.accent),
+        )))
         .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(
         table,
@@ -1322,6 +1432,7 @@ fn podcast_description_lines(text: &str, width: u16) -> Vec<Line<'_>> {
 }
 
 fn draw_podcast_description(f: &mut Frame, app: &mut App) {
+    let palette = Palette::for_theme(app.theme);
     if app.tab != Tab::Podcasts {
         return;
     }
@@ -1336,11 +1447,11 @@ fn draw_podcast_description(f: &mut Frame, app: &mut App) {
         .areas(vertical);
     f.render_widget(Clear, area);
     let close = keymap::hint_keys(&[A::Back, A::PodcastDescription]);
-    let block = panel(ic(app).info, title)
-        .border_style(Style::new().fg(ACCENT))
+    let block = panel(palette, ic(app).info, title)
+        .border_style(Style::new().fg(palette.accent))
         .title_bottom(Line::from(Span::styled(
             format!(" {close} — закрыть · ↑↓ PgUp/PgDn Home/End "),
-            Style::new().fg(MUTED),
+            Style::new().fg(palette.muted),
         )));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1362,6 +1473,7 @@ fn draw_podcast_description(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let active = (app.queue.is_wave())
         .then(|| {
@@ -1386,8 +1498,8 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
                 ListItem::new(vec![
                     Line::from(""),
                     Line::from(vec![
-                        Span::styled(format!("{icon}  "), Style::new().fg(ACCENT)),
-                        Span::styled(h.to_uppercase(), Style::new().fg(SUB).bold()),
+                        Span::styled(format!("{icon}  "), Style::new().fg(palette.accent)),
+                        Span::styled(h.to_uppercase(), Style::new().fg(palette.sub).bold()),
                     ]),
                 ])
             }
@@ -1402,12 +1514,12 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
                         equalizer(app.tick)
                     };
                     Line::from(vec![
-                        Span::styled(format!("   {mark:<3} "), Style::new().fg(ACCENT)),
-                        Span::styled(s.name.as_str(), Style::new().fg(ACCENT).bold()),
+                        Span::styled(format!("   {mark:<3} "), Style::new().fg(palette.accent)),
+                        Span::styled(s.name.as_str(), Style::new().fg(palette.accent).bold()),
                     ])
                 } else {
                     Line::from(vec![
-                        Span::styled("   ·   ", Style::new().fg(MUTED)),
+                        Span::styled("   ·   ", Style::new().fg(palette.muted)),
                         Span::raw(s.name.as_str()),
                     ])
                 };
@@ -1416,8 +1528,12 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let list = List::new(items)
-        .block(panel(i.stations, "Станции"))
-        .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+        .block(panel(palette, i.stations, "Станции"))
+        .highlight_style(
+            Style::new()
+                .bg(palette.selection)
+                .add_modifier(Modifier::BOLD),
+        )
         .highlight_symbol("▌")
         .highlight_spacing(HighlightSpacing::Always);
     f.render_stateful_widget(list, area, &mut app.stations_state);
@@ -1426,10 +1542,11 @@ fn draw_stations(f: &mut Frame, app: &mut App, area: Rect) {
 // ---------------------------------------------------------------- player bar
 
 fn draw_player(f: &mut Frame, app: &App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let block = Block::new()
         .borders(Borders::TOP)
-        .border_style(Style::new().fg(BORDER))
+        .border_style(Style::new().fg(palette.border))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1446,7 +1563,11 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
         i.vol_hi
     };
     let filled = ((app.volume.min(100.0) / 10.0).round() as usize).min(10);
-    let vol_color = if app.muted { MUTED } else { ACCENT };
+    let vol_color = if app.muted {
+        palette.muted
+    } else {
+        palette.accent
+    };
     let mut right = vec![];
     let repeat = match (
         app.current().is_some_and(Track::is_podcast),
@@ -1457,21 +1578,27 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
         _ => None,
     };
     if let Some(icon) = repeat {
-        right.push(Span::styled(format!("{icon}   "), Style::new().fg(ACCENT)));
+        right.push(Span::styled(
+            format!("{icon}   "),
+            Style::new().fg(palette.accent),
+        ));
     }
     let preset = &crate::eq::PRESETS[app.eq];
     if !preset.is_flat() {
-        right.push(Span::styled("EQ ", Style::new().fg(ACCENT).bold()));
+        right.push(Span::styled("EQ ", Style::new().fg(palette.accent).bold()));
         right.push(Span::styled(
             format!("{}   ", preset.name),
-            Style::new().fg(SUB),
+            Style::new().fg(palette.sub),
         ));
     }
     right.extend([
         Span::styled(format!("{vol_icon} "), Style::new().fg(vol_color)),
         Span::styled("━".repeat(filled), Style::new().fg(vol_color)),
-        Span::styled("━".repeat(10 - filled), Style::new().fg(BORDER)),
-        Span::styled(format!(" {:>3.0}%", app.volume), Style::new().fg(SUB)),
+        Span::styled("━".repeat(10 - filled), Style::new().fg(palette.border)),
+        Span::styled(
+            format!(" {:>3.0}%", app.volume),
+            Style::new().fg(palette.sub),
+        ),
     ]);
     let right = Line::from(right);
 
@@ -1481,26 +1608,26 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
         i.pause
     };
     let mut left = vec![
-        Span::styled(format!("{} ", i.prev), Style::new().fg(SUB)),
+        Span::styled(format!("{} ", i.prev), Style::new().fg(palette.sub)),
         Span::styled(
             format!(" {play_icon} "),
-            Style::new().fg(ON_ACCENT).bg(ACCENT).bold(),
+            Style::new().fg(palette.on_accent).bg(palette.accent).bold(),
         ),
-        Span::styled(format!(" {}", i.next), Style::new().fg(SUB)),
+        Span::styled(format!(" {}", i.next), Style::new().fg(palette.sub)),
         Span::raw("   "),
     ];
     match app.current() {
         Some(t) => {
             if app.loading_track {
-                left.push(Span::styled("Загрузка… ", Style::new().fg(ACCENT)));
+                left.push(Span::styled("Загрузка… ", Style::new().fg(palette.accent)));
             }
             left.push(Span::styled(
                 t.title.as_str(),
-                Style::new().fg(Color::Reset).bold(),
+                Style::new().fg(palette.text).bold(),
             ));
             left.push(Span::styled(
                 format!("  {}", t.artists),
-                Style::new().fg(SUB),
+                Style::new().fg(palette.sub),
             ));
             if let Some(info) = app.audio_info.as_ref().filter(|_| app.show_audio_info) {
                 let codec = info
@@ -1514,18 +1641,18 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
                     (bitrate, true) => format!(" ({bitrate} кбит/с)"),
                     (bitrate, false) => format!(" ({bitrate} кбит/с; {codec})"),
                 };
-                left.push(Span::styled(text, Style::new().fg(SUB)));
+                left.push(Span::styled(text, Style::new().fg(palette.sub)));
             }
             if app.is_liked(t) {
                 left.push(Span::styled(
                     format!("  {}", i.heart),
-                    Style::new().fg(HEART),
+                    Style::new().fg(palette.heart),
                 ));
             }
         }
         None => left.push(Span::styled(
             "Ничего не играет — нажмите w",
-            Style::new().fg(MUTED),
+            Style::new().fg(palette.muted),
         )),
     }
     let [a, b] = Layout::horizontal([
@@ -1551,29 +1678,40 @@ fn draw_player(f: &mut Frame, app: &App, area: Rect) {
         0.0
     };
     let done = ((bar_w as f64) * ratio) as usize;
-    let mut spans = vec![Span::styled(format!("{pos} "), Style::new().fg(SUB))];
+    let mut spans = vec![Span::styled(
+        format!("{pos} "),
+        Style::new().fg(palette.sub),
+    )];
     if bar_w > 0 {
-        let color = if app.paused { SUB } else { ACCENT };
+        let color = if app.paused {
+            palette.sub
+        } else {
+            palette.accent
+        };
         spans.push(Span::styled("━".repeat(done), Style::new().fg(color)));
         if done < bar_w {
             spans.push(Span::styled("●", Style::new().fg(color)));
             spans.push(Span::styled(
                 "━".repeat(bar_w - done - 1),
-                Style::new().fg(BORDER),
+                Style::new().fg(palette.border),
             ));
         }
     }
-    spans.push(Span::styled(format!(" {dur}"), Style::new().fg(SUB)));
+    spans.push(Span::styled(
+        format!(" {dur}"),
+        Style::new().fg(palette.sub),
+    ));
     f.render_widget(Paragraph::new(Line::from(spans)), l2);
 }
 
 fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     if let Some(s) = app.visible_status() {
         let (icon, color) = if app.status_error {
-            (i.error, ERROR)
+            (i.error, palette.error)
         } else {
-            (i.info, ACCENT)
+            (i.info, palette.accent)
         };
         f.render_widget(
             Paragraph::new(Span::styled(format!(" {icon} {s}"), Style::new().fg(color))),
@@ -1725,6 +1863,7 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
 /// The hints, cut from the end to fit (keeping the one for `keep`, the help), and «настройки» at the
 /// right edge on the main screen.
 fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)], keep: &str) {
+    let palette = Palette::for_theme(app.theme);
     // «Настройки» sit at the right edge, except while text is typed (`o` is input there).
     let about = (!app.search.editing
         && !(app.tab == Tab::Podcasts
@@ -1732,13 +1871,13 @@ fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)],
         && app.modal.is_none())
     .then(|| {
         Line::from(vec![
-            Span::styled("o", Style::new().fg(ACCENT).bold()),
-            Span::styled(" настройки ", Style::new().fg(MUTED)),
+            Span::styled("o", Style::new().fg(palette.accent).bold()),
+            Span::styled(" настройки ", Style::new().fg(palette.muted)),
         ])
     });
     let right_w = about.as_ref().map_or(0, Line::width);
     // Drop hints from the end (keeping «? помощь») until they fit next to it.
-    let hint_w = |(k, d): &&(String, &str)| Line::from(key_hint(k, d).to_vec()).width();
+    let hint_w = |(k, d): &&(String, &str)| Line::from(key_hint(palette, k, d).to_vec()).width();
     let mut shown: Vec<&(String, &str)> = keys.iter().collect();
     while 1 + shown.iter().map(hint_w).sum::<usize>() + right_w > area.width as usize {
         let Some(last) = shown.iter().rposition(|(k, _)| k != keep) else {
@@ -1748,7 +1887,7 @@ fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)],
     }
     let mut spans = vec![Span::raw(" ")];
     for (k, d) in shown {
-        spans.extend(key_hint(k, d));
+        spans.extend(key_hint(palette, k, d));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     if let Some(about) = about {
@@ -1757,6 +1896,7 @@ fn draw_hint_line(f: &mut Frame, app: &App, area: Rect, keys: &[(String, &str)],
 }
 
 fn draw_help(f: &mut Frame, app: &App) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let podcasts = app.tab == Tab::Podcasts;
     let icon = |s: Section| match s {
@@ -1771,8 +1911,14 @@ fn draw_help(f: &mut Frame, app: &App) {
         let mut lines = vec![];
         for &section in sections {
             lines.push(Line::from(vec![
-                Span::styled(format!("{}  ", icon(section)), Style::new().fg(ACCENT)),
-                Span::styled(section.title().to_uppercase(), Style::new().fg(SUB).bold()),
+                Span::styled(
+                    format!("{}  ", icon(section)),
+                    Style::new().fg(palette.accent),
+                ),
+                Span::styled(
+                    section.title().to_uppercase(),
+                    Style::new().fg(palette.sub).bold(),
+                ),
             ]));
             for row in keymap::ROWS.iter().filter(|r| r.section == section) {
                 if podcasts
@@ -1786,9 +1932,9 @@ fn draw_help(f: &mut Frame, app: &App) {
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("   {:<12}", keymap::row_keys(row)),
-                        Style::new().fg(ACCENT).bold(),
+                        Style::new().fg(palette.accent).bold(),
                     ),
-                    Span::styled(help, Style::new().fg(Color::Reset)),
+                    Span::styled(help, Style::new().fg(palette.text)),
                 ]));
             }
             lines.push(Line::from(""));
@@ -1824,12 +1970,12 @@ fn draw_help(f: &mut Frame, app: &App) {
         .flex(Flex::Center)
         .areas(v);
     f.render_widget(Clear, r);
-    let block = panel(i.keys, "Горячие клавиши")
-        .border_style(Style::new().fg(ACCENT))
+    let block = panel(palette, i.keys, "Горячие клавиши")
+        .border_style(Style::new().fg(palette.accent))
         .title_bottom(
             Line::from(Span::styled(
                 " любая клавиша — закрыть ",
-                Style::new().fg(MUTED),
+                Style::new().fg(palette.muted),
             ))
             .centered(),
         )
@@ -1860,19 +2006,19 @@ fn render_link(buf: &mut Buffer, x: u16, y: u16, text: &str, url: &str, style: S
     }
 }
 
-fn draw_about(f: &mut Frame, i: &Icons) {
-    let link = Style::new().fg(ACCENT).underlined();
+fn draw_about(palette: Palette, f: &mut Frame, i: &Icons) {
+    let link = Style::new().fg(palette.accent).underlined();
     // One entry per row: text segments (text, style, link target); an empty entry is a blank row.
     let rows: Vec<Vec<(String, Style, Option<&str>)>> = vec![
         vec![(
             format!("{}  ymusic", i.logo),
-            Style::new().fg(ACCENT).bold(),
+            Style::new().fg(palette.accent).bold(),
             None,
         )],
         vec![],
         vec![(
             format!("Версия {}", env!("CARGO_PKG_VERSION")),
-            Style::new().fg(SUB),
+            Style::new().fg(palette.sub),
             None,
         )],
         vec![],
@@ -1895,12 +2041,12 @@ fn draw_about(f: &mut Frame, i: &Icons) {
         .flex(Flex::Center)
         .areas(v);
     f.render_widget(Clear, r);
-    let block = panel(i.info, "О программе")
-        .border_style(Style::new().fg(ACCENT))
+    let block = panel(palette, i.info, "О программе")
+        .border_style(Style::new().fg(palette.accent))
         .title_bottom(
             Line::from(Span::styled(
                 " любая клавиша — закрыть ",
-                Style::new().fg(MUTED),
+                Style::new().fg(palette.muted),
             ))
             .centered(),
         )
@@ -1919,7 +2065,7 @@ fn draw_about(f: &mut Frame, i: &Icons) {
                 y,
                 &text,
                 inner.width as usize,
-                Style::new().fg(SUB),
+                Style::new().fg(palette.sub),
             );
             continue;
         }
@@ -1948,6 +2094,7 @@ fn setting_name(s: Setting) -> &'static str {
         Setting::Api => "API",
         Setting::Art => "Картинка",
         Setting::Icons => "Иконки Nerd Font",
+        Setting::Theme => "Тема",
         Setting::Output => "Вывод звука",
         Setting::HideAccount => "Скрыть аккаунт",
         Setting::RemainingTime => "Обратный отсчёт",
@@ -1976,6 +2123,7 @@ fn setting_note(app: &App, s: Setting) -> String {
         Setting::Api => "Запасной вариант — API сайта music.yandex.ru".into(),
         Setting::Art => "Над треком в «Сейчас играет»: обложка альбома или спектр".into(),
         Setting::Icons => "Без шрифта Nerd Font — простые символы".into(),
+        Setting::Theme => "Цвета интерфейса меняются сразу".into(),
         Setting::Output if cfg!(target_os = "macos") => {
             "Системный вывод или PulseAudio, если он установлен".into()
         }
@@ -2000,12 +2148,12 @@ fn setting_note(app: &App, s: Setting) -> String {
 }
 
 /// Centered pop-up box of the given inner size; returns the inner area.
-fn popup(f: &mut Frame, icon: &str, title: &str, w: u16, h: u16) -> Rect {
-    popup_block(f, panel(icon, title.to_string()), w, h)
+fn popup(palette: Palette, f: &mut Frame, icon: &str, title: &str, w: u16, h: u16) -> Rect {
+    popup_block(palette, f, panel(palette, icon, title.to_string()), w, h)
 }
 
 /// Like [`popup`], for a box with extra decorations (e.g. a bottom title).
-fn popup_block(f: &mut Frame, block: Block, w: u16, h: u16) -> Rect {
+fn popup_block(palette: Palette, f: &mut Frame, block: Block, w: u16, h: u16) -> Rect {
     let area = f.area();
     let [v] = Layout::vertical([Constraint::Length((h + 4).min(area.height))])
         .flex(Flex::Center)
@@ -2015,7 +2163,7 @@ fn popup_block(f: &mut Frame, block: Block, w: u16, h: u16) -> Rect {
         .areas(v);
     f.render_widget(Clear, r);
     let block = block
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(palette.accent))
         .padding(Padding::uniform(1));
     let inner = block.inner(r);
     f.render_widget(block, r);
@@ -2023,11 +2171,13 @@ fn popup_block(f: &mut Frame, block: Block, w: u16, h: u16) -> Rect {
 }
 
 fn draw_modal(f: &mut Frame, app: &App) {
+    let palette = Palette::for_theme(app.theme);
     let i = ic(app);
     let Some(modal) = &app.modal else { return };
     match modal {
         Modal::YnisonDevices { sel } => {
             let inner = popup(
+                palette,
                 f,
                 i.note,
                 "Устройства Ynison",
@@ -2057,7 +2207,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             f.render_stateful_widget(
                 List::new(items)
                     .highlight_symbol("▌ ")
-                    .highlight_style(Style::new().bg(SEL_BG)),
+                    .highlight_style(Style::new().bg(palette.selection)),
                 list,
                 &mut state,
             );
@@ -2066,7 +2216,10 @@ fn draw_modal(f: &mut Frame, app: &App) {
             } else {
                 "Enter — перенести на выбранное устройство"
             };
-            f.render_widget(Paragraph::new(hint).style(Style::new().fg(MUTED)), foot);
+            f.render_widget(
+                Paragraph::new(hint).style(Style::new().fg(palette.muted)),
+                foot,
+            );
         }
         Modal::AddTo {
             track,
@@ -2074,7 +2227,14 @@ fn draw_modal(f: &mut Frame, app: &App) {
             sel,
         } => {
             let visible = (choices.len() + 1).min(12);
-            let inner = popup(f, i.queue, "Добавить в плейлист", 48, visible as u16 + 2);
+            let inner = popup(
+                palette,
+                f,
+                i.queue,
+                "Добавить в плейлист",
+                48,
+                visible as u16 + 2,
+            );
             let [head, _, list] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -2084,7 +2244,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             f.render_widget(
                 Paragraph::new(Span::styled(
                     format!("{} — {}", track.title, track.artists),
-                    Style::new().fg(SUB),
+                    Style::new().fg(palette.sub),
                 )),
                 head,
             );
@@ -2095,61 +2255,81 @@ fn draw_modal(f: &mut Frame, app: &App) {
                         Span::raw(p.title.clone()),
                         Span::styled(
                             format!("  {} {}", p.track_count, i.note),
-                            Style::new().fg(MUTED),
+                            Style::new().fg(palette.muted),
                         ),
                     ]))
                 })
                 .chain([ListItem::new(Span::styled(
                     "+ Новый плейлист",
-                    Style::new().fg(ACCENT),
+                    Style::new().fg(palette.accent),
                 ))])
                 .collect();
             let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
             let widget = List::new(items)
-                .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+                .highlight_style(
+                    Style::new()
+                        .bg(palette.selection)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .highlight_symbol("▌ ")
                 .highlight_spacing(HighlightSpacing::Always);
             f.render_stateful_widget(widget, list, &mut st);
         }
         Modal::ConfirmRemove { pl, track, .. } => {
-            let inner = popup(f, i.error, "Удалить трек", 48, 4);
+            let inner = popup(palette, f, i.error, "Удалить трек", 48, 4);
             let lines = vec![
                 Line::from(Span::styled(
                     track.title.clone(),
-                    Style::new().fg(Color::Reset).bold(),
+                    Style::new().fg(palette.text).bold(),
                 )),
                 Line::from(Span::styled(
                     format!("из плейлиста «{}»?", pl.title),
-                    Style::new().fg(SUB),
+                    Style::new().fg(palette.sub),
                 )),
                 Line::from(""),
-                Line::from([key_hint("Enter", "удалить"), key_hint("Esc", "отмена")].concat()),
+                Line::from(
+                    [
+                        key_hint(palette, "Enter", "удалить"),
+                        key_hint(palette, "Esc", "отмена"),
+                    ]
+                    .concat(),
+                ),
             ];
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         Modal::ConfirmDelete { pl } => {
-            let inner = popup(f, i.error, "Удалить плейлист", 48, 4);
+            let inner = popup(palette, f, i.error, "Удалить плейлист", 48, 4);
             let lines = vec![
                 Line::from(Span::styled(
                     format!("«{}» · {} {}", pl.title, pl.track_count, i.note),
-                    Style::new().fg(Color::Reset).bold(),
+                    Style::new().fg(palette.text).bold(),
                 )),
                 Line::from(Span::styled(
                     "Плейлист будет удалён из аккаунта.",
-                    Style::new().fg(SUB),
+                    Style::new().fg(palette.sub),
                 )),
                 Line::from(""),
-                Line::from([key_hint("Enter", "удалить"), key_hint("Esc", "отмена")].concat()),
+                Line::from(
+                    [
+                        key_hint(palette, "Enter", "удалить"),
+                        key_hint(palette, "Esc", "отмена"),
+                    ]
+                    .concat(),
+                ),
             ];
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         Modal::Settings { sel } => {
             let rows = Setting::ALL;
             let n = rows.len() as u16;
-            let block = panel(i.settings, "Настройки").title_bottom(
-                Line::from(Span::styled(" Esc — закрыть окно ", Style::new().fg(MUTED))).centered(),
+            let block = panel(palette, i.settings, "Настройки").title_bottom(
+                Line::from(Span::styled(
+                    " Esc — закрыть окно ",
+                    Style::new().fg(palette.muted),
+                ))
+                .centered(),
             );
-            let inner = popup_block(f, block, 54, n + 2);
+            let inner = popup_block(palette, f, block, 54, n + 2);
             let [list, _, note] = Layout::vertical([
                 Constraint::Min(1),
                 Constraint::Length(1),
@@ -2161,71 +2341,82 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .map(|&s| {
                     let name = setting_name(s);
                     let label = if s == Setting::Logout {
-                        Style::new().fg(ERROR)
+                        Style::new().fg(palette.error)
                     } else if s == Setting::Autoplay && !app.ynison.enabled {
-                        Style::new().fg(MUTED)
+                        Style::new().fg(palette.muted)
                     } else {
                         Style::new()
                     };
                     let mut spans = vec![Span::styled(format!("{name:<27}"), label)];
                     if let Some(v) = app.setting_value(s) {
-                        spans.push(Span::styled("‹ ", Style::new().fg(MUTED)));
+                        spans.push(Span::styled("‹ ", Style::new().fg(palette.muted)));
                         spans.push(Span::styled(
                             v,
                             Style::new()
                                 .fg(if s == Setting::Autoplay && !app.ynison.enabled {
-                                    MUTED
+                                    palette.muted
                                 } else {
-                                    ACCENT
+                                    palette.accent
                                 })
                                 .bold(),
                         ));
-                        spans.push(Span::styled(" ›", Style::new().fg(MUTED)));
+                        spans.push(Span::styled(" ›", Style::new().fg(palette.muted)));
                     }
                     ListItem::new(Line::from(spans))
                 })
                 .collect();
             let mut st = ratatui::widgets::ListState::default().with_selected(Some(*sel));
             let widget = List::new(items)
-                .highlight_style(Style::new().bg(SEL_BG).add_modifier(Modifier::BOLD))
+                .highlight_style(
+                    Style::new()
+                        .bg(palette.selection)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .highlight_symbol("▌ ")
                 .highlight_spacing(HighlightSpacing::Always);
             f.render_stateful_widget(widget, list, &mut st);
             let text = setting_note(app, rows[*sel]);
             f.render_widget(
-                Paragraph::new(Span::styled(text, Style::new().fg(MUTED))),
+                Paragraph::new(Span::styled(text, Style::new().fg(palette.muted))),
                 note,
             );
         }
         Modal::ConfirmLogout => {
-            let inner = popup(f, i.error, "Выход из аккаунта", 48, 4);
+            let inner = popup(palette, f, i.error, "Выход из аккаунта", 48, 4);
             let lines = vec![
                 Line::from(Span::styled(
                     format!("Выйти из аккаунта {}?", app.account.login),
-                    Style::new().fg(Color::Reset).bold(),
+                    Style::new().fg(palette.text).bold(),
                 )),
                 Line::from(Span::styled(
                     "Токен будет удалён, программа закроется.",
-                    Style::new().fg(SUB),
+                    Style::new().fg(palette.sub),
                 )),
                 Line::from(""),
-                Line::from([key_hint("Enter", "выйти"), key_hint("Esc", "отмена")].concat()),
+                Line::from(
+                    [
+                        key_hint(palette, "Enter", "выйти"),
+                        key_hint(palette, "Esc", "отмена"),
+                    ]
+                    .concat(),
+                ),
             ];
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
         }
         Modal::Rename { input, .. } => {
-            let inner = popup(f, i.queue, "Название плейлиста", 48, 1);
+            let inner = popup(palette, f, i.queue, "Название плейлиста", 48, 1);
             let mut spans = vec![Span::styled(
                 input.clone(),
-                Style::new().fg(Color::Reset).bold(),
+                Style::new().fg(palette.text).bold(),
             )];
             if (app.tick / 2).is_multiple_of(2) {
-                spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("▎", Style::new().fg(palette.accent)));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), inner);
         }
         Modal::NewPlaylist { input, track } => {
             let inner = popup(
+                palette,
                 f,
                 i.queue,
                 "Новый плейлист",
@@ -2234,37 +2425,37 @@ fn draw_modal(f: &mut Frame, app: &App) {
             );
             let mut spans = vec![Span::styled(
                 input.clone(),
-                Style::new().fg(Color::Reset).bold(),
+                Style::new().fg(palette.text).bold(),
             )];
             if input.is_empty() {
-                spans.push(Span::styled("Название", Style::new().fg(MUTED)));
+                spans.push(Span::styled("Название", Style::new().fg(palette.muted)));
             } else if (app.tick / 2).is_multiple_of(2) {
-                spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("▎", Style::new().fg(palette.accent)));
             }
             let mut lines = vec![Line::from(spans)];
             if let Some(t) = track {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     format!("и добавить: {} — {}", t.title, t.artists),
-                    Style::new().fg(SUB),
+                    Style::new().fg(palette.sub),
                 )));
             }
             f.render_widget(Paragraph::new(lines), inner);
         }
         Modal::OpenLink { input } => {
-            let inner = popup(f, i.link, "Играть по ссылке", 64, 1);
+            let inner = popup(palette, f, i.link, "Играть по ссылке", 64, 1);
             // Long links scroll: the end with the cursor stays visible.
             let room = (inner.width as usize).saturating_sub(1);
             let skip = input.chars().count().saturating_sub(room);
             let text: String = input.chars().skip(skip).collect();
-            let mut spans = vec![Span::styled(text, Style::new().fg(Color::Reset).bold())];
+            let mut spans = vec![Span::styled(text, Style::new().fg(palette.text).bold())];
             if input.is_empty() {
                 spans.push(Span::styled(
                     "Ссылка на трек, альбом или плейлист",
-                    Style::new().fg(MUTED),
+                    Style::new().fg(palette.muted),
                 ));
             } else if (app.tick / 2).is_multiple_of(2) {
-                spans.push(Span::styled("▎", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("▎", Style::new().fg(palette.accent)));
             }
             f.render_widget(Paragraph::new(Line::from(spans)), inner);
         }
@@ -2324,7 +2515,12 @@ mod tests {
         // 4 bars in 8 columns: 1 column each plus a gap; 3 rows (24 eighths) high.
         let area = Rect::new(0, 0, 8, 3);
         let mut buf = Buffer::empty(area);
-        super::draw_spectrum(&mut buf, area, &[1.0, 0.5, 0.0, 1.0 / 24.0]);
+        super::draw_spectrum(
+            super::Palette::for_theme(crate::app::Theme::Dark),
+            &mut buf,
+            area,
+            &[1.0, 0.5, 0.0, 1.0 / 24.0],
+        );
         let rows: Vec<String> = (0..3)
             .map(|y| (0..8).map(|x| buf[(x, y)].symbol().to_string()).collect())
             .collect();
@@ -2332,7 +2528,12 @@ mod tests {
         // Narrower than the number of bars: one column each, no gaps, extra bars dropped.
         let area = Rect::new(0, 0, 2, 1);
         let mut buf = Buffer::empty(area);
-        super::draw_spectrum(&mut buf, area, &[1.0, 1.0, 1.0]);
+        super::draw_spectrum(
+            super::Palette::for_theme(crate::app::Theme::Dark),
+            &mut buf,
+            area,
+            &[1.0, 1.0, 1.0],
+        );
         assert_eq!((buf[(0, 0)].symbol(), buf[(1, 0)].symbol()), ("█", "█"));
     }
 
@@ -2359,6 +2560,24 @@ mod tests {
         assert_eq!(buf[(1, 0)].fg, Color::Yellow);
     }
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn theme_repaints_the_settings_window_and_the_main_screen() {
+        use crate::app::{Modal, Theme};
+        let mut app = App::for_test();
+        app.modal = Some(Modal::Settings { sel: 0 });
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for theme in [Theme::Dark, Theme::Light, Theme::Dark] {
+            app.theme = theme;
+            term.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = term.backend().buffer();
+            let palette = super::Palette::for_theme(theme);
+            // An empty cell outside the dialog and the padding inside it use the same surface.
+            assert_eq!(buffer[(0, 1)].bg, palette.background);
+            assert_eq!(buffer[(12, 2)].bg, palette.background);
+            assert_eq!(buffer[(12, 2)].fg, palette.text);
+        }
+    }
 
     #[test]
     fn podcast_description_wrapping() {

@@ -138,7 +138,7 @@ impl App {
             } if self.ynison.owned
                 && self.ynison.claim == claim
                 && self.current().is_some_and(|track| track.id == track_id)
-                && !self.loading_track =>
+                && (self.stopped || !self.awaiting_start) =>
             {
                 if self.stopped && self.ynison.restored_position.is_some() && !paused {
                     self.ynison.restored_position = Some(position.min(self.duration));
@@ -181,7 +181,7 @@ impl App {
                 if self.queue.repeat() != repeat {
                     self.set_repeat(repeat);
                 }
-                if self.queue.pos() == Some(index) && !self.loading_track && !self.stopped {
+                if self.queue.pos() == Some(index) && !self.awaiting_start && !self.stopped {
                     self.apply_ynison_playback(paused, position);
                 } else if self.queue.tracks().get(index).is_some_and(|t| t.available)
                     && (self.queue.pos() != Some(index) || self.stopped)
@@ -252,20 +252,14 @@ impl App {
                 }
             }
             Event::Takeover { .. } => {}
-            Event::SelectedLocally {
-                claim,
-                restored,
-                paused,
-            } if !self.ynison.owned
-                && self.ynison.claim == claim
-                && self.ynison.takeover.is_none() =>
+            Event::SelectedLocally { claim, restored }
+                if !self.ynison.owned
+                    && self.ynison.claim == claim
+                    && self.ynison.takeover.is_none() =>
             {
+                // The source can report paused when it hands off its audio output.
                 self.stop_ynison_track();
-                self.restore_ynison(restored, !paused);
-                if paused {
-                    self.ynison.claim = self.ynison.claim.wrapping_add(1);
-                    self.ynison.owned = true;
-                }
+                self.restore_ynison(restored, true);
             }
             Event::SelectedLocally { .. } => {}
             Event::Restore(r) if self.ynison.restore_allowed && self.ynison.takeover.is_none() => {
@@ -307,11 +301,12 @@ impl App {
 
     fn apply_ynison_playback(&mut self, paused: bool, position: f64) {
         use crate::media::Remote;
-        if (self.time_pos - position).abs() >= 0.5 {
-            self.on_remote(Remote::SeekTo(position.clamp(0.0, self.duration)));
-        }
         if paused != self.paused {
+            // A pause/resume includes the controller's last sampled position. Seeking there
+            // would discard buffered audio and can start a new range request while paused.
             self.on_remote(if paused { Remote::Pause } else { Remote::Play });
+        } else if !self.loading_track && !self.seeking && (self.time_pos - position).abs() >= 0.5 {
+            self.on_remote(Remote::SeekTo(position.clamp(0.0, self.duration)));
         }
     }
     fn restore_ynison(&mut self, mut r: Restored, play: bool) {
@@ -417,7 +412,7 @@ impl App {
                 }
             }
             let position = if self.seeking || self.buffering || self.loading_track {
-                self.confirmed_time_pos.or(self.resume_at).unwrap_or(0.0)
+                self.confirmed_time_pos.or(self.resume_at).unwrap_or(self.time_pos)
             } else { self.time_pos };
             json!({"player_queue":queue,"status":{"progress_ms":(position.max(0.0)*1000.0) as u64,"duration_ms":(self.duration.max(0.0)*1000.0) as u64,"paused":self.paused || self.stopped,"playback_speed":1}})
         });
@@ -555,6 +550,88 @@ mod tests {
                 .any(|e| matches!(e, Effect::Player(PlayerCmd::Load(t)) if t.start == 42.5))
         );
     }
+    #[test]
+    fn selecting_ymusic_from_phone_starts_the_restored_track() {
+        let mut app = App::for_test();
+        app.set_ynison(true);
+        deliver(&mut app);
+        assert!(app.paused && app.stopped);
+        app.on_ynison(
+            app.ynison.epoch,
+            Event::SelectedLocally {
+                claim: app.ynison.claim,
+                restored: restored(),
+            },
+        );
+        assert!(app.ynison.owned && !app.stopped && app.loading_track);
+        assert!(app.take_tasks().iter().any(|task| matches!(
+            task,
+            Task::TrackUrl { full_id, .. } if full_id == "b"
+        )));
+        app.on_msg(Msg::Url {
+            generation: app.generation,
+            result: Ok(crate::api::FileInfo {
+                url: "https://test".into(),
+                ..Default::default()
+            }),
+        });
+        assert!(app.take_effects().iter().any(|effect| matches!(
+            effect,
+            Effect::Player(PlayerCmd::Load(track)) if track.start == 42.5
+        )));
+        assert_eq!(
+            app.ynison_desired().player.unwrap()["status"]["progress_ms"],
+            42500
+        );
+    }
+
+    #[test]
+    fn phone_can_resume_while_the_last_seek_is_waiting_for_audio() {
+        let mut app = App::for_test();
+        app.ynison.autoplay = true;
+        app.set_ynison(true);
+        deliver(&mut app);
+        app.on_msg(Msg::Player(PlayerEvent::Cleared));
+        app.on_msg(Msg::Player(PlayerEvent::Duration(120.0)));
+        app.on_msg(Msg::Player(PlayerEvent::Pause(true)));
+        app.on_msg(Msg::Player(PlayerEvent::Seeking(true)));
+        assert!(app.paused && app.loading_track && !app.awaiting_start);
+        app.take_player();
+        app.on_ynison(
+            app.ynison.epoch,
+            Event::RemotePlayback {
+                claim: app.ynison.claim,
+                track_id: "b".into(),
+                paused: false,
+                position: 45.0,
+            },
+        );
+        assert_eq!(app.take_player(), ["pause"]);
+    }
+
+    #[test]
+    fn phone_pause_does_not_seek_to_its_older_sampled_position() {
+        let mut app = App::for_test();
+        app.ynison.autoplay = true;
+        app.set_ynison(true);
+        deliver(&mut app);
+        app.on_msg(Msg::Player(PlayerEvent::Cleared));
+        app.on_msg(Msg::Player(PlayerEvent::Duration(120.0)));
+        app.on_msg(Msg::Player(PlayerEvent::Pause(false)));
+        app.on_msg(Msg::Player(PlayerEvent::TimePos(45.0)));
+        app.take_player();
+        app.on_ynison(
+            app.ynison.epoch,
+            Event::RemotePlayback {
+                claim: app.ynison.claim,
+                track_id: "b".into(),
+                paused: true,
+                position: 42.5,
+            },
+        );
+        assert_eq!(app.take_player(), ["pause"]);
+    }
+
     #[test]
     fn autoplay_and_stale_restoration() {
         let mut a = App::for_test();
