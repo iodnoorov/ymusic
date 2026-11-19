@@ -7,23 +7,23 @@ class Ymusic < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.12.0/ymusic-3.12.0-aarch64-macos.tar.gz"
-      sha256 "0889c7ec8b49909755bd35e7ac8ca843362889d03101b080f8ae0e0c4a3f06b7"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.13.0/ymusic-3.13.0-aarch64-macos.tar.gz"
+      sha256 "0ea261b96c8728a9fefc7ceb206714923ef5573dccb4ea4692b3fad0d9c8f4d6"
     end
     on_intel do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.12.0/ymusic-3.12.0-x86_64-macos.tar.gz"
-      sha256 "b751e0105a3bd66160ac3ebdbb2f62a7e0aa6f9f624f2c1d838747f2fec30ac5"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.13.0/ymusic-3.13.0-x86_64-macos.tar.gz"
+      sha256 "82e6e34fdb55bd921462355a20c39754b52c10034385d5c0ab991b47a9e9e628"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.12.0/ymusic-3.12.0-aarch64-linux.tar.gz"
-      sha256 "e9005477271ccb2f47d45a5999dab60958375a109eaa1b588a3760191d78295c"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.13.0/ymusic-3.13.0-aarch64-linux.tar.gz"
+      sha256 "6f8243e5931fa1239593d4395f68b39dda39106229add32b3d9e24f6052d5b1b"
     end
     on_intel do
-      url "https://github.com/iodnoorov/ymusic/releases/download/v3.12.0/ymusic-3.12.0-x86_64-linux.tar.gz"
-      sha256 "607c604035a5347c76af3e3943b8ccdbdc29ba4795ba1c2905d1e4df727ab84f"
+      url "https://github.com/iodnoorov/ymusic/releases/download/v3.13.0/ymusic-3.13.0-x86_64-linux.tar.gz"
+      sha256 "bbb6616afa181083c64071cc91906f5f3b7cbd14329069bd13db584d2ab135d7"
     end
   end
 
