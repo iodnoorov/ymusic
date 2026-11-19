@@ -285,6 +285,9 @@ pub enum Modal {
         sel: usize,
     },
     ConfirmLogout,
+    YnisonDevices {
+        sel: usize,
+    },
 }
 
 /// Rows of the settings window.
@@ -1197,6 +1200,7 @@ impl App {
         self.ynison.owned = true;
         self.ynison.restore_allowed = false;
         self.ynison.restored_position = None;
+        self.ynison.takeover = None;
         self.audio_info = if preloaded {
             self.preload_audio_info.take()
         } else {
@@ -1415,6 +1419,10 @@ impl App {
     /// The user started something new to play; returns its number for the async reply.
     fn new_intent(&mut self) -> u64 {
         self.ynison.restore_allowed = false;
+        self.ynison.takeover = None;
+        if !self.ynison.owned {
+            self.ynison.claim = self.ynison.claim.wrapping_add(1);
+        }
         self.intent += 1;
         self.intent
     }
@@ -2082,6 +2090,8 @@ impl App {
             Action::Help => self.show_help = true,
             Action::Settings => self.modal = Some(Modal::Settings { sel: 0 }),
             Action::PlayPause => self.toggle_playback(),
+            Action::YnisonTakeover => self.take_over_ynison(),
+            Action::YnisonDevices => self.open_ynison_devices(),
             Action::Next => self.next(End::Skip),
             Action::Prev => self.prev(),
             Action::SeekBack => self.play(PlayerCmd::Seek(-10.0)),
@@ -2743,6 +2753,7 @@ impl App {
         };
         let clear = is_ctrl(&press.hotkey, 'u');
         match modal {
+            Modal::YnisonDevices { sel } => self.on_ynison_device_key(sel, code),
             Modal::AddTo {
                 track,
                 choices,

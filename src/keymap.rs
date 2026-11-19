@@ -11,6 +11,8 @@ pub enum Action {
     Help,
     Settings,
     PlayPause,
+    YnisonTakeover,
+    YnisonDevices,
     Next,
     Prev,
     SeekBack,
@@ -130,6 +132,16 @@ pub const ROWS: &[Row] = &[
         Section::Playback,
         "пауза / продолжить",
         &[(C(' '), A::PlayPause), (C('p'), A::PlayPause)],
+    ),
+    row(
+        Section::Playback,
+        "продолжить здесь из Ynison",
+        &[(C('U'), A::YnisonTakeover)],
+    ),
+    row(
+        Section::Playback,
+        "устройства Ynison",
+        &[(C('V'), A::YnisonDevices)],
     ),
     row(
         Section::Playback,

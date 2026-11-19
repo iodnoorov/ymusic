@@ -120,6 +120,70 @@ impl Queue {
         self.tracks.iter().any(|t| t.id == id)
     }
 
+    pub fn original_tracks(&self) -> &[Track] {
+        self.unshuffled.as_deref().unwrap_or(&self.tracks)
+    }
+
+    /// Reorder a list using indices in its original order, preserving the playing entry.
+    pub fn apply_shuffle_order(&mut self, order: Option<&[usize]>) -> bool {
+        if !self.is_list() || (order.is_none() && !self.shuffled()) {
+            return false;
+        }
+        let Some(current) = self.pos else {
+            return false;
+        };
+        let Some(current_original) = self
+            .shuffle_indices()
+            .map_or(Some(current), |indices| indices.get(current).copied())
+        else {
+            return false;
+        };
+        let original = self.original_tracks();
+        let (tracks, pos) = if let Some(order) = order {
+            if order.len() != original.len() {
+                return false;
+            }
+            let mut seen = vec![false; order.len()];
+            let Some(tracks) = order
+                .iter()
+                .map(|&i| {
+                    if std::mem::replace(seen.get_mut(i)?, true) {
+                        return None;
+                    }
+                    original.get(i).cloned()
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return false;
+            };
+            (tracks, order.iter().position(|&i| i == current_original))
+        } else {
+            (original.to_vec(), Some(current_original))
+        };
+        self.unshuffled = order.map(|_| original.to_vec());
+        self.tracks = tracks;
+        self.pos = pos;
+        self.carried &= self.pos == Some(0);
+        true
+    }
+
+    /// Map play order to catalogue order, keeping repeated entries as separate indices.
+    pub fn shuffle_indices(&self) -> Option<Vec<usize>> {
+        use std::collections::{HashMap, VecDeque};
+        let original = self.unshuffled.as_ref()?;
+        let mut indices = HashMap::<_, VecDeque<_>>::new();
+        for (index, track) in original.iter().enumerate() {
+            indices
+                .entry((&track.id, &track.album_id))
+                .or_default()
+                .push_back(index);
+        }
+        self.tracks
+            .iter()
+            .map(|track| indices.get_mut(&(&track.id, &track.album_id))?.pop_front())
+            .collect()
+    }
+
     /// Whether track `i` is one carried over from the previous list.
     pub fn is_carried(&self, i: usize) -> bool {
         i == 0 && self.carried
@@ -290,7 +354,7 @@ pub fn shuffled_from(mut tracks: Vec<Track>, first: usize) -> Vec<Track> {
 }
 
 /// Fisher–Yates: every order equally likely.
-pub fn shuffle(list: &mut [Track]) {
+pub fn shuffle<T>(list: &mut [T]) {
     for i in (1..list.len()).rev() {
         list.swap(i, random_below(i + 1));
     }

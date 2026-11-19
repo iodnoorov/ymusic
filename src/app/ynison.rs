@@ -1,5 +1,5 @@
 use super::*;
-use crate::ynison::{Desired, Event, Restored};
+use crate::ynison::{Command, Control, Desired, Device, Event, Restored};
 
 #[derive(Default)]
 pub struct Sync {
@@ -10,15 +10,84 @@ pub struct Sync {
     pub claim: u64,
     pub restore_allowed: bool,
     pub restored_position: Option<f64>,
+    pub takeover: Option<u64>,
+    takeover_id: u64,
+    pub phones: Vec<Device>,
+    pub active: Option<String>,
+    pub local: String,
+    pub commands: Vec<Command>,
     template: Option<Value>,
 }
 impl App {
     pub fn set_ynison(&mut self, enabled: bool) {
+        self.ynison.takeover = None;
+        self.ynison.phones.clear();
+        self.ynison.active = None;
+        self.ynison.commands.clear();
         self.ynison.enabled = enabled;
         self.ynison.epoch = self.ynison.epoch.wrapping_add(1);
         self.ynison.restore_allowed = enabled && self.queue.is_empty();
         self.ynison.owned = enabled && self.current().is_some() && !self.stopped;
         self.ynison.claim = self.ynison.claim.wrapping_add(1);
+    }
+    pub(super) fn open_ynison_devices(&mut self) {
+        if self.ynison.enabled {
+            let sel = self
+                .ynison
+                .phones
+                .iter()
+                .position(|p| self.ynison.active.as_ref() == Some(&p.id))
+                .map_or(0, |index| index + 1);
+            self.modal = Some(Modal::YnisonDevices { sel });
+        } else {
+            self.set_status("Включите Ynison в настройках");
+        }
+    }
+
+    pub(super) fn on_ynison_device_key(&mut self, mut sel: usize, code: KeyCode) {
+        let len = self.ynison.phones.len();
+        sel = sel.min(len);
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('V') => return,
+            KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(len),
+            KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+            KeyCode::Enter if sel == 0 => self.take_over_ynison(),
+            _ => {
+                let control = match (code, keymap::action(code)) {
+                    (KeyCode::Enter, _) => Some(Control::Transfer),
+                    (_, Some(Action::PlayPause)) => Some(Control::Pause),
+                    (_, Some(Action::Next)) => Some(Control::Track(1)),
+                    (_, Some(Action::Prev)) => Some(Control::Track(-1)),
+                    (_, Some(Action::SeekBack)) => Some(Control::Seek(-10_000)),
+                    (_, Some(Action::SeekForward)) => Some(Control::Seek(10_000)),
+                    (_, Some(Action::VolumeDown)) => Some(Control::Volume(-0.05)),
+                    (_, Some(Action::VolumeUp)) => Some(Control::Volume(0.05)),
+                    (_, Some(Action::Repeat)) => Some(Control::Repeat),
+                    (_, Some(Action::Shuffle)) => Some(Control::Shuffle),
+                    _ => None,
+                };
+                if let Some(control) = control
+                    && let Some(phone) = sel.checked_sub(1).and_then(|i| self.ynison.phones.get(i))
+                {
+                    self.ynison.commands.push(Command {
+                        epoch: self.ynison.epoch,
+                        target: phone.id.clone(),
+                        control,
+                        created: Instant::now(),
+                    });
+                }
+            }
+        }
+        self.modal = Some(Modal::YnisonDevices { sel });
+    }
+
+    pub(super) fn take_over_ynison(&mut self) {
+        if !self.ynison.enabled || self.ynison.owned {
+            return;
+        }
+        self.ynison.takeover_id = self.ynison.takeover_id.wrapping_add(1);
+        self.ynison.takeover = Some(self.ynison.takeover_id);
+        self.set_status("Получаем текущее воспроизведение из Ynison");
     }
     pub(super) fn toggle_playback(&mut self) {
         if let Some(position) = self.ynison.restored_position.take() {
@@ -29,6 +98,7 @@ impl App {
             }
         } else {
             if self.paused && !self.ynison.owned {
+                self.ynison.takeover = None;
                 self.ynison.claim = self.ynison.claim.wrapping_add(1);
                 self.ynison.owned = true;
             }
@@ -40,7 +110,108 @@ impl App {
             return;
         }
         match event {
+            Event::Devices {
+                phones,
+                active,
+                local,
+            } => {
+                if let Some(Modal::YnisonDevices { sel }) = self.modal.as_mut() {
+                    *sel = sel
+                        .checked_sub(1)
+                        .and_then(|i| self.ynison.phones.get(i))
+                        .and_then(|previous| phones.iter().position(|p| p.id == previous.id))
+                        .map_or(0, |i| i + 1);
+                }
+                self.ynison.phones = phones;
+                self.ynison.active = active;
+                self.ynison.local = local;
+            }
+            Event::ControlUnavailable => {
+                self.set_status("Команда Ynison недоступна для выбранного устройства")
+            }
+
+            Event::RemotePlayback {
+                claim,
+                track_id,
+                paused,
+                position,
+            } if self.ynison.owned
+                && self.ynison.claim == claim
+                && self.current().is_some_and(|track| track.id == track_id)
+                && !self.loading_track =>
+            {
+                if self.stopped && self.ynison.restored_position.is_some() && !paused {
+                    self.ynison.restored_position = Some(position.min(self.duration));
+                    self.toggle_playback();
+                } else if !self.stopped {
+                    self.apply_ynison_playback(paused, position);
+                }
+            }
+            Event::RemoteQueue {
+                claim,
+                track_ids,
+                shuffle,
+                index,
+                repeat,
+                position,
+                paused,
+            } if self.ynison.owned
+                && self.ynison.claim == claim
+                && self
+                    .queue
+                    .original_tracks()
+                    .iter()
+                    .map(|t| &t.id)
+                    .eq(&track_ids) =>
+            {
+                let index = if self.queue.is_list() {
+                    if self.queue.shuffle_indices() != shuffle
+                        && self.queue.apply_shuffle_order(shuffle.as_deref())
+                    {
+                        self.queue_state.select(self.queue.pos());
+                        self.following_changed();
+                    }
+                    shuffle
+                        .as_ref()
+                        .and_then(|indices| indices.iter().position(|&i| i == index))
+                        .unwrap_or(index)
+                } else {
+                    index
+                };
+                if self.queue.repeat() != repeat {
+                    self.set_repeat(repeat);
+                }
+                if self.queue.pos() == Some(index) && !self.loading_track && !self.stopped {
+                    self.apply_ynison_playback(paused, position);
+                } else if self.queue.tracks().get(index).is_some_and(|t| t.available)
+                    && (self.queue.pos() != Some(index) || self.stopped)
+                {
+                    if paused {
+                        self.park_ynison_track(index, position);
+                    } else {
+                        self.play_index(index);
+                        self.time_pos = position.min(self.duration);
+                        self.resume_at = Some(self.time_pos);
+                    }
+                }
+            }
+            Event::RemoteVolume(volume) => {
+                self.on_remote(crate::media::Remote::Volume(volume * 100.0));
+            }
+            Event::RemoteReplacement {
+                claim,
+                restored,
+                paused,
+            } if self.ynison.owned && self.ynison.claim == claim => {
+                self.stop_ynison_track();
+                self.restore_ynison(restored, !paused);
+            }
+            Event::RemotePlayback { .. }
+            | Event::RemoteQueue { .. }
+            | Event::RemoteReplacement { .. } => {}
             Event::Error => {
+                self.ynison.phones.clear();
+                self.ynison.active = None;
                 self.set_error("Ynison: нет соединения; воспроизведение доступно локально")
             }
             Event::Relinquished { claim } => {
@@ -71,15 +242,84 @@ impl App {
                 }
                 self.set_status("Воспроизведение продолжено на другом устройстве");
             }
-            Event::Restore(r) if self.ynison.restore_allowed => self.restore_ynison(r),
+            Event::Takeover { request, restored } if self.ynison.takeover == Some(request) => {
+                self.ynison.takeover = None;
+                if let Some(restored) = restored.filter(|r| r.tracks[r.index].available) {
+                    self.stop_ynison_track();
+                    self.restore_ynison(restored, true);
+                } else {
+                    self.set_error("Ynison: нет доступного трека на другом устройстве");
+                }
+            }
+            Event::Takeover { .. } => {}
+            Event::SelectedLocally {
+                claim,
+                restored,
+                paused,
+            } if !self.ynison.owned
+                && self.ynison.claim == claim
+                && self.ynison.takeover.is_none() =>
+            {
+                self.stop_ynison_track();
+                self.restore_ynison(restored, !paused);
+                if paused {
+                    self.ynison.claim = self.ynison.claim.wrapping_add(1);
+                    self.ynison.owned = true;
+                }
+            }
+            Event::SelectedLocally { .. } => {}
+            Event::Restore(r) if self.ynison.restore_allowed && self.ynison.takeover.is_none() => {
+                self.restore_ynison(r, self.ynison.autoplay);
+            }
             Event::Restore(_) => {}
         }
     }
-    fn restore_ynison(&mut self, mut r: Restored) {
+    fn stop_ynison_track(&mut self) {
+        if !self.stopped {
+            self.end_play(Some("skip"));
+            self.generation += 1;
+            self.play(PlayerCmd::Stop);
+        }
+        self.loading_track = false;
+        self.awaiting_start = false;
+        self.load_deadline = None;
+        self.retry_at = None;
+        self.preload = None;
+        self.preload_pending = false;
+        self.audio_info = None;
+        self.seeking = false;
+        self.buffering = false;
+    }
+
+    fn park_ynison_track(&mut self, index: usize, position: f64) {
+        self.stop_ynison_track();
+        self.queue.select(index);
+        self.queue_state.select(Some(index));
+        let track = &self.queue.tracks()[index];
+        self.duration = track.duration_ms as f64 / 1000.0;
+        self.time_pos = position.min(self.duration);
+        self.confirmed_time_pos = Some(self.time_pos);
+        self.ynison.restored_position = Some(self.time_pos);
+        self.stopped = true;
+        self.paused = true;
+        self.load_cover(track.cover.clone());
+    }
+
+    fn apply_ynison_playback(&mut self, paused: bool, position: f64) {
+        use crate::media::Remote;
+        if (self.time_pos - position).abs() >= 0.5 {
+            self.on_remote(Remote::SeekTo(position.clamp(0.0, self.duration)));
+        }
+        if paused != self.paused {
+            self.on_remote(if paused { Remote::Pause } else { Remote::Play });
+        }
+    }
+    fn restore_ynison(&mut self, mut r: Restored, play: bool) {
         self.ynison.restore_allowed = false;
         if r.index >= r.tracks.len() {
             return;
         }
+        self.intent = self.intent.wrapping_add(1);
         let kind = r.queue["entity_type"].as_str().unwrap_or("VARIOUS");
         let item = r.queue["entity_id"].as_str().unwrap_or("").to_owned();
         let context = match kind {
@@ -92,26 +332,12 @@ impl App {
         self.context = PlayContext::new(context, &item);
         let mut own_order = None;
         if kind != "RADIO"
-            && let Some(indices) = r.queue["shuffle_optional"]["playable_indices"].as_array()
+            && let Some(order) = crate::ynison::order(&r.queue, r.tracks.len())
         {
-            let order: Option<Vec<usize>> = indices
-                .iter()
-                .map(|i| {
-                    i.as_u64()
-                        .or_else(|| i.as_str()?.parse().ok())
-                        .and_then(|i| usize::try_from(i).ok())
-                })
-                .collect();
-            if let Some(order) = order.filter(|o| {
-                o.len() == r.tracks.len()
-                    && o.iter().copied().collect::<HashSet<_>>().len() == r.tracks.len()
-                    && o.iter().all(|&i| i < r.tracks.len())
-            }) {
-                r.index = order.iter().position(|&i| i == r.index).unwrap();
-                let original = r.tracks;
-                r.tracks = order.iter().map(|&i| original[i].clone()).collect();
-                own_order = Some(original);
-            }
+            r.index = order.iter().position(|&i| i == r.index).unwrap();
+            let original = r.tracks;
+            r.tracks = order.iter().map(|&i| original[i].clone()).collect();
+            own_order = Some(original);
         }
 
         // A restored wave keeps its radio session and can request the next batch.
@@ -162,7 +388,7 @@ impl App {
         self.ynison.restored_position = Some(position);
         self.load_cover(cover);
         self.set_status("Очередь восстановлена из Ynison");
-        if self.ynison.autoplay && self.current().is_some_and(|t| t.available) {
+        if play && self.current().is_some_and(|t| t.available) {
             self.toggle_playback();
         }
     }
@@ -171,10 +397,13 @@ impl App {
             let (entity_type, entity_id) = if let Some(w) = &self.wave { ("RADIO",w.station.as_str()) } else {
                 (match self.context.kind { "playlist" => "PLAYLIST", "album" => "ALBUM", "artist" => "ARTIST", _ => "VARIOUS" }, self.context.item.as_str())
             };
+            let shuffle = self.queue.shuffle_indices();
+            let index = self.queue.pos().map(|i| shuffle.as_ref().map_or(i, |indices| indices[i]));
             let mut queue = json!({"entity_type":entity_type,"entity_id":entity_id,"entity_context":"BASED_ON_ENTITY_BY_DEFAULT",
-                "current_playable_index":self.queue.pos().map(|i| i as i64).unwrap_or(-1),
-                "playable_list":self.queue.tracks().iter().map(|t| json!({"playable_id":t.id,"album_id_optional":t.album_id,"playable_type":"TRACK","title":t.title,"cover_url_optional":t.cover,"from":"ymusic","track_info":{"batch_id_optional":t.batch,"track_source_key":0}})).collect::<Vec<_>>(),
+                "current_playable_index":index.map(|i| i as i64).unwrap_or(-1),
+                "playable_list":self.queue.original_tracks().iter().map(|t| json!({"playable_id":t.id,"album_id_optional":t.album_id,"playable_type":"TRACK","title":t.title,"cover_url_optional":t.cover,"from":"ymusic","track_info":{"batch_id_optional":t.batch,"track_source_key":0}})).collect::<Vec<_>>(),
                 "options":{"repeat_mode":match self.queue.repeat() { Repeat::Off => "NONE", Repeat::All => "ALL", Repeat::One => "ONE" }}});
+            if let Some(indices) = shuffle { queue["shuffle_optional"] = json!({"playable_indices":indices}); }
             if let Some(w) = &self.wave {
                 if let Some(session) = &w.session { queue["adding_options_optional"] = json!({"radio_options":{"session_id":session}}); }
                 if let Some(template) = &self.ynison.template {
@@ -197,8 +426,9 @@ impl App {
             epoch: self.ynison.epoch,
             claim: self.ynison.claim,
             player,
-            volume: self.save_volume() as f64 / 100.0,
+            volume: self.volume.clamp(0.0, 100.0) / 100.0,
             shutdown: false,
+            takeover: self.ynison.takeover,
         }
     }
 }
@@ -237,6 +467,61 @@ mod tests {
             epoch: app.ynison.epoch,
             event: Event::Restore(restored()),
         });
+    }
+
+    #[test]
+    fn remote_shuffle_keeps_the_current_track_and_publishes_the_permutation() {
+        let mut app = App::for_test();
+        app.ynison.autoplay = true;
+        app.set_ynison(true);
+        deliver(&mut app);
+        app.on_ynison(
+            app.ynison.epoch,
+            Event::RemoteQueue {
+                claim: app.ynison.claim,
+                track_ids: vec!["a".into(), "b".into()],
+                shuffle: Some(vec![1, 0]),
+                index: 1,
+                repeat: Repeat::All,
+                position: 42.5,
+                paused: false,
+            },
+        );
+        assert_eq!(app.current().unwrap().id, "b");
+        assert_eq!(app.queue.pos(), Some(0));
+        let desired = app.ynison_desired().player.unwrap();
+        let queue = &desired["player_queue"];
+        assert_eq!(queue["current_playable_index"], 1);
+        assert_eq!(queue["playable_list"][0]["playable_id"], "a");
+        assert_eq!(queue["shuffle_optional"]["playable_indices"], json!([1, 0]));
+    }
+
+    #[test]
+    fn explicit_takeover_plays_even_without_autoplay_and_ignores_superseded_results() {
+        let mut app = App::for_test();
+        app.set_ynison(true);
+        deliver(&mut app);
+        app.take_over_ynison();
+        let stale = app.ynison.takeover.unwrap();
+        app.take_over_ynison();
+        let current = app.ynison.takeover.unwrap();
+        app.on_ynison(
+            app.ynison.epoch,
+            Event::Takeover {
+                request: stale,
+                restored: Some(restored()),
+            },
+        );
+        assert!(app.stopped);
+        app.on_ynison(
+            app.ynison.epoch,
+            Event::Takeover {
+                request: current,
+                restored: Some(restored()),
+            },
+        );
+        assert!(app.ynison.owned && !app.stopped);
+        assert_eq!(app.resume_at, Some(42.5));
     }
     #[test]
     fn restore_waits_for_play_and_resumes_from_position() {

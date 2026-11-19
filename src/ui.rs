@@ -1615,6 +1615,15 @@ fn draw_hints(f: &mut Frame, app: &App, area: Rect) {
                     ("Enter", "открыть"),
                     ("Esc", "закрыть"),
                 ],
+                Modal::YnisonDevices { .. } => &[
+                    ("Enter", "перенос"),
+                    ("␣", "пауза"),
+                    ("n/b", "трек"),
+                    ("←→", "перемотка"),
+                    ("+/-", "громкость"),
+                    ("T/s", "повтор / случайно"),
+                    ("Esc", "закрыть"),
+                ],
                 Modal::ConfirmLogout => &[("Enter", "выйти"), ("Esc", "отмена")],
             }
         } else {
@@ -2017,6 +2026,48 @@ fn draw_modal(f: &mut Frame, app: &App) {
     let i = ic(app);
     let Some(modal) = &app.modal else { return };
     match modal {
+        Modal::YnisonDevices { sel } => {
+            let inner = popup(
+                f,
+                i.note,
+                "Устройства Ynison",
+                54,
+                (app.ynison.phones.len().min(9) + 2) as u16,
+            );
+            let [list, foot] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            let label = |name: &str, id: &str| {
+                let suffix = if app.ynison.active.as_deref() == Some(id) {
+                    " · активен"
+                } else {
+                    ""
+                };
+                ListItem::new(format!("{name}{suffix}"))
+            };
+            let items: Vec<_> =
+                std::iter::once(label(crate::ynison::device_title(), &app.ynison.local))
+                    .chain(
+                        app.ynison
+                            .phones
+                            .iter()
+                            .map(|phone| label(&phone.title, &phone.id)),
+                    )
+                    .collect();
+            let mut state = ratatui::widgets::ListState::default().with_selected(Some(*sel));
+            f.render_stateful_widget(
+                List::new(items)
+                    .highlight_symbol("▌ ")
+                    .highlight_style(Style::new().bg(SEL_BG)),
+                list,
+                &mut state,
+            );
+            let hint = if app.ynison.phones.is_empty() {
+                "Нет подключённых телефонов"
+            } else {
+                "Enter — перенести на выбранное устройство"
+            };
+            f.render_widget(Paragraph::new(hint).style(Style::new().fg(MUTED)), foot);
+        }
         Modal::AddTo {
             track,
             choices,

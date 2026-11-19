@@ -284,8 +284,14 @@ fn main() -> Result<()> {
                 }
             }
             app.tick();
-            if ynison.due(app.ynison.enabled, app.ynison.epoch) {
+            if ynison.due(app.ynison.enabled, app.ynison.epoch) || !app.ynison.commands.is_empty() {
                 ynison.update(app.ynison_desired());
+            }
+            for command in std::mem::take(&mut app.ynison.commands) {
+                if !ynison.command(command) {
+                    app.set_error("Ynison: очередь команд занята");
+                    dirty = true;
+                }
             }
             let now = Instant::now();
             saving.observe(

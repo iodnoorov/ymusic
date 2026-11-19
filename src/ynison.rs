@@ -25,9 +25,72 @@ pub struct Restored {
     pub index: usize,
     pub position: f64,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Device {
+    pub id: String,
+    pub title: String,
+    pub volume_steps: u64,
+}
+
+#[derive(Clone, Debug)]
+pub enum Control {
+    Transfer,
+    Pause,
+    Track(i64),
+    Seek(i64),
+    Volume(f64),
+    Repeat,
+    Shuffle,
+}
+
+pub struct Command {
+    pub epoch: u64,
+    pub target: String,
+    pub control: Control,
+    pub created: Instant,
+}
+
 pub enum Event {
     Restore(Restored),
-    Relinquished { claim: u64 },
+    Devices {
+        phones: Vec<Device>,
+        active: Option<String>,
+        local: String,
+    },
+    ControlUnavailable,
+    RemoteReplacement {
+        claim: u64,
+        restored: Restored,
+        paused: bool,
+    },
+    SelectedLocally {
+        claim: u64,
+        restored: Restored,
+        paused: bool,
+    },
+    Takeover {
+        request: u64,
+        restored: Option<Restored>,
+    },
+    Relinquished {
+        claim: u64,
+    },
+    RemotePlayback {
+        claim: u64,
+        track_id: String,
+        paused: bool,
+        position: f64,
+    },
+    RemoteQueue {
+        claim: u64,
+        track_ids: Vec<String>,
+        shuffle: Option<Vec<usize>>,
+        index: usize,
+        repeat: crate::queue::Repeat,
+        position: f64,
+        paused: bool,
+    },
+    RemoteVolume(f64),
     Error,
 }
 #[derive(Clone, Default)]
@@ -38,10 +101,12 @@ pub struct Desired {
     pub player: Option<Value>,
     pub volume: f64,
     pub shutdown: bool,
+    pub takeover: Option<u64>,
 }
 pub struct Client {
     desired: Arc<Mutex<Desired>>,
     done: mpsc::Receiver<()>,
+    commands: mpsc::SyncSender<Command>,
     last: Instant,
 }
 impl Client {
@@ -55,17 +120,22 @@ impl Client {
         let desired = Arc::new(Mutex::new(Desired::default()));
         let shared = desired.clone();
         let (done_tx, done) = mpsc::channel();
+        let (commands, pending) = mpsc::sync_channel(16);
         std::thread::Builder::new()
             .name("ynison".into())
             .spawn(move || {
-                worker(Identity { token, uid, device }, api, tx, shared);
+                worker(Identity { token, uid, device }, api, tx, shared, pending);
                 let _ = done_tx.send(());
             })?;
         Ok(Self {
             desired,
             done,
+            commands,
             last: Instant::now() - Duration::from_secs(2),
         })
+    }
+    pub fn command(&self, command: Command) -> bool {
+        self.commands.try_send(command).is_ok()
     }
     pub fn due(&self, enabled: bool, epoch: u64) -> bool {
         let d = self.desired.locked();
@@ -169,7 +239,24 @@ fn recv(ws: &mut Socket) -> Result<Option<Value>> {
         Err(e) => Err(e.into()),
     }
 }
-fn connect(id: &Identity) -> Result<Socket> {
+pub fn device_title() -> &'static str {
+    static TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TITLE.get_or_init(|| {
+        let mut buffer = [0u8; 256];
+        // SAFETY: the buffer is writable and its length is passed alongside its pointer.
+        let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+        let name = (result == 0)
+            .then(|| buffer.split(|&byte| byte == 0).next())
+            .flatten()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|hostname| hostname.split('.').next())
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        format!("ynison-{}", name.unwrap_or("localhost"))
+    })
+}
+
+fn connect(id: &Identity, volume: f64) -> Result<Socket> {
     let mut headers = json!({"Ynison-Device-Id":id.device,"Ynison-Device-Info":json!({"app_name":"ymusic","app_version":env!("CARGO_PKG_VERSION"),"type":1}).to_string(),"authorization":format!("OAuth {}",id.token),"X-Yandex-Music-Multi-Auth-User-Id":id.uid});
     let mut redirector = open(
         REDIRECTOR,
@@ -188,7 +275,7 @@ fn connect(id: &Identity) -> Result<Socket> {
     )?;
     let empty = json!({"device_id":id.device,"version":0,"timestamp_ms":0});
     let state = json!({"player_queue":{"current_playable_index":-1,"entity_id":"","entity_type":"VARIOUS","playable_list":[],"options":{"repeat_mode":"NONE"},"entity_context":"BASED_ON_ENTITY_BY_DEFAULT","version":empty},"status":{"duration_ms":0,"paused":true,"playback_speed":1,"progress_ms":0,"version":empty}});
-    let full = json!({"player_state":state,"device":{"volume":0.5,"capabilities":{"can_be_player":true,"can_be_remote_controller":false,"volume_granularity":100},"info":{"device_id":id.device,"type":"WEB","title":"ymusic","app_name":"ymusic","app_version":env!("CARGO_PKG_VERSION")},"volume_info":{"volume":0.5,"version":null},"is_shadow":false},"is_currently_active":false});
+    let full = json!({"player_state":state,"device":{"volume":volume,"capabilities":{"can_be_player":true,"can_be_remote_controller":true,"volume_granularity":100},"info":{"device_id":id.device,"type":"WEB","title":device_title(),"app_name":"ymusic","app_version":env!("CARGO_PKG_VERSION")},"volume_info":{"volume":volume,"version":null},"is_shadow":false},"is_currently_active":false});
     ws.send(Message::Text(json!({"update_full_state":full,"rid":crate::api::random_uuid(),"player_action_timestamp_ms":0,"activity_interception_type":"DO_NOT_INTERCEPT_BY_DEFAULT"}).to_string()))?;
     match ws.get_ref() {
         MaybeTlsStream::Rustls(t) => t
@@ -201,6 +288,145 @@ fn connect(id: &Identity) -> Result<Socket> {
 fn number(v: &Value) -> Option<u64> {
     v.as_u64().or_else(|| v.as_str()?.parse().ok())
 }
+fn current_id(queue: &Value) -> Option<&str> {
+    let index = usize::try_from(number(&queue["current_playable_index"])?).ok()?;
+    queue["playable_list"].get(index)?["playable_id"].as_str()
+}
+
+#[derive(Default)]
+struct RemoteVersions {
+    status: u64,
+    queue: u64,
+    volume: u64,
+}
+
+impl RemoteVersions {
+    fn accept(version: &Value, device: &str, previous: &mut u64) -> bool {
+        let (Some(author), Some(timestamp)) = (
+            version["device_id"].as_str(),
+            number(&version["timestamp_ms"]),
+        ) else {
+            return false;
+        };
+        if timestamp <= *previous {
+            return false;
+        }
+        *previous = timestamp;
+        !author.is_empty() && author != device
+    }
+
+    fn volume_event(&mut self, frame: &Value, device: &str) -> Option<Event> {
+        let target = frame["devices"]
+            .as_array()?
+            .iter()
+            .find(|d| d["info"]["device_id"] == device)?;
+        let info = &target["volume_info"];
+        if !Self::accept(&info["version"], device, &mut self.volume) {
+            return None;
+        }
+        let volume = info["volume"]
+            .as_f64()
+            .filter(|v| (0.0..=1.0).contains(v))?;
+        Some(Event::RemoteVolume(volume))
+    }
+
+    fn events(&mut self, frame: &Value, device: &str, desired: &Desired, api: &Api) -> Vec<Event> {
+        let Some(local) = desired.player.as_ref() else {
+            return Vec::new();
+        };
+        if frame["active_device_id_optional"].as_str() != Some(device) {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        let state = &frame["player_state"];
+        let status = &state["status"];
+        let queue = &state["player_queue"];
+        let position = number(&status["progress_ms"]).map(|p| p as f64 / 1000.0);
+        let paused = status["paused"].as_bool();
+        let status_changed = Self::accept(&status["version"], device, &mut self.status);
+        let queue_changed = Self::accept(&queue["version"], device, &mut self.queue);
+        if queue_changed
+            && let Some(items) = queue["playable_list"].as_array()
+            && let Some(local_items) = local["player_queue"]["playable_list"].as_array()
+            && items.len() == local_items.len()
+            && items
+                .iter()
+                .zip(local_items)
+                .all(|(a, b)| a["playable_id"] == b["playable_id"])
+            && let Some(track_ids) = items
+                .iter()
+                .map(|p| p["playable_id"].as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+            && let Some(index) = number(&queue["current_playable_index"])
+                .and_then(|i| usize::try_from(i).ok())
+                .filter(|&i| i < items.len())
+            && let (Some(position), Some(paused)) = (position, paused)
+        {
+            use crate::queue::Repeat;
+            let repeat = match queue["options"]["repeat_mode"].as_str() {
+                Some("ONE") => Repeat::One,
+                Some("ALL") => Repeat::All,
+                _ => Repeat::Off,
+            };
+            events.push(Event::RemoteQueue {
+                claim: desired.claim,
+                track_ids,
+                shuffle: order(queue, items.len()),
+                index,
+                repeat,
+                position,
+                paused,
+            });
+        } else if queue_changed {
+            if let Some(paused) = paused
+                && let Ok(Some(restored)) = restore(frame, api)
+            {
+                events.push(Event::RemoteReplacement {
+                    claim: desired.claim,
+                    restored,
+                    paused,
+                });
+            }
+        } else if status_changed
+            && let Some(id) = current_id(&state["player_queue"])
+            && current_id(&local["player_queue"]) == Some(id)
+            && let (Some(paused), Some(progress)) =
+                (status["paused"].as_bool(), number(&status["progress_ms"]))
+        {
+            events.push(Event::RemotePlayback {
+                claim: desired.claim,
+                track_id: id.to_owned(),
+                paused,
+                position: progress as f64 / 1000.0,
+            });
+        }
+        events
+    }
+}
+fn live_position(status: &Value) -> Option<u64> {
+    let position = number(&status["progress_ms"])?;
+    let elapsed = match (
+        status["paused"].as_bool(),
+        number(&status["version"]["timestamp_ms"]),
+    ) {
+        (Some(false), Some(timestamp)) if timestamp > 0 => now_ms().saturating_sub(timestamp),
+        _ => 0,
+    };
+    let speed = status["playback_speed"]
+        .as_f64()
+        .filter(|v| (0.1..=10.0).contains(v))
+        .unwrap_or(1.0);
+    Some(position.saturating_add((elapsed as f64 * speed) as u64))
+}
+
+fn restore_live(frame: &Value, api: &Api) -> Option<Restored> {
+    let mut restored = restore(frame, api).ok().flatten()?;
+    if let Some(position) = live_position(&frame["player_state"]["status"]) {
+        restored.position = position as f64 / 1000.0;
+    }
+    Some(restored)
+}
+
 fn restore(v: &Value, api: &Api) -> Result<Option<Restored>> {
     let q = &v["player_state"]["player_queue"];
     let Some(items) = q["playable_list"]
@@ -273,12 +499,179 @@ fn publish(
     ws.send(Message::Text(msg.to_string()))?;
     Ok(())
 }
-fn worker(id: Identity, api: Api, tx: mpsc::Sender<Msg>, desired: Arc<Mutex<Desired>>) {
+fn devices(frame: &Value) -> Vec<Device> {
+    let mut phones: Vec<_> = frame["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| {
+            matches!(d["info"]["type"].as_str(), Some("ANDROID" | "IOS"))
+                && d["is_offline"] != true
+                && d["capabilities"]["can_be_player"] == true
+        })
+        .filter_map(|d| {
+            Some(Device {
+                id: d["info"]["device_id"].as_str()?.to_owned(),
+                title: d["info"]["title"]
+                    .as_str()
+                    .or_else(|| d["info"]["app_name"].as_str())
+                    .unwrap_or("Телефон")
+                    .to_owned(),
+                volume_steps: number(&d["capabilities"]["volume_granularity"]).unwrap_or(0),
+            })
+        })
+        .collect();
+    phones.sort_by(|a, b| a.id.cmp(&b.id));
+    phones.dedup_by(|a, b| a.id == b.id);
+    phones
+}
+
+pub fn order(queue: &Value, count: usize) -> Option<Vec<usize>> {
+    let entries = queue["shuffle_optional"]["playable_indices"].as_array()?;
+    if entries.len() != count {
+        return None;
+    }
+    let mut seen = vec![false; count];
+    entries
+        .iter()
+        .map(|entry| {
+            let index = usize::try_from(number(entry)?).ok()?;
+            (!std::mem::replace(seen.get_mut(index)?, true)).then_some(index)
+        })
+        .collect()
+}
+
+fn control_message(frame: &Value, local: &str, phone: &Device, control: &Control) -> Option<Value> {
+    let active = frame["active_device_id_optional"].as_str()?;
+    if matches!(control, Control::Transfer) {
+        return (active == local).then(|| {
+            envelope(
+                "update_active_device",
+                json!({"device_id_optional":phone.id}),
+                false,
+            )
+        });
+    }
+    if active != phone.id {
+        return None;
+    }
+    if let Control::Volume(delta) = control {
+        if phone.volume_steps == 0 {
+            return None;
+        }
+        let d = frame["devices"]
+            .as_array()?
+            .iter()
+            .find(|d| d["info"]["device_id"] == phone.id)?;
+        let volume = d["volume_info"]["volume"]
+            .as_f64()
+            .or_else(|| d["volume"].as_f64())?;
+        let steps = phone.volume_steps as f64;
+        let volume = (((volume + delta.signum() * delta.abs().max(1.0 / steps)).clamp(0.0, 1.0)
+            * steps)
+            .round()
+            / steps)
+            .clamp(0.0, 1.0);
+        return Some(envelope(
+            "update_volume_info",
+            json!({"device_id":phone.id,"volume_info":{"volume":volume,"version":version(local)}}),
+            false,
+        ));
+    }
+    let mut state = frame.get("player_state")?.clone();
+    let queue = &mut state["player_queue"];
+    let len = queue["playable_list"].as_array()?.len();
+    let index = usize::try_from(number(&queue["current_playable_index"])?).ok()?;
+    if index >= len {
+        return None;
+    }
+    let mut queue_changed = true;
+    let mut track_changed = false;
+    match control {
+        Control::Transfer | Control::Volume(_) => return None,
+        Control::Pause | Control::Seek(_) => queue_changed = false,
+        Control::Repeat => {
+            queue["options"]["repeat_mode"] =
+                json!(match queue["options"]["repeat_mode"].as_str() {
+                    Some("ALL") => "ONE",
+                    Some("ONE") => "NONE",
+                    _ => "ALL",
+                });
+        }
+        Control::Shuffle => {
+            if queue["entity_type"] == "RADIO" {
+                return None;
+            }
+            queue["shuffle_optional"] = if order(queue, len).is_some() {
+                Value::Null
+            } else {
+                let mut indices: Vec<_> = (0..len).filter(|&i| i != index).collect();
+                crate::queue::shuffle(&mut indices);
+                indices.insert(0, index);
+                json!({"playable_indices":indices})
+            };
+        }
+        Control::Track(delta) => {
+            let indices = order(queue, len).unwrap_or_else(|| (0..len).collect());
+            let current = indices.iter().position(|&i| i == index)? as i64;
+            let mut next = current + delta;
+            if queue["options"]["repeat_mode"] == "ALL" {
+                next = next.rem_euclid(len as i64);
+            }
+            let next = *indices.get(usize::try_from(next).ok()?)?;
+            queue["current_playable_index"] = json!(next);
+            if queue["queue"]["wave_queue"].is_object() {
+                queue["queue"]["wave_queue"]["live_playable_index"] = json!(next);
+            }
+            track_changed = true;
+        }
+    }
+    let status = &mut state["status"];
+    let paused = status["paused"].as_bool()?;
+    let duration = number(&status["duration_ms"]).unwrap_or(0);
+    let mut position = live_position(status)?;
+    if let Control::Seek(delta) = control {
+        position = position.saturating_add_signed(*delta);
+    }
+    status["progress_ms"] = json!(if track_changed {
+        0
+    } else if duration > 0 {
+        position.min(duration)
+    } else {
+        position
+    });
+    if track_changed {
+        status["duration_ms"] = json!(0);
+    }
+    if matches!(control, Control::Pause) {
+        status["paused"] = json!(!paused);
+    }
+    status["version"] = version(local);
+    Some(if queue_changed {
+        state["player_queue"]["version"] = version(local);
+        envelope("update_player_state", json!({"player_state":state}), false)
+    } else {
+        envelope(
+            "update_playing_status",
+            json!({"playing_status":status}),
+            false,
+        )
+    })
+}
+
+fn worker(
+    id: Identity,
+    api: Api,
+    tx: mpsc::Sender<Msg>,
+    desired: Arc<Mutex<Desired>>,
+    commands: mpsc::Receiver<Command>,
+) {
     let mut retry = Instant::now();
     let mut failed = false;
     let mut forbidden_epoch = None;
     let mut last_claim = None;
     let mut blocked_claim = None;
+    let mut handled_takeover = None;
     loop {
         let d = desired.locked().clone();
         if d.shutdown {
@@ -289,49 +682,112 @@ fn worker(id: Identity, api: Api, tx: mpsc::Sender<Msg>, desired: Arc<Mutex<Desi
             continue;
         }
         let result = (|| -> Result<()> {
-            let mut ws = connect(&id)?;
+            let mut ws = connect(&id, d.volume)?;
             let mut previous = None;
             let mut restored = false;
             let mut claimed = None;
             let mut blocked = blocked_claim
                 .filter(|(epoch, _)| *epoch == d.epoch)
                 .map(|(_, claim)| claim);
-            let mut volume = -1.0;
+            let mut volume = d.volume;
             let mut received = false;
             let mut confirmed = false;
+            let mut remote_versions = RemoteVersions::default();
+            let mut snapshot: Option<Value> = None;
+            let mut visible = None;
+            let mut phones = Vec::new();
+            let mut command_ack: Option<(String, Instant)> = None;
+            let mut switched_here = false;
+            let connected_at = Instant::now();
             loop {
                 let current = desired.locked().clone();
                 if !current.enabled || current.epoch != d.epoch {
                     let _ = ws.close(None);
                     return Ok(());
                 }
-                if let Some(state) = current.player.as_ref().filter(|_| received) {
-                    if blocked.is_none_or(|c| current.claim > c)
-                        && (claimed != Some(current.claim)
-                            || previous.as_ref() != Some(state)
-                            || current.shutdown)
-                    {
-                        let claim = claimed != Some(current.claim);
-                        publish(&mut ws, &id, state, previous.as_ref(), claim)?;
-                        previous = Some(state.clone());
-                        claimed = Some(current.claim);
-                        last_claim = Some((d.epoch, current.claim));
-                    }
-                    if blocked.is_none_or(|c| current.claim > c) && current.volume != volume {
-                        let msg = envelope(
-                            "update_volume_info",
-                            json!({"device_id":id.device,"volume_info":{"volume":current.volume,"version":version(&id.device)}}),
-                            false,
-                        );
-                        ws.send(Message::Text(msg.to_string()))?;
-                        volume = current.volume;
-                    }
+                if let Some(state) = current.player.as_ref().filter(|_| received)
+                    && blocked.is_none_or(|c| current.claim > c)
+                    && (claimed != Some(current.claim)
+                        || previous.as_ref() != Some(state)
+                        || current.shutdown)
+                {
+                    let claim = claimed != Some(current.claim);
+                    publish(&mut ws, &id, state, previous.as_ref(), claim)?;
+                    previous = Some(state.clone());
+                    claimed = Some(current.claim);
+                    last_claim = Some((d.epoch, current.claim));
+                }
+                if received && current.volume != volume {
+                    let msg = envelope(
+                        "update_volume_info",
+                        json!({"device_id":id.device,"volume_info":{"volume":current.volume,"version":version(&id.device)}}),
+                        false,
+                    );
+                    ws.send(Message::Text(msg.to_string()))?;
+                    volume = current.volume;
                 }
                 if current.shutdown {
                     let _ = ws.close(None);
                     return Ok(());
                 }
+                if command_ack
+                    .as_ref()
+                    .is_some_and(|(_, deadline)| Instant::now() >= *deadline)
+                {
+                    command_ack = None;
+                    let _ = tx.send(Msg::Ynison {
+                        epoch: d.epoch,
+                        event: Event::ControlUnavailable,
+                    });
+                }
+                // Wait for the server echo before calculating the next relative command.
+                if command_ack.is_none()
+                    && let Some(frame) = snapshot.as_ref()
+                    && let Ok(command) = commands.try_recv()
+                    && command.epoch == d.epoch
+                    && command.created >= connected_at
+                    && command.created.elapsed() < Duration::from_secs(3)
+                {
+                    let message = phones
+                        .iter()
+                        .find(|phone: &&Device| phone.id == command.target)
+                        .and_then(|phone| {
+                            control_message(frame, &id.device, phone, &command.control)
+                        });
+                    if let Some(message) = message {
+                        ws.send(Message::Text(message.to_string()))?;
+                        command_ack = Some((
+                            message["rid"].as_str().unwrap().to_owned(),
+                            Instant::now() + Duration::from_secs(2),
+                        ));
+                    } else {
+                        let _ = tx.send(Msg::Ynison {
+                            epoch: d.epoch,
+                            event: Event::ControlUnavailable,
+                        });
+                    }
+                }
+                if let Some(request) = current.takeover
+                    && handled_takeover != Some((d.epoch, request))
+                    && let Some(frame) = snapshot.as_ref()
+                {
+                    handled_takeover = Some((d.epoch, request));
+                    let restored = frame["active_device_id_optional"]
+                        .as_str()
+                        .filter(|active| *active != id.device)
+                        .and_then(|_| restore_live(frame, &api));
+                    let _ = tx.send(Msg::Ynison {
+                        epoch: d.epoch,
+                        event: Event::Takeover { request, restored },
+                    });
+                }
                 if let Some(v) = recv(&mut ws)? {
+                    if command_ack
+                        .as_ref()
+                        .is_some_and(|(rid, _)| v["rid"] == rid.as_str())
+                    {
+                        command_ack = None;
+                    }
                     if let Some(e) = v.get("error") {
                         if number(&e["grpc_code"]) == Some(16)
                             || number(&e["http_code"]) == Some(401)
@@ -350,6 +806,20 @@ fn worker(id: Identity, api: Api, tx: mpsc::Sender<Msg>, desired: Arc<Mutex<Desi
                     if v["active_device_id_optional"].as_str() == Some(id.device.as_str()) {
                         confirmed = true;
                     }
+                    if let Some(event) = remote_versions.volume_event(&v, &id.device) {
+                        let _ = tx.send(Msg::Ynison {
+                            epoch: d.epoch,
+                            event,
+                        });
+                    }
+                    if claimed == Some(current.claim) {
+                        for event in remote_versions.events(&v, &id.device, &current, &api) {
+                            let _ = tx.send(Msg::Ynison {
+                                epoch: d.epoch,
+                                event,
+                            });
+                        }
+                    }
                     if (confirmed && claimed.is_some() || reconnecting)
                         && v["active_device_id_optional"]
                             .as_str()
@@ -364,15 +834,65 @@ fn worker(id: Identity, api: Api, tx: mpsc::Sender<Msg>, desired: Arc<Mutex<Desi
                             event: Event::Relinquished { claim },
                         });
                     }
-                    if !restored
+                    let active_here =
+                        v["active_device_id_optional"].as_str() == Some(id.device.as_str());
+                    let status = &v["player_state"]["status"];
+                    switched_here = active_here
+                        && (switched_here
+                            || snapshot.as_ref().is_some_and(|previous| {
+                                previous["active_device_id_optional"]
+                                    .as_str()
+                                    .is_some_and(|prior| prior != id.device)
+                            }));
+                    if switched_here
                         && current.player.is_none()
-                        && let Some(r) = restore(&v, &api)?
+                        && current.takeover.is_none()
+                        && let Some(paused) = status["paused"].as_bool()
                     {
-                        restored = true;
-                        let _ = tx.send(Msg::Ynison {
-                            epoch: d.epoch,
-                            event: Event::Restore(r),
-                        });
+                        switched_here = false;
+                        if let Some(loaded) = restore_live(&v, &api) {
+                            restored = true;
+                            let _ = tx.send(Msg::Ynison {
+                                epoch: d.epoch,
+                                event: Event::SelectedLocally {
+                                    claim: current.claim,
+                                    restored: loaded,
+                                    paused,
+                                },
+                            });
+                        }
+                    }
+                    if !restored && current.player.is_none() && current.takeover.is_none() {
+                        match restore(&v, &api) {
+                            Ok(Some(r)) => {
+                                restored = true;
+                                let _ = tx.send(Msg::Ynison {
+                                    epoch: d.epoch,
+                                    event: Event::Restore(r),
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(_) => restored = true,
+                        }
+                    }
+                    if v.get("devices").is_some() {
+                        phones = devices(&v);
+                        let active = v["active_device_id_optional"].as_str().map(str::to_owned);
+                        let view = (phones.clone(), active);
+                        if visible.as_ref() != Some(&view) {
+                            let _ = tx.send(Msg::Ynison {
+                                epoch: d.epoch,
+                                event: Event::Devices {
+                                    phones: view.0.clone(),
+                                    active: view.1.clone(),
+                                    local: id.device.clone(),
+                                },
+                            });
+                            visible = Some(view);
+                        }
+                    }
+                    if v.get("player_state").is_some() {
+                        snapshot = Some(v);
                     }
                 }
             }
@@ -393,6 +913,116 @@ fn worker(id: Identity, api: Api, tx: mpsc::Sender<Msg>, desired: Arc<Mutex<Desi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn phone_controls_follow_shuffle_and_keep_the_active_device() {
+        let phone = Device {
+            id: "phone".into(),
+            title: "Android".into(),
+            volume_steps: 10,
+        };
+        let mut frame = json!({
+            "active_device_id_optional":"phone",
+            "devices":[{"info":{"device_id":"phone"},"volume_info":{"volume":0.5}}],
+            "player_state":{
+                "player_queue":{
+                    "current_playable_index":2,
+                    "playable_list":[{"playable_id":"a"},{"playable_id":"b"},{"playable_id":"c"}],
+                    "shuffle_optional":{"playable_indices":[2,0,1]},
+                    "options":{"repeat_mode":"ALL"}
+                },
+                "status":{"paused":true,"progress_ms":12000,"duration_ms":60000}
+            }
+        });
+        let control = |command| control_message(&frame, "local", &phone, &command).unwrap();
+        let next = control(Control::Track(1));
+        let state = &next["update_player_state"]["player_state"];
+        assert_eq!(state["player_queue"]["current_playable_index"], 0);
+        assert_eq!(state["status"]["progress_ms"], 0);
+        assert_eq!(
+            next["activity_interception_type"],
+            "DO_NOT_INTERCEPT_BY_DEFAULT"
+        );
+        let prev = control(Control::Track(-1));
+        assert_eq!(
+            prev["update_player_state"]["player_state"]["player_queue"]["current_playable_index"],
+            1
+        );
+        assert_eq!(
+            control(Control::Seek(-10000))["update_playing_status"]["playing_status"]["progress_ms"],
+            2000
+        );
+        assert_eq!(
+            control(Control::Pause)["update_playing_status"]["playing_status"]["paused"],
+            false
+        );
+        assert_eq!(
+            control(Control::Volume(0.05))["update_volume_info"]["volume_info"]["volume"],
+            0.6
+        );
+        assert!(control(Control::Shuffle)["update_player_state"]["player_state"]["player_queue"]["shuffle_optional"].is_null());
+        frame["active_device_id_optional"] = json!("local");
+        assert!(control_message(&frame, "local", &phone, &Control::Pause).is_none());
+        assert_eq!(
+            control_message(&frame, "local", &phone, &Control::Transfer).unwrap()["update_active_device"]
+                ["device_id_optional"],
+            "phone"
+        );
+    }
+
+    #[test]
+    fn remote_updates_require_the_local_target_and_a_new_external_version() {
+        let queue = json!({"current_playable_index":"0","playable_list":[{"playable_id":"42"}]});
+        let desired = Desired {
+            claim: 3,
+            player: Some(json!({"player_queue":queue})),
+            ..Desired::default()
+        };
+        let mut frame = json!({
+            "active_device_id_optional":"phone",
+            "player_state":{
+                "player_queue":queue,
+                "status":{"paused":true,"progress_ms":"2500",
+                          "version":{"device_id":"phone","timestamp_ms":"10"}}
+            },
+            "devices":[{"info":{"device_id":"local"},
+                        "volume_info":{"volume":0.75,
+                                       "version":{"device_id":"phone","timestamp_ms":9}}}]
+        });
+        let mut versions = RemoteVersions::default();
+        assert!(
+            versions
+                .events(&frame, "local", &desired, &Api::new("unused"))
+                .is_empty()
+        );
+        assert!(matches!(
+            versions.volume_event(&frame, "local"),
+            Some(Event::RemoteVolume(0.75))
+        ));
+        assert!(versions.volume_event(&frame, "local").is_none());
+        frame["active_device_id_optional"] = json!("local");
+        assert!(matches!(
+            versions
+                .events(&frame, "local", &desired, &Api::new("unused"))
+                .as_slice(),
+            [Event::RemotePlayback {
+                claim: 3,
+                paused: true,
+                position: 2.5,
+                ..
+            }]
+        ));
+        assert!(
+            versions
+                .events(&frame, "local", &desired, &Api::new("unused"))
+                .is_empty()
+        );
+        frame["player_state"]["status"]["version"] = json!({"device_id":"local","timestamp_ms":11});
+        assert!(
+            versions
+                .events(&frame, "local", &desired, &Api::new("unused"))
+                .is_empty()
+        );
+    }
     #[test]
     fn invalid_indices_and_number_formats() {
         assert_eq!(number(&json!("50866")), Some(50866));
@@ -469,7 +1099,7 @@ mod tests {
             uid: account.uid,
             device: crate::api::random_uuid(),
         };
-        let mut ws = connect(&id).unwrap();
+        let mut ws = connect(&id, 0.5).unwrap();
         let until = Instant::now() + Duration::from_secs(12);
         while Instant::now() < until {
             if let Some(v) = recv(&mut ws).unwrap() {
