@@ -296,6 +296,11 @@ pub enum Theme {
     #[default]
     Dark,
     Light,
+    Transparent,
+}
+
+impl Theme {
+    const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Transparent];
 }
 
 /// Rows of the settings window.
@@ -2381,6 +2386,7 @@ impl App {
             Setting::Theme => match self.theme {
                 Theme::Dark => "тёмная",
                 Theme::Light => "светлая",
+                Theme::Transparent => "прозрачная",
             }
             .into(),
             Setting::Icons => if self.icons { "вкл" } else { "выкл" }.to_string(),
@@ -2490,10 +2496,11 @@ impl App {
             }
             Setting::Icons => self.set_icons(!self.icons),
             Setting::Theme => {
-                self.theme = match self.theme {
-                    Theme::Dark => Theme::Light,
-                    Theme::Light => Theme::Dark,
-                }
+                let i = Theme::ALL
+                    .iter()
+                    .position(|theme| *theme == self.theme)
+                    .unwrap_or(0);
+                self.theme = Theme::ALL[cycle(i, Theme::ALL.len())];
             }
             Setting::Output => {
                 let i = Output::ALL
@@ -3342,6 +3349,14 @@ mod tests {
         app.on_key(key(KeyCode::Char('j')));
         assert_eq!(app.theme, Theme::Dark);
         app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.theme, Theme::Light);
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.theme, Theme::Transparent);
+        app.on_key(key(KeyCode::Right));
+        assert_eq!(app.theme, Theme::Dark);
+        app.on_key(key(KeyCode::Left));
+        assert_eq!(app.theme, Theme::Transparent);
+        app.on_key(key(KeyCode::Left));
         assert_eq!(app.theme, Theme::Light);
         app.on_key(key(KeyCode::Left));
         assert_eq!(app.theme, Theme::Dark);

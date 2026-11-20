@@ -59,6 +59,13 @@ impl Palette {
                 selection: Color::Rgb(230, 224, 210),
                 on_accent: Color::Rgb(255, 251, 238),
             },
+            Theme::Transparent => Self {
+                background: Color::Reset,
+                text: Color::Reset,
+                muted: Color::Rgb(98, 98, 116),
+                border: Color::Rgb(62, 62, 78),
+                ..Self::for_theme(Theme::Dark)
+            },
         }
     }
 
@@ -2564,10 +2571,11 @@ mod tests {
     #[test]
     fn theme_repaints_the_settings_window_and_the_main_screen() {
         use crate::app::{Modal, Theme};
+        use ratatui::style::Color;
         let mut app = App::for_test();
         app.modal = Some(Modal::Settings { sel: 0 });
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        for theme in [Theme::Dark, Theme::Light, Theme::Dark] {
+        for theme in [Theme::Dark, Theme::Light, Theme::Transparent, Theme::Dark] {
             app.theme = theme;
             term.draw(|f| super::draw(f, &mut app)).unwrap();
             let buffer = term.backend().buffer();
@@ -2577,6 +2585,9 @@ mod tests {
             assert_eq!(buffer[(12, 2)].bg, palette.background);
             assert_eq!(buffer[(12, 2)].fg, palette.text);
         }
+        let transparent = super::Palette::for_theme(Theme::Transparent);
+        assert_eq!(transparent.background, Color::Reset);
+        assert_eq!(transparent.text, Color::Reset);
     }
 
     #[test]

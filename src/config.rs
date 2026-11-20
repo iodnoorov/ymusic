@@ -332,6 +332,12 @@ mod tests {
         let light: Settings = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
         assert_eq!(light.theme, Theme::Light);
         assert_eq!(serde_json::to_value(&light).unwrap()["theme"], "light");
+        let transparent: Settings = serde_json::from_str(r#"{"theme":"transparent"}"#).unwrap();
+        assert_eq!(transparent.theme, Theme::Transparent);
+        assert_eq!(
+            serde_json::to_value(&transparent).unwrap()["theme"],
+            "transparent"
+        );
         let audio: Settings = serde_json::from_str(r#"{"show_audio_info":true}"#).unwrap();
         assert!(audio.show_audio_info);
         assert_eq!(
